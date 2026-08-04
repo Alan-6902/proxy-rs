@@ -50,7 +50,6 @@ const api = {
     email: string
     idp?: string
     needsTokenRefresh?: boolean
-    machineId?: string  // 账户绑定的设备 ID
     credentials: {
       refreshToken: string
       clientId?: string
@@ -398,62 +397,6 @@ const api = {
     return ipcRenderer.invoke('set-proxy', enabled, url)
   },
 
-  // ============ 机器码管理 API ============
-
-  // 获取操作系统类型
-  machineIdGetOSType: (): Promise<'windows' | 'macos' | 'linux' | 'unknown'> => {
-    return ipcRenderer.invoke('machine-id:get-os-type')
-  },
-
-  // 获取当前机器码
-  machineIdGetCurrent: (): Promise<{
-    success: boolean
-    machineId?: string
-    error?: string
-    requiresAdmin?: boolean
-  }> => {
-    return ipcRenderer.invoke('machine-id:get-current')
-  },
-
-  // 设置新机器码
-  machineIdSet: (newMachineId: string): Promise<{
-    success: boolean
-    machineId?: string
-    error?: string
-    requiresAdmin?: boolean
-  }> => {
-    return ipcRenderer.invoke('machine-id:set', newMachineId)
-  },
-
-  // 生成随机机器码
-  machineIdGenerateRandom: (): Promise<string> => {
-    return ipcRenderer.invoke('machine-id:generate-random')
-  },
-
-  // 检查管理员权限
-  machineIdCheckAdmin: (): Promise<boolean> => {
-    return ipcRenderer.invoke('machine-id:check-admin')
-  },
-
-  // 请求管理员权限重启
-  machineIdRequestAdminRestart: (): Promise<boolean> => {
-    return ipcRenderer.invoke('machine-id:request-admin-restart')
-  },
-
-  // 备份机器码到文件
-  machineIdBackupToFile: (machineId: string): Promise<boolean> => {
-    return ipcRenderer.invoke('machine-id:backup-to-file', machineId)
-  },
-
-  // 从文件恢复机器码
-  machineIdRestoreFromFile: (): Promise<{
-    success: boolean
-    machineId?: string
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('machine-id:restore-from-file')
-  },
-
   // ============ 自动更新 ============
   
   // 检查更新 (electron-updater)
@@ -699,7 +642,7 @@ const api = {
   },
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-add-account', account)
   },
 
@@ -709,7 +652,7 @@ const api = {
   },
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string; machineId?: string }>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-sync-accounts', accounts)
   },
 
@@ -743,23 +686,23 @@ const api = {
   },
 
   // 获取账户可用模型列表
-  accountGetModels: (accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }> => {
-    return ipcRenderer.invoke('account-get-models', accessToken, region, profileArn, machineId, provider, authMethod, accountId)
+  accountGetModels: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }> => {
+    return ipcRenderer.invoke('account-get-models', accessToken, region, profileArn, provider, authMethod, accountId)
   },
 
   // 获取可用订阅列表
-  accountGetSubscriptions: (accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }> => {
-    return ipcRenderer.invoke('account-get-subscriptions', accessToken, region, profileArn, machineId, provider, authMethod, accountId)
+  accountGetSubscriptions: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }> => {
+    return ipcRenderer.invoke('account-get-subscriptions', accessToken, region, profileArn, provider, authMethod, accountId)
   },
 
   // 获取订阅管理/支付链接
-  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
-    return ipcRenderer.invoke('account-get-subscription-url', accessToken, subscriptionType, region, profileArn, machineId, provider, authMethod, accountId)
+  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
+    return ipcRenderer.invoke('account-get-subscription-url', accessToken, subscriptionType, region, profileArn, provider, authMethod, accountId)
   },
 
   // 设置用户超额偏好
-  accountSetOverage: (accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('account-set-overage', accessToken, overageStatus, region, profileArn, machineId, provider, authMethod, accountId)
+  accountSetOverage: (accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('account-set-overage', accessToken, overageStatus, region, profileArn, provider, authMethod, accountId)
   },
 
   // 在新窗口打开订阅链接
@@ -855,83 +798,6 @@ const api = {
     return ipcRenderer.invoke('set-usage-api-type', type)
   },
 
-  // 获取是否使用 K-Proxy 代理
-  getUseKProxyForApi: (): Promise<boolean> => {
-    return ipcRenderer.invoke('get-use-kproxy-for-api')
-  },
-
-  // 设置是否使用 K-Proxy 代理
-  setUseKProxyForApi: (enabled: boolean): Promise<{ success: boolean; enabled: boolean }> => {
-    return ipcRenderer.invoke('set-use-kproxy-for-api', enabled)
-  },
-
-  // ============ K-Proxy MITM 代理 ============
-
-  // 初始化 K-Proxy
-  kproxyInit: (): Promise<{ success: boolean; caInfo?: { certPath: string; fingerprint: string; validFrom: string; validTo: string }; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-init')
-  },
-
-  // 启动 K-Proxy
-  kproxyStart: (config?: { port?: number; host?: string; mitmDomains?: string[]; deviceId?: string }): Promise<{ success: boolean; port?: number; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-start', config)
-  },
-
-  // 停止 K-Proxy
-  kproxyStop: (): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-stop')
-  },
-
-  // 获取 K-Proxy 状态
-  kproxyGetStatus: (): Promise<{ running: boolean; config: unknown; stats: unknown; caInfo: unknown }> => {
-    return ipcRenderer.invoke('kproxy-get-status')
-  },
-
-  // 更新 K-Proxy 配置
-  kproxyUpdateConfig: (config: { port?: number; host?: string; mitmDomains?: string[]; deviceId?: string; autoStart?: boolean; logRequests?: boolean }): Promise<{ success: boolean; config?: unknown; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-update-config', config)
-  },
-
-  // 设置当前设备 ID
-  kproxySetDeviceId: (deviceId: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-set-device-id', deviceId)
-  },
-
-  // 生成新的设备 ID
-  kproxyGenerateDeviceId: (): Promise<{ success: boolean; deviceId?: string }> => {
-    return ipcRenderer.invoke('kproxy-generate-device-id')
-  },
-
-  // 添加设备 ID 映射
-  kproxyAddDeviceMapping: (mapping: { accountId: string; deviceId: string; description?: string; createdAt: number }): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-add-device-mapping', mapping)
-  },
-
-  // 获取所有设备 ID 映射
-  kproxyGetDeviceMappings: (): Promise<{ success: boolean; mappings: Array<{ accountId: string; deviceId: string; description?: string; createdAt: number; lastUsed?: number }> }> => {
-    return ipcRenderer.invoke('kproxy-get-device-mappings')
-  },
-
-  // 切换到账号设备 ID
-  kproxySwitchToAccount: (accountId: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-switch-to-account', accountId)
-  },
-
-  // 获取 CA 证书
-  kproxyGetCaCert: (): Promise<{ success: boolean; certPem?: string; certPath?: string; fingerprint?: string; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-get-ca-cert')
-  },
-
-  // 导出 CA 证书
-  kproxyExportCaCert: (exportPath?: string): Promise<{ success: boolean; path?: string; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-export-ca-cert', exportPath)
-  },
-
-  // 检查 CA 证书是否已安装
-  kproxyCheckCaCertInstalled: (): Promise<{ success: boolean; installed: boolean; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-check-ca-cert-installed')
-  },
-
   // ============ API Key 管理 ============
   
   // 获取所有 API Keys
@@ -957,76 +823,6 @@ const api = {
   // 重置 API Key 用量统计
   proxyResetApiKeyUsage: (id: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('proxy-reset-api-key-usage', id)
-  },
-
-  // 安装 CA 证书到系统信任存储
-  kproxyInstallCaCert: (): Promise<{ success: boolean; message?: string; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-install-ca-cert')
-  },
-
-  // 卸载 CA 证书从系统信任存储
-  kproxyUninstallCaCert: (): Promise<{ success: boolean; message?: string; error?: string }> => {
-    return ipcRenderer.invoke('kproxy-uninstall-ca-cert')
-  },
-
-  // 重置 K-Proxy 统计
-  kproxyResetStats: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('kproxy-reset-stats')
-  },
-
-  // 监听 K-Proxy 请求事件
-  onKproxyRequest: (callback: (info: { timestamp: number; method: string; host: string; path: string; isMitm: boolean; deviceIdReplaced: boolean }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, info: { timestamp: number; method: string; host: string; path: string; isMitm: boolean; deviceIdReplaced: boolean }): void => {
-      callback(info)
-    }
-    ipcRenderer.on('kproxy-request', handler)
-    return () => {
-      ipcRenderer.removeListener('kproxy-request', handler)
-    }
-  },
-
-  // 监听 K-Proxy 响应事件
-  onKproxyResponse: (callback: (info: { timestamp: number; host: string; statusCode: number; duration: number }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, info: { timestamp: number; host: string; statusCode: number; duration: number }): void => {
-      callback(info)
-    }
-    ipcRenderer.on('kproxy-response', handler)
-    return () => {
-      ipcRenderer.removeListener('kproxy-response', handler)
-    }
-  },
-
-  // 监听 K-Proxy 错误事件
-  onKproxyError: (callback: (error: string) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, error: string): void => {
-      callback(error)
-    }
-    ipcRenderer.on('kproxy-error', handler)
-    return () => {
-      ipcRenderer.removeListener('kproxy-error', handler)
-    }
-  },
-
-  // 监听 K-Proxy 状态变化事件
-  onKproxyStatusChange: (callback: (status: { running: boolean; port: number }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, status: { running: boolean; port: number }): void => {
-      callback(status)
-    }
-    ipcRenderer.on('kproxy-status-change', handler)
-    return () => {
-      ipcRenderer.removeListener('kproxy-status-change', handler)
-    }
-  },
-
-  // 监听 K-Proxy MITM 拦截事件
-  onKproxyMitm: (callback: (info: { host: string; modified: boolean }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, info: { host: string; modified: boolean }): void => {
-      callback(info)
-    }
-    ipcRenderer.on('kproxy-mitm', handler)
-    return () => {
-      ipcRenderer.removeListener('kproxy-mitm', handler)
-    }
   },
 
   // ============ 自定义 titlebar API ============
@@ -1279,7 +1075,7 @@ const api = {
       id?: string; email?: string; accessToken?: string; refreshToken?: string
       clientId?: string; clientSecret?: string; region?: string
       authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'; provider?: string
-      profileArn?: string; machineId?: string; expiresAt?: number; proxyUrl?: string
+      profileArn?: string; expiresAt?: number; proxyUrl?: string
     }
     model?: string
     message?: string

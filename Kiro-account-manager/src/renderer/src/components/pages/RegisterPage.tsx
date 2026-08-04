@@ -1507,7 +1507,6 @@ export function RegisterPage(): React.JSX.Element {
         proPlanType,
         regResult.region || 'us-east-1',
         undefined,
-        undefined,
         'BuilderId',
         'IdC',
         undefined

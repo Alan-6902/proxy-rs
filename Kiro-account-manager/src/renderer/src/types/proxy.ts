@@ -2,7 +2,7 @@
  * 代理池数据模型
  *
  * 用途：注册批量任务时为每个账号轮换不同的出口 IP，降低风控关联风险。
- * 与 `proxy/kproxy` 不同——那两个是"反代/客户端代理"，这里是"出口代理池"。
+ * 与 API 反代和客户端代理不同，这里是出口代理池。
  */
 
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks4'

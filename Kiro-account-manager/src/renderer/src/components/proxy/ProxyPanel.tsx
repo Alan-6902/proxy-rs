@@ -288,7 +288,6 @@ export function ProxyPanel() {
           refreshToken: acc.credentials?.refreshToken,
           profileArn: acc.profileArn || acc.credentials?.profileArn,
           expiresAt: acc.credentials?.expiresAt,
-          machineId: acc.machineId,
           // Token 刷新所需字段
           clientId: acc.credentials?.clientId,
           clientSecret: acc.credentials?.clientSecret,
@@ -1550,5 +1549,4 @@ export function ProxyPanel() {
     </div>
   )
 }
-
 

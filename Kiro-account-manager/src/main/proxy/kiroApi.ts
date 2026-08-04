@@ -16,7 +16,6 @@ import type {
   ProxyAccount
 } from './types'
 import { proxyLogger } from './logger'
-import { getKProxyService } from '../kproxy'
 import { getSystemProxy, safeCreateProxyAgent } from './systemProxy'
 import {
   countTokens,
@@ -27,13 +26,7 @@ import {
 // 重新导出以保持向后兼容（proxyServer.ts 等模块仍 from './kiroApi' 导入）
 export { setModelContextWindow, getModelContextWindow }
 
-// 是否使用 K-Proxy 代理发送 API 请求（从主进程导入）
-let useKProxyForApi = false
 let logStreamEvents = false
-
-export function setUseKProxyForApiInProxy(enabled: boolean): void {
-  useKProxyForApi = enabled
-}
 
 // profileArn 自愈持久化回调：当 Enterprise 账号在运行时首次解析出真实 profileArn 时，
 // 通过该回调通知主进程回写到 renderer store + 磁盘，避免每次请求都重新获取。
@@ -97,7 +90,6 @@ function estimatePayloadTokens(payload: KiroPayload): number {
  * 获取网络代理 agent
  * 优先级（从高到低）：
  *   1. 账号自身绑定的 proxyUrl（实现"N 个号一个 IP"分桶反代）
- *   2. K-Proxy（如果启用）
  *   3. 环境变量代理
  *   4. 系统代理
  *
@@ -112,21 +104,11 @@ function getNetworkAgent(account?: ProxyAccount): Dispatcher | undefined {
       return agent
     }
   }
-  // 2. K-Proxy
-  if (useKProxyForApi) {
-    const kproxyService = getKProxyService()
-    if (kproxyService?.isRunning()) {
-      const config = kproxyService.getConfig()
-      const proxyUrl = `http://${config.host}:${config.port}`
-      const agent = safeCreateProxyAgent(proxyUrl)
-      if (agent) return agent
-    }
-  }
-  // 3. 环境变量
+  // 2. 环境变量
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
   const envAgent = safeCreateProxyAgent(envProxy)
   if (envAgent) return envAgent
-  // 4. 系统代理
+  // 3. 系统代理
   return safeCreateProxyAgent(getSystemProxy())
 }
 
@@ -176,14 +158,12 @@ const OS_PLATFORM = process.platform === 'win32' ? 'win32' : process.platform ==
 const OS_RELEASE = (() => { try { return require('os').release() } catch { return '10.0.0' } })()
 const NODE_VERSION = process.versions.node || '22.22.0'
 
-function getKiroUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE-${KIRO_VERSION}-${machineId}` : `KiroIDE-${KIRO_VERSION}`
-  return `aws-sdk-js/${AWS_SDK_VERSION} ua/2.1 os/${OS_PLATFORM}#${OS_RELEASE} lang/js md/nodejs#${NODE_VERSION} api/codewhispererstreaming#${AWS_STREAMING_API_VERSION} m/E ${suffix}`
+function getKiroUserAgent(): string {
+  return `aws-sdk-js/${AWS_SDK_VERSION} ua/2.1 os/${OS_PLATFORM}#${OS_RELEASE} lang/js md/nodejs#${NODE_VERSION} api/codewhispererstreaming#${AWS_STREAMING_API_VERSION} m/E KiroIDE-${KIRO_VERSION}`
 }
 
-function getKiroAmzUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE ${KIRO_VERSION} ${machineId}` : `KiroIDE-${KIRO_VERSION}`
-  return `aws-sdk-js/${AWS_SDK_VERSION} ${suffix}`
+function getKiroAmzUserAgent(): string {
+  return `aws-sdk-js/${AWS_SDK_VERSION} KiroIDE-${KIRO_VERSION}`
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1154,40 +1134,17 @@ export function clearAllCaches(): { conversation: number; model: number } {
   return { conversation: conversationCount, model: modelCount }
 }
 
-// machineId 稳定生成缓存（用于无绑定 machineId 且 K-Proxy 不可用时的兆底）
-const fallbackMachineIds = new Map<string, string>()
-
-function generateStableMachineId(accountId: string): string {
-  const cached = fallbackMachineIds.get(accountId)
-  if (cached) return cached
-  const crypto = require('crypto')
-  const hash = crypto.createHash('sha256').update(`kiro-device-${accountId}`).digest('hex')
-  fallbackMachineIds.set(accountId, hash)
-  return hash
-}
-
-// 获取账号绑定的 Machine ID（保证永远不为空）
-function getAccountMachineId(accountId: string, accountMachineId?: string): string {
-  if (accountMachineId) return accountMachineId
-  const kproxyService = getKProxyService()
-  if (kproxyService) {
-    const deviceId = kproxyService.getDeviceIdForAccount(accountId)
-    if (deviceId) return deviceId
-  }
-  return generateStableMachineId(accountId)
-}
 
 // 获取认证方式对应的请求头
 function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
-  const machineId = getAccountMachineId(account.id, account.machineId)
   // 按配置的 agent 模式（vibe 或 spec）设置 header
   const agentMode = configuredAgentMode
   
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     'x-amzn-kiro-agent-mode': agentMode,
-    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
-    'user-agent': getKiroUserAgent(machineId),
+    'x-amz-user-agent': getKiroAmzUserAgent(),
+    'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=3',
     'Authorization': `Bearer ${account.accessToken}`
@@ -2256,13 +2213,12 @@ function getCodeWhispererEndpoint(region?: string): string {
 export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<string | undefined> {
   const baseUrl = getCodeWhispererEndpoint(account.region)
   const url = `${baseUrl}/ListAvailableProfiles`
-  const machineId = getAccountMachineId(account.id, account.machineId)
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${account.accessToken}`,
-    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
-    'user-agent': getKiroUserAgent(machineId),
+    'x-amz-user-agent': getKiroAmzUserAgent(),
+    'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=1'
   }
@@ -2309,14 +2265,13 @@ export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<
 // 获取 Kiro 官方模型列表（支持分页，与官方插件一致传递 profileArn）
 export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
   const baseUrl = getQServiceEndpoint(account.region)
-  const machineId = getAccountMachineId(account.id, account.machineId)
   
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${account.accessToken}`,
     'Content-Type': 'application/json',
     'Accept': 'application/json',
-    'User-Agent': getKiroUserAgent(machineId),
-    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
+    'User-Agent': getKiroUserAgent(),
+    'x-amz-user-agent': getKiroAmzUserAgent(),
     'x-amzn-codewhisperer-optout': 'true'
   }
 
@@ -2393,27 +2348,24 @@ export interface SubscriptionListResponse {
 // 订阅请求专用 User-Agent（匹配 Kiro IDE 实际报文格式）
 const KIRO_SUBSCRIPTION_VERSION = '0.12.155'
 
-function getSubscriptionUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE-${KIRO_SUBSCRIPTION_VERSION}-${machineId}` : `KiroIDE-${KIRO_SUBSCRIPTION_VERSION}`
-  return `aws-sdk-js/1.0.0 ua/2.1 os/win32#10.0.19043 lang/js md/nodejs#22.22.0 api/codewhispererruntime#1.0.0 m/N,E ${suffix}`
+function getSubscriptionUserAgent(): string {
+  return `aws-sdk-js/1.0.0 ua/2.1 os/win32#10.0.19043 lang/js md/nodejs#22.22.0 api/codewhispererruntime#1.0.0 m/N,E KiroIDE-${KIRO_SUBSCRIPTION_VERSION}`
 }
 
-function getSubscriptionAmzUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE-${KIRO_SUBSCRIPTION_VERSION}-${machineId}` : `KiroIDE-${KIRO_SUBSCRIPTION_VERSION}`
-  return `aws-sdk-js/1.0.0 ${suffix}`
+function getSubscriptionAmzUserAgent(): string {
+  return `aws-sdk-js/1.0.0 KiroIDE-${KIRO_SUBSCRIPTION_VERSION}`
 }
 
 // 获取可用订阅列表
 export async function fetchAvailableSubscriptions(account: ProxyAccount): Promise<SubscriptionListResponse> {
   const baseUrl = getQServiceEndpoint(account.region)
   const url = `${baseUrl}/listAvailableSubscriptions`
-  const machineId = getAccountMachineId(account.id, account.machineId)
   
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${account.accessToken}`,
     'content-type': 'application/json',
-    'user-agent': getSubscriptionUserAgent(machineId),
-    'x-amz-user-agent': getSubscriptionAmzUserAgent(machineId),
+    'user-agent': getSubscriptionUserAgent(),
+    'x-amz-user-agent': getSubscriptionAmzUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=1'
   }
@@ -2457,13 +2409,12 @@ export async function fetchSubscriptionToken(
 ): Promise<SubscriptionTokenResponse> {
   const baseUrl = getQServiceEndpoint(account.region)
   const url = `${baseUrl}/CreateSubscriptionToken`
-  const machineId = getAccountMachineId(account.id, account.machineId)
   
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${account.accessToken}`,
     'content-type': 'application/json',
-    'user-agent': getSubscriptionUserAgent(machineId),
-    'x-amz-user-agent': getSubscriptionAmzUserAgent(machineId),
+    'user-agent': getSubscriptionUserAgent(),
+    'x-amz-user-agent': getSubscriptionAmzUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=1'
   }
@@ -2506,13 +2457,12 @@ export async function setUserPreference(
 ): Promise<{ success: boolean; error?: string }> {
   const baseUrl = getQServiceEndpoint(account.region)
   const url = `${baseUrl}/setUserPreference`
-  const machineId = getAccountMachineId(account.id, account.machineId)
 
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${account.accessToken}`,
     'content-type': 'application/json',
-    'user-agent': getSubscriptionUserAgent(machineId),
-    'x-amz-user-agent': getSubscriptionAmzUserAgent(machineId),
+    'user-agent': getSubscriptionUserAgent(),
+    'x-amz-user-agent': getSubscriptionAmzUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=1'
   }

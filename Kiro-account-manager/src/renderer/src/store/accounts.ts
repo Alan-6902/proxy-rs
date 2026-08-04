@@ -28,15 +28,6 @@ import { useWebhookStore, type WebhookEvent, type WebhookMessage } from './webho
 // 账号管理 Store
 // ============================================
 
-// 生成随机 64 位十六进制设备 ID
-function generateRandomMachineId(): string {
-  const bytes = new Uint8Array(32)
-  crypto.getRandomValues(bytes)
-  return Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 // 自动 Token 刷新定时器
 let tokenRefreshTimer: ReturnType<typeof setInterval> | null = null
 // 刷新提前量必须 ≥ 2× 检查间隔，否则账号会在两次 tick 之间过期：
@@ -309,25 +300,6 @@ interface AccountsState {
   // 语言设置
   language: 'auto' | 'en' | 'zh' // auto: 跟随系统
 
-  // 机器码管理
-  machineIdConfig: {
-    autoSwitchOnAccountChange: boolean // 切号时自动更换机器码
-    bindMachineIdToAccount: boolean // 账户机器码绑定
-    useBindedMachineId: boolean // 使用绑定的机器码（否则随机生成）
-  }
-  currentMachineId: string // 当前机器码
-  originalMachineId: string | null // 备份的原始机器码
-  originalBackupTime: number | null // 原始机器码备份时间
-  accountMachineIds: Record<string, string> // 账户绑定的机器码映射
-  machineIdHistory: Array<{
-    id: string
-    machineId: string
-    timestamp: number
-    action: 'initial' | 'manual' | 'auto_switch' | 'restore' | 'bind'
-    accountId?: string
-    accountEmail?: string
-  }>
-
   // ============ 代理池（用于注册时 IP 轮换）============
   /** 代理条目列表（Map 保证 O(1) 查找） */
   proxyPool: Map<string, ProxyEntry>
@@ -462,20 +434,6 @@ interface AccountsActions {
   startAutoSave: () => void
   stopAutoSave: () => void
 
-  // 机器码管理
-  setMachineIdConfig: (config: Partial<{
-    autoSwitchOnAccountChange: boolean
-    bindMachineIdToAccount: boolean
-    useBindedMachineId: boolean
-  }>) => void
-  refreshCurrentMachineId: () => Promise<void>
-  changeMachineId: (newMachineId?: string) => Promise<boolean>
-  restoreOriginalMachineId: () => Promise<boolean>
-  bindMachineIdToAccount: (accountId: string, machineId?: string) => void
-  getMachineIdForAccount: (accountId: string) => string | null
-  backupOriginalMachineId: () => void
-  clearMachineIdHistory: () => void
-
   // ============ 代理池操作 ============
   /** 添加单个代理（自动解析协议/主机/端口/认证） */
   addProxy: (url: string, options?: { label?: string; source?: string; tags?: string[] }) => string | null
@@ -577,17 +535,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   darkMode: false,
   language: 'auto',
 
-  machineIdConfig: {
-    autoSwitchOnAccountChange: false,
-    bindMachineIdToAccount: false,
-    useBindedMachineId: true
-  },
-  currentMachineId: '',
-  originalMachineId: null,
-  originalBackupTime: null,
-  accountMachineIds: {},
-  machineIdHistory: [],
-
   // 代理池初始状态
   proxyPool: new Map<string, ProxyEntry>(),
   proxyPoolConfig: { ...DEFAULT_PROXY_POOL_CONFIG },
@@ -600,13 +547,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     const id = uuidv4()
     const now = Date.now()
 
-    // 如果没有提供 machineId，自动生成一个随机的 64 位十六进制设备 ID
-    const machineId = accountData.machineId || generateRandomMachineId()
-
     const account: Account = {
       ...accountData,
       id,
-      machineId,
       createdAt: now,
       lastUsedAt: now,
       isActive: false,
@@ -686,20 +629,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 激活账号 ====================
 
   setActiveAccount: async (id) => {
-    const state = get()
-    
-    set((s) => {
-      const accounts = new Map(s.accounts)
+    set((state) => {
+      const accounts = new Map(state.accounts)
 
-      // 取消之前的激活状态
-      if (s.activeAccountId) {
-        const prev = accounts.get(s.activeAccountId)
-        if (prev) {
-          accounts.set(s.activeAccountId, { ...prev, isActive: false })
+      if (state.activeAccountId) {
+        const previous = accounts.get(state.activeAccountId)
+        if (previous) {
+          accounts.set(state.activeAccountId, { ...previous, isActive: false })
         }
       }
 
-      // 设置新的激活状态
       if (id) {
         const account = accounts.get(id)
         if (account) {
@@ -709,56 +648,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
       return { accounts, activeAccountId: id }
     })
-    
-    // 切换账号时自动更换机器码（如果启用）
-    if (id && state.machineIdConfig.autoSwitchOnAccountChange) {
-      try {
-        const account = state.accounts.get(id)
-        
-        if (state.machineIdConfig.bindMachineIdToAccount) {
-          // 使用账户绑定的机器码
-          let boundMachineId = state.accountMachineIds[id]
-          
-          if (!boundMachineId) {
-            // 如果没有绑定机器码，为该账户生成一个
-            boundMachineId = await window.api.machineIdGenerateRandom()
-            get().bindMachineIdToAccount(id, boundMachineId)
-          }
-          
-          if (state.machineIdConfig.useBindedMachineId) {
-            // 使用绑定的机器码
-            await get().changeMachineId(boundMachineId)
-          } else {
-            // 随机生成新机器码
-            await get().changeMachineId()
-          }
-        } else {
-          // 每次切换都随机生成新机器码
-          await get().changeMachineId()
-        }
-        
-        // 更新历史记录
-        const newMachineId = get().currentMachineId
-        set((s) => ({
-          machineIdHistory: [
-            ...s.machineIdHistory,
-            {
-              id: crypto.randomUUID(),
-              machineId: newMachineId,
-              timestamp: Date.now(),
-              action: 'auto_switch' as const,
-              accountId: id,
-              accountEmail: account?.email
-            }
-          ]
-        }))
-        
-        console.log(`[MachineId] Auto-switched machine ID for account: ${account?.email}`)
-      } catch (error) {
-        console.error('[MachineId] Failed to auto-switch machine ID:', error)
-      }
-    }
-    
+
     get().saveToStorage()
   },
 
@@ -1151,13 +1041,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       try {
         const now = Date.now()
         const id = uuidv4()
-        const machineId = generateRandomMachineId()
-
         const account: Account = {
           id,
           createdAt: now,
           isActive: false,
-          machineId,
           email: item.email,
           password: item.password,
           nickname: item.nickname,
@@ -1682,17 +1569,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         const accounts = new Map(Object.entries(data.accounts ?? {}) as [string, Account][])
         const activeAccountId = data.activeAccountId ?? null
 
-        // 为没有 machineId 的现有账户生成一个
-        let needsSave = false
-        for (const [id, account] of accounts) {
-          if (!account.machineId) {
-            account.machineId = generateRandomMachineId()
-            accounts.set(id, account)
-            needsSave = true
-            console.log(`[Store] Generated machineId for account ${account.email}: ${account.machineId.substring(0, 16)}...`)
-          }
-        }
-
         // 根据 activeAccountId 重新同步所有账号的 isActive 状态，确保只有一个账号为激活状态
         for (const [id, account] of accounts) {
           const shouldBeActive = id === activeAccountId
@@ -1722,13 +1598,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
           language: data.language ?? 'auto',
-          machineIdConfig: data.machineIdConfig ?? {
-            autoSwitchOnAccountChange: false,
-            bindMachineIdToAccount: false,
-            useBindedMachineId: true
-          },
-          accountMachineIds: data.accountMachineIds ?? {},
-          machineIdHistory: data.machineIdHistory ?? [],
           proxyPool: data.proxyPool
             ? new Map(Object.entries(data.proxyPool as Record<string, ProxyEntry>))
             : new Map<string, ProxyEntry>(),
@@ -1752,12 +1621,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
         // 启动定时自动保存（防止数据丢失）
         get().startAutoSave()
-
-        // 如果生成了新的 machineId，保存到存储
-        if (needsSave) {
-          console.log('[Store] Saving accounts with newly generated machineIds')
-          get().saveToStorage()
-        }
 
         // SSO 同步（含潜在网络请求）异步执行，不阻塞首屏加载
         // 完成后通过 set 应用结果，UI 会自然更新
@@ -1835,9 +1698,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       theme,
       darkMode,
       language,
-      machineIdConfig,
-      accountMachineIds,
-      machineIdHistory,
       proxyPool,
       proxyPoolConfig,
       proxyPoolCursor,
@@ -1868,9 +1728,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           theme,
           darkMode,
           language,
-          machineIdConfig,
-          accountMachineIds,
-          machineIdHistory,
           proxyPool: Object.fromEntries(proxyPool),
           proxyPoolConfig,
           proxyPoolCursor,
@@ -2386,7 +2243,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       idp?: string
       profileArn?: string
       needsTokenRefresh: boolean
-      machineId?: string  // 账户绑定的设备 ID
       credentials: {
         refreshToken: string
         clientId?: string
@@ -2417,7 +2273,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           idp: account.idp,
           profileArn: account.profileArn,
           needsTokenRefresh: !!needsTokenRefresh,
-          machineId: account.machineId,  // 传递账户绑定的设备 ID
           credentials: {
             refreshToken: account.credentials.refreshToken || '',
             clientId: account.credentials.clientId,
@@ -2714,173 +2569,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       autoSaveTimer = null
       console.log('[AutoSave] Auto-save stopped')
     }
-  },
-
-  // ==================== 机器码管理 ====================
-
-  setMachineIdConfig: (config) => {
-    set((state) => ({
-      machineIdConfig: { ...state.machineIdConfig, ...config }
-    }))
-    get().saveToStorage()
-  },
-
-  refreshCurrentMachineId: async () => {
-    try {
-      const result = await window.api.machineIdGetCurrent()
-      if (result.success && result.machineId) {
-        set({ currentMachineId: result.machineId })
-        
-        // 首次获取时自动备份原始机器码
-        const { originalMachineId } = get()
-        if (!originalMachineId) {
-          get().backupOriginalMachineId()
-        }
-      }
-    } catch (error) {
-      console.error('[MachineId] Failed to refresh current machine ID:', error)
-    }
-  },
-
-  changeMachineId: async (newMachineId) => {
-    const state = get()
-    
-    // 首次更改时备份原始机器码
-    if (!state.originalMachineId) {
-      state.backupOriginalMachineId()
-    }
-
-    // 生成新机器码（如果未提供）
-    const machineIdToSet = newMachineId || await window.api.machineIdGenerateRandom()
-    
-    try {
-      const result = await window.api.machineIdSet(machineIdToSet)
-      
-      if (result.success) {
-        // 更新状态
-        set((s) => ({
-          currentMachineId: machineIdToSet,
-          machineIdHistory: [
-            ...s.machineIdHistory,
-            {
-              id: crypto.randomUUID(),
-              machineId: machineIdToSet,
-              timestamp: Date.now(),
-              action: 'manual'
-            }
-          ]
-        }))
-        get().saveToStorage()
-        return true
-      } else if (result.requiresAdmin) {
-        // 需要管理员权限，主进程会处理弹窗
-        return false
-      } else {
-        console.error('[MachineId] Failed to change:', result.error)
-        return false
-      }
-    } catch (error) {
-      console.error('[MachineId] Error changing machine ID:', error)
-      return false
-    }
-  },
-
-  restoreOriginalMachineId: async () => {
-    const { originalMachineId } = get()
-    
-    if (!originalMachineId) {
-      console.warn('[MachineId] No original machine ID to restore')
-      return false
-    }
-
-    try {
-      const result = await window.api.machineIdSet(originalMachineId)
-      
-      if (result.success) {
-        set((s) => ({
-          currentMachineId: originalMachineId,
-          machineIdHistory: [
-            ...s.machineIdHistory,
-            {
-              id: crypto.randomUUID(),
-              machineId: originalMachineId,
-              timestamp: Date.now(),
-              action: 'restore'
-            }
-          ]
-        }))
-        get().saveToStorage()
-        return true
-      }
-      return false
-    } catch (error) {
-      console.error('[MachineId] Error restoring original machine ID:', error)
-      return false
-    }
-  },
-
-  bindMachineIdToAccount: (accountId, machineId) => {
-    const account = get().accounts.get(accountId)
-    if (!account) return
-
-    // 生成或使用提供的机器码
-    const boundMachineId = machineId || crypto.randomUUID()
-
-    set((state) => ({
-      accountMachineIds: {
-        ...state.accountMachineIds,
-        [accountId]: boundMachineId
-      },
-      machineIdHistory: [
-        ...state.machineIdHistory,
-        {
-          id: crypto.randomUUID(),
-          machineId: boundMachineId,
-          timestamp: Date.now(),
-          action: 'bind',
-          accountId,
-          accountEmail: account.email
-        }
-      ]
-    }))
-    get().saveToStorage()
-  },
-
-  getMachineIdForAccount: (accountId) => {
-    return get().accountMachineIds[accountId] || null
-  },
-
-  backupOriginalMachineId: () => {
-    const { currentMachineId, originalMachineId } = get()
-    
-    // 只有在没有备份且有当前机器码时才备份
-    if (!originalMachineId && currentMachineId) {
-      set({
-        originalMachineId: currentMachineId,
-        originalBackupTime: Date.now()
-      })
-      
-      // 添加历史记录
-      set((s) => ({
-        machineIdHistory: [
-          ...s.machineIdHistory,
-          {
-            id: crypto.randomUUID(),
-            machineId: currentMachineId,
-            timestamp: Date.now(),
-            action: 'initial'
-          }
-        ]
-      }))
-      
-      get().saveToStorage()
-      console.log('[MachineId] Original machine ID backed up:', currentMachineId)
-    }
-  },
-
-  clearMachineIdHistory: () => {
-    set({ machineIdHistory: [] })
-    get().saveToStorage()
   },
 
   // ==================== 代理池 ====================

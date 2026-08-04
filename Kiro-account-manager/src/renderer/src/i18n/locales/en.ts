@@ -44,10 +44,8 @@ const en = {
   nav: {
     home: 'Home',
     accounts: 'Accounts',
-    machineId: 'Machine ID',
     kiroSettings: 'Kiro Settings',
     proxy: 'API Proxy',
-    kproxy: 'K-Proxy',
     proxyPool: 'Proxy Pool',
     webhooks: 'Webhooks',
     diagnose: 'Diagnostics',
@@ -83,7 +81,6 @@ const en = {
       features: {
         multiAccount: 'Manage multiple Kiro accounts',
         autoRefresh: 'Auto refresh tokens before expiration',
-        machineId: 'Machine ID management to prevent bans',
         themes: '32 theme colors available'
       }
     }
@@ -201,42 +198,6 @@ const en = {
     error: 'Error'
   },
 
-  // Machine ID Page
-  machineId: {
-    title: 'Machine ID Management',
-    description: 'Manage device identifier to prevent account association bans',
-    current: 'Current Machine ID',
-    original: 'Original Backup',
-    noBackup: 'No backup',
-    backupTime: 'Backup time: {time}',
-    actions: {
-      copy: 'Copy',
-      generate: 'Generate Random',
-      custom: 'Custom',
-      restore: 'Restore Original',
-      backupToFile: 'Backup to File',
-      restoreFromFile: 'Restore from File'
-    },
-    automation: {
-      title: 'Automation Settings',
-      autoSwitch: 'Auto switch Machine ID',
-      autoSwitchDesc: 'Automatically change machine ID when switching accounts',
-      bindToAccount: 'Bind Machine ID to Account',
-      bindToAccountDesc: 'Each account uses its own unique machine ID',
-      useBinded: 'Use Bound Machine ID',
-      useBindedDesc: 'Use the bound machine ID when switching accounts'
-    },
-    accountBindings: 'Account Machine ID Bindings',
-    history: 'Change History',
-    requiresAdmin: 'Requires administrator privileges',
-    restartAsAdmin: 'Restart as Administrator',
-    platformInfo: {
-      title: 'Platform Info',
-      windows: 'Windows: Modifies registry MachineGuid',
-      macos: 'macOS: Modifies IOPlatformUUID',
-      linux: 'Linux: Modifies /etc/machine-id'
-    }
-  },
 
   // Settings Page
   settings: {
@@ -385,8 +346,6 @@ const en = {
     dataCopied: 'Data copied to clipboard',
     dataExported: 'Data exported successfully',
     dataImported: 'Data imported successfully',
-    machineIdChanged: 'Machine ID changed successfully',
-    machineIdRestored: 'Machine ID restored successfully'
   },
 
   // Registration Page

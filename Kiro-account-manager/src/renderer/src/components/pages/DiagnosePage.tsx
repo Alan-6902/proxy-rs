@@ -204,7 +204,6 @@ export function DiagnosePage(): React.ReactNode {
           authMethod: cred.authMethod,
           provider: cred.provider,
           profileArn: account.profileArn,
-          machineId: account.machineId,
           expiresAt: cred.expiresAt,
           proxyUrl: getAccountProxyUrl(account.id)
         },

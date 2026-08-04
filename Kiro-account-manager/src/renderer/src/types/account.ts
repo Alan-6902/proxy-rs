@@ -104,7 +104,6 @@ export interface Account {
   idp: IdpType
   userId?: string
   visitorId?: string
-  machineId?: string // 账户绑定的设备 ID（64位十六进制）
   profileArn?: string // AWS Profile ARN
 
   // 认证信息

@@ -19,7 +19,6 @@ import type {
 import { AccountPool, ErrorType, classifyError } from './accountPool'
 import { callKiroApiStream, callKiroApi, fetchKiroModels, type KiroModel } from './kiroApi'
 import { proxyLogger } from './logger'
-import { getKProxyService, generateDeviceId } from '../kproxy'
 import {
   openaiToKiro,
   claudeToKiro,
@@ -891,9 +890,6 @@ export class ProxyServer {
     
     if (!account) return null
 
-    // 自动切换 K-Proxy 设备 ID（如果 K-Proxy 服务可用）
-    this.syncKProxyDeviceId(account)
-
     // 检查是否需要刷新 Token
     if (this.isTokenExpiringSoon(account)) {
       const refreshed = await this.refreshToken(account, signal)
@@ -909,32 +905,6 @@ export class ProxyServer {
     }
 
     return account
-  }
-
-  // 同步 K-Proxy 设备 ID（根据账号自动切换）
-  private syncKProxyDeviceId(account: ProxyAccount): void {
-    const kproxyService = getKProxyService()
-    if (!kproxyService || !kproxyService.isRunning()) {
-      return // K-Proxy 未初始化或未运行
-    }
-
-    // 尝试切换到账号绑定的设备 ID
-    const switched = kproxyService.switchToAccount(account.id)
-    
-    if (!switched) {
-      // 账号没有绑定设备 ID，自动生成并绑定
-      const newDeviceId = generateDeviceId()
-      kproxyService.addDeviceIdMapping({
-        accountId: account.id,
-        deviceId: newDeviceId,
-        description: account.email || `Account ${account.id.substring(0, 8)}`,
-        createdAt: Date.now()
-      })
-      kproxyService.setDeviceId(newDeviceId)
-      proxyLogger.info('ProxyServer', `Auto-generated device ID for account ${account.email || account.id.substring(0, 8)}`)
-    } else {
-      proxyLogger.debug('ProxyServer', `Switched to device ID for account ${account.email || account.id.substring(0, 8)}`)
-    }
   }
 
   // 带重试的 API 调用

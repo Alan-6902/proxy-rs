@@ -259,8 +259,8 @@ export function AboutPage() {
         <CardContent className="text-sm text-muted-foreground space-y-3">
           <p>
             {isEn 
-              ? 'Kiro Account Manager is a powerful multi-account management tool for Kiro IDE. It supports quick account switching, auto token refresh, group/tag management, and machine ID management.'
-              : 'Kiro 账户管理器是一个功能强大的 Kiro IDE 多账号管理工具。支持多账号快速切换、自动 Token 刷新、分组标签管理、机器码管理等功能，帮助你高效管理和使用多个 Kiro 账号。'}
+              ? 'Kiro Account Manager is a local multi-account and API proxy tool. It supports account pools, automatic token refresh, group/tag management, registration, subscriptions, and protocol-compatible endpoints.'
+              : 'Kiro 账户管理器是一款本地多账号与 API 反代工具，支持账号池、Token 自动刷新、分组标签、注册订阅以及多协议兼容接口。'}
           </p>
           <p>
             {isEn 
@@ -308,15 +308,15 @@ export function AboutPage() {
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">✓</span>
-              <strong>{isEn ? 'Machine ID' : '机器码管理'}</strong>{isEn ? ': Modify device identifier' : '：修改设备标识符，防止账号关联封禁'}
+              <strong>{isEn ? 'API Proxy' : 'API 反代'}</strong>{isEn ? ': OpenAI, Anthropic and Gemini compatible endpoints' : '：聚合 OpenAI、Anthropic 与 Gemini 兼容接口'}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">✓</span>
-              <strong>{isEn ? 'Auto Switch ID' : '自动换机器码'}</strong>{isEn ? ': Auto change ID on switch' : '：切换账号时自动更换机器码'}
+              <strong>{isEn ? 'Proxy Pool' : '代理池'}</strong>{isEn ? ': Account-bound outbound proxies and health checks' : '：账号绑定出口代理与健康检查'}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">✓</span>
-              <strong>{isEn ? 'ID Binding' : '账户机器码绑定'}</strong>{isEn ? ': Unique ID per account' : '：为每个账户分配唯一机器码'}
+              <strong>{isEn ? 'Batch Registration' : '批量注册'}</strong>{isEn ? ': Email OTP automation and account import' : '：邮箱验证码自动化与账号导入'}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">✓</span>

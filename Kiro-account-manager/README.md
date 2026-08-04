@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Quick account switching, auto token refresh, group/tag management, machine ID management and more
+  Account pools, automatic token refresh, API proxy, registration, subscriptions, groups and tags
 </p>
 
 <p align="center">
@@ -34,11 +34,6 @@
 ### 📁 Groups & Tags
 - Flexibly organize accounts with groups and tags
 - Batch set groups/tags for multiple accounts
-
-### 🔑 Machine ID Management
-- Modify device identifier to prevent account association bans
-- Auto switch machine ID when switching accounts
-- Assign unique bound machine ID to each account
 
 ### 🔄 Auto Account Switch
 - Auto switch to available account when balance is low
@@ -90,9 +85,6 @@
 
 ### Account Management
 ![Account Management](resources/账户管理.png)
-
-### Machine ID Management
-![Machine ID Management](resources/机器码管理.png)
 
 ### Settings
 ![Settings](resources/设置.png)

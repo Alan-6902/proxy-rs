@@ -44,10 +44,8 @@ const zh = {
   nav: {
     home: '主页',
     accounts: '账户管理',
-    machineId: '机器码',
     kiroSettings: 'Kiro 设置',
     proxy: 'API 反代',
-    kproxy: 'K-Proxy',
     proxyPool: '代理池',
     webhooks: 'Webhook',
     diagnose: '一键诊断',
@@ -83,7 +81,6 @@ const zh = {
       features: {
         multiAccount: '管理多个 Kiro 账号',
         autoRefresh: 'Token 过期前自动刷新',
-        machineId: '机器码管理防止封禁',
         themes: '32 种主题颜色可选'
       }
     }
@@ -201,42 +198,6 @@ const zh = {
     error: '异常'
   },
 
-  // 机器码管理页
-  machineId: {
-    title: '机器码管理',
-    description: '管理设备标识符，防止账号关联封禁',
-    current: '当前机器码',
-    original: '原始备份',
-    noBackup: '无备份',
-    backupTime: '备份时间: {time}',
-    actions: {
-      copy: '复制',
-      generate: '随机生成',
-      custom: '自定义',
-      restore: '恢复原始',
-      backupToFile: '备份到文件',
-      restoreFromFile: '从文件恢复'
-    },
-    automation: {
-      title: '自动化设置',
-      autoSwitch: '自动切换机器码',
-      autoSwitchDesc: '切换账号时自动更换机器码',
-      bindToAccount: '绑定机器码到账号',
-      bindToAccountDesc: '每个账号使用独立的机器码',
-      useBinded: '使用绑定的机器码',
-      useBindedDesc: '切换账号时使用绑定的机器码'
-    },
-    accountBindings: '账号机器码绑定',
-    history: '修改历史',
-    requiresAdmin: '需要管理员权限',
-    restartAsAdmin: '以管理员身份重启',
-    platformInfo: {
-      title: '平台说明',
-      windows: 'Windows: 修改注册表 MachineGuid',
-      macos: 'macOS: 修改 IOPlatformUUID',
-      linux: 'Linux: 修改 /etc/machine-id'
-    }
-  },
 
   // 设置页
   settings: {
@@ -385,8 +346,6 @@ const zh = {
     dataCopied: '数据已复制到剪贴板',
     dataExported: '数据导出成功',
     dataImported: '数据导入成功',
-    machineIdChanged: '机器码修改成功',
-    machineIdRestored: '机器码已恢复'
   },
 
   // 注册页面

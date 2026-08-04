@@ -1,6 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import * as machineIdModule from './machineId'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
@@ -8,15 +7,7 @@ import { encode, decode } from 'cbor-x'
 import { fetch as undiciFetch, type RequestInit as UndiciRequestInit, type Dispatcher } from 'undici'
 import icon from '../../resources/icon.png?asset'
 import { ProxyServer, configureProxyClients, type ProxyAccount, type ProxyConfig, type ProxyClientTarget, type ProxyClientModel } from './proxy'
-import { 
-  initKProxyService, 
-  getKProxyService, 
-  generateDeviceId, 
-  isValidDeviceId,
-  type KProxyConfig,
-  type DeviceIdMapping
-} from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback, setAgentMode } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback, setAgentMode } from './proxy/kiroApi'
 import {
   writeKiroAuthTokenFile,
   readKiroAuthTokenFile,
@@ -138,31 +129,8 @@ export function getUsageApiType(): UsageApiType {
   return currentUsageApiType
 }
 
-// 是否使用 K-Proxy 代理发送 API 请求
-let useKProxyForApi: boolean = false
-
-export function setUseKProxyForApi(enabled: boolean): void {
-  useKProxyForApi = enabled
-  // 同步设置到 kiroApi.ts
-  setUseKProxyForApiInProxy(enabled)
-  console.log(`[API] Use K-Proxy for API requests: ${enabled}`)
-}
-
-export function getUseKProxyForApi(): boolean {
-  return useKProxyForApi
-}
-
-// 获取网络代理 agent（优先 K-Proxy，其次用户设置代理，其次系统代理）
+// 获取网络代理 agent（用户设置代理优先于系统代理）
 function getNetworkAgent(): Dispatcher | undefined {
-  if (useKProxyForApi) {
-    const kproxyService = getKProxyService()
-    if (kproxyService?.isRunning()) {
-      const config = kproxyService.getConfig()
-      const proxyUrl = `http://${config.host}:${config.port}`
-      const agent = safeCreateProxyAgent(proxyUrl)
-      if (agent) return agent
-    }
-  }
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
   const envAgent = safeCreateProxyAgent(envProxy)
   if (envAgent) return envAgent
@@ -175,7 +143,7 @@ function getNetworkAgent(): Dispatcher | undefined {
  * @param options fetch 选项
  * @param overrideProxyUrl 可选：账号绑定的代理 URL（优先级最高，覆盖全局代理逻辑）
  *
- * 优先级：overrideProxyUrl > K-Proxy > 用户设置代理 > 系统代理 > 直连
+ * 优先级：overrideProxyUrl > 用户设置代理 > 系统代理 > 直连
  */
 async function fetchWithAppProxy(
   url: string,
@@ -194,11 +162,6 @@ async function fetchWithAppProxy(
     return await undiciFetch(url, { ...options, dispatcher: agent } as UndiciRequestInit) as unknown as Response
   }
   return await fetch(url, options)
-}
-
-// 兼容函数，指向 getNetworkAgent
-function getKProxyAgent(): Dispatcher | undefined {
-  return getNetworkAgent()
 }
 
 // ============ OIDC Token 刷新 ============
@@ -303,11 +266,6 @@ function initProxyServer(): ProxyServer {
   const savedUsageApiType = store?.get('usageApiType') as 'rest' | 'cbor' | undefined
   if (savedUsageApiType) {
     setUsageApiType(savedUsageApiType)
-  }
-  // 从 store 加载保存的 K-Proxy 代理设置
-  const savedUseKProxyForApi = store?.get('useKProxyForApi') as boolean | undefined
-  if (savedUseKProxyForApi !== undefined) {
-    setUseKProxyForApi(savedUseKProxyForApi)
   }
   // 从 store 加载保存的累计 credits 和 tokens
   const savedTotalCredits = (store?.get('proxyTotalCredits') as number) || 0
@@ -480,7 +438,6 @@ function initProxyServer(): ProxyServer {
             refreshToken: acc.credentials?.refreshToken,
             profileArn: acc.profileArn || acc.credentials?.profileArn,
             expiresAt: acc.credentials?.expiresAt,
-            machineId: acc.machineId,
             clientId: acc.credentials?.clientId,
             clientSecret: acc.credentials?.clientSecret,
             region: acc.credentials?.region || 'us-east-1',
@@ -715,14 +672,13 @@ async function refreshSocialToken(
   console.log(`[Social] Refreshing token...${proxyUrl ? ' [via bound proxy]' : ''}`)
 
   const url = `${KIRO_AUTH_ENDPOINT}/refreshToken`
-  const machineId = getCurrentMachineId()
 
   try {
     const response = await fetchWithAppProxy(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': getKiroUserAgent(machineId)
+        'User-Agent': getKiroUserAgent()
       },
       body: JSON.stringify({ refreshToken })
     }, proxyUrl)
@@ -776,20 +732,12 @@ function generateInvocationId(): string {
 // Kiro 版本和 User-Agent 生成
 const KIRO_VERSION = '0.6.18'
 
-function getKiroUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE-${KIRO_VERSION}-${machineId}` : `KiroIDE-${KIRO_VERSION}`
-  return `aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E ${suffix}`
+function getKiroUserAgent(): string {
+  return `aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-${KIRO_VERSION}`
 }
 
-function getKiroAmzUserAgent(machineId?: string): string {
-  const suffix = machineId ? `KiroIDE ${KIRO_VERSION} ${machineId}` : `KiroIDE-${KIRO_VERSION}`
-  return `aws-sdk-js/1.0.18 ${suffix}`
-}
-
-function getCurrentMachineId(): string | undefined {
-  const kproxyService = getKProxyService()
-  if (!kproxyService) return undefined
-  return kproxyService.getDeviceId()
+function getKiroAmzUserAgent(): string {
+  return `aws-sdk-js/1.0.18 KiroIDE-${KIRO_VERSION}`
 }
 
 // ============ AWS SSO 设备授权流程 ============
@@ -982,14 +930,11 @@ async function kiroApiRequest<T>(
   body: Record<string, unknown>,
   accessToken: string,
   idp: string = 'BuilderId',  // 支持 BuilderId, Github, Google
-  accountMachineId?: string,  // 账户绑定的设备 ID
   email?: string              // 用于日志标识
 ): Promise<T> {
-  // 优先使用账户绑定的设备 ID，其次使用 K-Proxy 全局设备 ID
-  const machineId = accountMachineId || getCurrentMachineId()
   const logTag = email || `token:${accessToken?.slice(-6) || '?'}`
-  console.log(`[Kiro API] ${operation} [${logTag}] ${idp} machineId=${machineId?.slice(0, 8) || 'none'}`)
-  const agent = getKProxyAgent()
+  console.log(`[Kiro API] ${operation} [${logTag}] ${idp}`)
+  const agent = getNetworkAgent()
   
   // 使用 undici fetch 支持代理
   const headers: Record<string, string> = {
@@ -998,7 +943,7 @@ async function kiroApiRequest<T>(
     'smithy-protocol': 'rpc-v2-cbor',
     'amz-sdk-invocation-id': generateInvocationId(),
     'amz-sdk-request': 'attempt=1; max=1',
-    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
+    'x-amz-user-agent': getKiroAmzUserAgent(),
     'authorization': `Bearer ${accessToken}`,
     'cookie': `Idp=${idp}; AccessToken=${accessToken}`
   }
@@ -1135,15 +1080,14 @@ function normalizeResetDate(value: number | string | undefined): string | undefi
 async function fetchRestApi(
   baseUrl: string,
   path: string,
-  accessToken: string,
-  machineId?: string
+  accessToken: string
 ): Promise<Response> {
-  const agent = getKProxyAgent()
+  const agent = getNetworkAgent()
   const headers: Record<string, string> = {
     'Accept': 'application/json',
     'Authorization': `Bearer ${accessToken}`,
-    'User-Agent': getKiroUserAgent(machineId),
-    'x-amz-user-agent': getKiroAmzUserAgent(machineId)
+    'User-Agent': getKiroUserAgent(),
+    'x-amz-user-agent': getKiroAmzUserAgent()
   }
   const url = `${baseUrl}${path}`
   if (agent) {
@@ -1159,12 +1103,9 @@ async function fetchRestApi(
 async function getUsageLimitsRest(
   accessToken: string,
   profileArn?: string,
-  accountMachineId?: string,  // 账户绑定的设备 ID
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
   email?: string              // 用于日志标识
 ): Promise<UsageLimitsResponse> {
-  // 优先使用账户绑定的设备 ID，其次使用 K-Proxy 全局设备 ID
-  const machineId = accountMachineId || getCurrentMachineId()
   const logTag = email || `token:${accessToken?.slice(-6) || '?'}`
   console.log(`[Kiro REST API] GetUsageLimits [${logTag}] region=${ssoRegion || 'default'}`)
   
@@ -1182,12 +1123,12 @@ async function getUsageLimitsRest(
   const primaryBase = getRestApiBase(ssoRegion)
   const fallbackBase = getFallbackRestApiBase(ssoRegion)
   
-  let response = await fetchRestApi(primaryBase, path, accessToken, machineId)
+  let response = await fetchRestApi(primaryBase, path, accessToken)
   
   // 如果主端点返回 403，尝试备用端点
   if (response.status === 403) {
     console.log(`[Kiro REST API] Primary 403, fallback → ${fallbackBase}`)
-    response = await fetchRestApi(fallbackBase, path, accessToken, machineId)
+    response = await fetchRestApi(fallbackBase, path, accessToken)
   }
   
   if (!response.ok) {
@@ -1260,13 +1201,12 @@ async function getUsageAndLimits(
   accessToken: string,
   idp: string = 'BuilderId',
   profileArn?: string,
-  accountMachineId?: string,  // 账户绑定的设备 ID
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
   email?: string              // 用于日志标识
 ): Promise<UnifiedUsageResponse> {
   if (currentUsageApiType === 'rest') {
     // 使用 REST API (GetUsageLimits)
-    const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email)
+    const result = await getUsageLimitsRest(accessToken, profileArn, ssoRegion, email)
     // REST API 返回的字段名和 CBOR API 相同，直接返回
     return {
       usageBreakdownList: result.usageBreakdownList?.map(b => ({
@@ -1325,7 +1265,6 @@ async function getUsageAndLimits(
         { isEmailRequired: true, origin: 'KIRO_IDE' },
         accessToken,
         idp,
-        accountMachineId,
         email
       )
     } catch (cborError) {
@@ -1333,7 +1272,7 @@ async function getUsageAndLimits(
       // CBOR 401/403 时自动 fallback 到 REST API
       if (errorMsg.includes('401') || errorMsg.includes('403')) {
         console.log(`[API] CBOR API failed (${errorMsg}), falling back to REST API...`)
-        const result = await getUsageLimitsRest(accessToken, profileArn, accountMachineId, ssoRegion, email)
+        const result = await getUsageLimitsRest(accessToken, profileArn, ssoRegion, email)
         return {
           usageBreakdownList: result.usageBreakdownList?.map(b => ({
             resourceType: b.resourceType || b.type,
@@ -1392,8 +1331,8 @@ interface UserInfoResponse {
   featureFlags?: string[]
 }
 
-async function getUserInfo(accessToken: string, idp: string = 'BuilderId', accountMachineId?: string, email?: string): Promise<UserInfoResponse> {
-  return kiroApiRequest<UserInfoResponse>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp, accountMachineId, email)
+async function getUserInfo(accessToken: string, idp: string = 'BuilderId', email?: string): Promise<UserInfoResponse> {
+  return kiroApiRequest<UserInfoResponse>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp, email)
 }
 
 // 定义自定义协议
@@ -1878,7 +1817,6 @@ type BackgroundRefreshAccount = {
   idp?: string
   profileArn?: string
   needsTokenRefresh?: boolean
-  machineId?: string
   credentials: {
     refreshToken: string
     clientId?: string
@@ -1927,7 +1865,6 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
         email?: string
         idp?: string
         profileArn?: string
-        machineId?: string
         lastError?: string
         credentials?: {
           refreshToken?: string
@@ -1966,7 +1903,6 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
         idp: acc.idp,
         profileArn: acc.profileArn,
         needsTokenRefresh: true,
-        machineId: acc.machineId,
         credentials: {
           refreshToken: creds.refreshToken,
           clientId: creds.clientId,
@@ -2240,7 +2176,6 @@ function createWindow(): void {
                 refreshToken: acc.credentials?.refreshToken,
                 profileArn,
                 expiresAt: acc.credentials?.expiresAt,
-                machineId: acc.machineId,
                 clientId: acc.credentials?.clientId,
                 clientSecret: acc.credentials?.clientSecret,
                 region: acc.credentials?.region || 'us-east-1',
@@ -2284,36 +2219,6 @@ function createWindow(): void {
         console.error('[ProxyServer] Auto-start failed:', error)
       }
 
-      // K-Proxy MITM 自启动
-      try {
-        const savedKProxyConfig = store?.get('kproxyConfig') as KProxyConfig | undefined
-        if (savedKProxyConfig?.autoStart) {
-          console.log('[KProxy] Auto-starting K-Proxy MITM...')
-          const service = initKProxyService(savedKProxyConfig, {
-            onRequest: (info) => {
-              mainWindow?.webContents.send('kproxy-request', info)
-            },
-            onResponse: (info) => {
-              mainWindow?.webContents.send('kproxy-response', info)
-            },
-            onError: (error) => {
-              console.error('[KProxy] Error:', error)
-              mainWindow?.webContents.send('kproxy-error', error.message)
-            },
-            onStatusChange: (running, port) => {
-              mainWindow?.webContents.send('kproxy-status-change', { running, port })
-            },
-            onMitmIntercept: (host, modified) => {
-              mainWindow?.webContents.send('kproxy-mitm', { host, modified })
-            }
-          })
-          await service.initialize()
-          await service.start()
-          console.log('[KProxy] Auto-started successfully')
-        }
-      } catch (error) {
-        console.error('[KProxy] Auto-start failed:', error)
-      }
     }, 1000)
   })
 
@@ -2850,7 +2755,6 @@ app.whenReady().then(async () => {
       authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'
       provider?: string
       profileArn?: string
-      machineId?: string
       expiresAt?: number
       proxyUrl?: string
     }
@@ -2900,7 +2804,6 @@ app.whenReady().then(async () => {
         authMethod: acc.authMethod,
         provider: acc.provider,
         profileArn: acc.profileArn,
-        machineId: acc.machineId,
         proxyUrl: acc.proxyUrl,
         expiresAt: acc.expiresAt
       }
@@ -3071,7 +2974,6 @@ app.whenReady().then(async () => {
               region: region || 'us-east-1',
               provider,
               authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
-              machineId: account.machineId
             })
             if (resolvedEnterpriseArn) {
               console.log(`[Refresh] Enterprise profileArn auto-resolved: ${resolvedEnterpriseArn}`)
@@ -3204,7 +3106,7 @@ app.whenReady().then(async () => {
         console.log('[SSO] Fetching user info and usage data...')
         const [userInfoResult, usageResult] = await Promise.all([
           getUserInfo(ssoResult.accessToken).catch(e => { console.error('[SSO] getUserInfo failed:', e); return undefined }),
-          getUsageAndLimits(ssoResult.accessToken, 'BuilderId', undefined, undefined, region).catch(e => { console.error('[SSO] getUsageAndLimits failed:', e); return undefined })
+          getUsageAndLimits(ssoResult.accessToken, 'BuilderId', undefined, region).catch(e => { console.error('[SSO] getUsageAndLimits failed:', e); return undefined })
         ])
         userInfo = userInfoResult
         usageData = usageResult
@@ -3526,21 +3428,18 @@ app.whenReady().then(async () => {
         return { success: false, error: { message: '缺少 accessToken' } }
       }
 
-      // 获取账户绑定的设备 ID
-      const accountMachineId = account?.machineId as string | undefined
-
       // 第一次尝试：使用当前 accessToken
       try {
         // 并行调用 GetUserInfo 和 getUsageAndLimits
         const [userInfoResult, usageResult] = await Promise.all([
-          getUserInfo(accessToken, idp, accountMachineId, account?.email).catch((err: Error) => {
+          getUserInfo(accessToken, idp, account?.email).catch((err: Error) => {
             // 封禁错误不能吞掉，必须向上抛出
             if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
               throw err
             }
             return undefined
           }),
-          getUsageAndLimits(accessToken, idp, undefined, accountMachineId, region, account?.email)
+          getUsageAndLimits(accessToken, idp, undefined, region, account?.email)
         ])
         return parseUsageResponse(usageResult, undefined, userInfoResult)
       } catch (apiError) {
@@ -3576,13 +3475,13 @@ app.whenReady().then(async () => {
             
             // 用新 token 并行调用 GetUserInfo 和 getUsageAndLimits
             const [userInfoResult, usageResult] = await Promise.all([
-              getUserInfo(refreshResult.accessToken, idp, accountMachineId).catch((err: Error) => {
+              getUserInfo(refreshResult.accessToken, idp).catch((err: Error) => {
                 if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
                   throw err
                 }
                 return undefined
               }),
-              getUsageAndLimits(refreshResult.accessToken, idp, undefined, accountMachineId, region)
+              getUsageAndLimits(refreshResult.accessToken, idp, undefined, region)
             ])
             
             // 返回结果并包含新凭证
@@ -3741,7 +3640,6 @@ app.whenReady().then(async () => {
                   region: region || 'us-east-1',
                   provider: provider || account.idp,
                   authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
-                  machineId: account.machineId
                 })
                 if (resolvedBgProfileArn) {
                   console.log(`[BackgroundRefresh] Enterprise profileArn auto-resolved: ${resolvedBgProfileArn} (${account.id})`)
@@ -3830,8 +3728,7 @@ app.whenReady().then(async () => {
                     overageLimit?: number | null
                   }
                 }
-                console.log(`[BackgroundRefresh] Account ${account.id} machineId: ${account.machineId || 'undefined'}`)
-                const rawUsage = await getUsageAndLimits(newAccessToken, idp, undefined, account.machineId, region) as UsageResponse
+                const rawUsage = await getUsageAndLimits(newAccessToken, idp, undefined, region) as UsageResponse
                 
                 // 解析使用量数据
                 const creditUsage = rawUsage.usageBreakdownList?.find(b => b.resourceType === 'CREDIT')
@@ -3928,7 +3825,7 @@ app.whenReady().then(async () => {
 
               // 调用 GetUserInfo API 获取用户状态
               try {
-                userInfoData = await getUserInfo(newAccessToken, idp, account.machineId)
+                userInfoData = await getUserInfo(newAccessToken, idp)
               } catch (apiError) {
                 const errMsg = apiError instanceof Error ? apiError.message : String(apiError)
                 if (errMsg.includes('AccountSuspendedException') || errMsg.includes('423')) {
@@ -4043,7 +3940,7 @@ app.whenReady().then(async () => {
 
             // 调用 API 获取用量和用户信息（根据配置选择 REST 或 CBOR 格式）
             const [usageRes, userInfoRes] = await Promise.allSettled([
-              getUsageAndLimits(accessToken, idp, undefined, undefined, account.credentials?.region, account.email) as Promise<{
+              getUsageAndLimits(accessToken, idp, undefined, account.credentials?.region, account.email) as Promise<{
                 usageBreakdownList?: Array<{
                   resourceType?: string
                   displayName?: string
@@ -4093,7 +3990,7 @@ app.whenReady().then(async () => {
                 userId?: string
                 status?: string
                 idp?: string
-              }>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp, undefined, account.email).catch((err: Error) => {
+              }>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp, account.email).catch((err: Error) => {
                 // 封禁错误不能吞掉，需要在后续逻辑中检测
                 if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
                   throw err
@@ -4455,7 +4352,7 @@ app.whenReady().then(async () => {
         userInfo?: { email?: string; userId?: string }
       }
       
-      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, undefined, undefined, region) as UsageResponse
+      const usageResult = await getUsageAndLimits(refreshResult.accessToken, idp, undefined, region) as UsageResponse
       
       // 解析用户信息
       const email = usageResult.userInfo?.email || ''
@@ -6123,21 +6020,6 @@ app.whenReady().then(async () => {
     return { success: true, type }
   })
 
-  // IPC: 获取是否使用 K-Proxy 代理
-  ipcMain.handle('get-use-kproxy-for-api', () => {
-    return getUseKProxyForApi()
-  })
-
-  // IPC: 设置是否使用 K-Proxy 代理
-  ipcMain.handle('set-use-kproxy-for-api', (_event, enabled: boolean) => {
-    setUseKProxyForApi(enabled)
-    // 保存到 store
-    if (store) {
-      store.set('useKProxyForApi', enabled)
-    }
-    return { success: true, enabled }
-  })
-
   // IPC: 更新反代服务器配置
   ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) => {
     try {
@@ -6501,14 +6383,13 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取账户可用模型列表
-  ipcMain.handle('account-get-models', async (_event, accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-models', async (_event, accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
       const models = await fetchKiroModels({
         id: accountId || 'model-list-request',
         accessToken,
         region: region || 'us-east-1',
         profileArn,
-        machineId,
         provider,
         authMethod: authMethod as ProxyAccount['authMethod']
       } as ProxyAccount)
@@ -6531,9 +6412,9 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取可用订阅列表
-  ipcMain.handle('account-get-subscriptions', async (_event, accessToken: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-subscriptions', async (_event, accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
-      const result = await fetchAvailableSubscriptions({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, machineId, provider, authMethod } as ProxyAccount)
+      const result = await fetchAvailableSubscriptions({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount)
       if (result.subscriptionPlans) {
         return { 
           success: true, 
@@ -6548,9 +6429,9 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取订阅管理/支付链接
-  ipcMain.handle('account-get-subscription-url', async (_event, accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-subscription-url', async (_event, accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
-      const result = await fetchSubscriptionToken({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, machineId, provider, authMethod } as ProxyAccount, subscriptionType)
+      const result = await fetchSubscriptionToken({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount, subscriptionType)
       if (result.encodedVerificationUrl) {
         return { success: true, url: result.encodedVerificationUrl, status: result.status }
       }
@@ -6561,10 +6442,10 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 设置用户偏好（超额开启/关闭）
-  ipcMain.handle('account-set-overage', async (_event, accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, machineId?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-set-overage', async (_event, accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
       const result = await setUserPreference(
-        { id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, machineId, provider, authMethod } as ProxyAccount,
+        { id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount,
         overageStatus
       )
       return result
@@ -6655,363 +6536,6 @@ app.whenReady().then(async () => {
     } catch (error) {
       console.error('[ProxyServer] Clear suspended failed:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Failed to clear suspended' }
-    }
-  })
-
-  // ============ K-Proxy MITM 代理 IPC ============
-
-  // IPC: 初始化 K-Proxy 服务
-  ipcMain.handle('kproxy-init', async () => {
-    try {
-      const savedConfig = store?.get('kproxyConfig') as Partial<KProxyConfig> | undefined
-      const service = initKProxyService(savedConfig || {}, {
-        onRequest: (info) => {
-          mainWindow?.webContents.send('kproxy-request', info)
-        },
-        onResponse: (info) => {
-          mainWindow?.webContents.send('kproxy-response', info)
-        },
-        onError: (error) => {
-          console.error('[KProxy] Error:', error)
-          mainWindow?.webContents.send('kproxy-error', error.message)
-        },
-        onStatusChange: (running, port) => {
-          mainWindow?.webContents.send('kproxy-status-change', { running, port })
-        },
-        onMitmIntercept: (host, modified) => {
-          mainWindow?.webContents.send('kproxy-mitm', { host, modified })
-        }
-      })
-      const caInfo = await service.initialize()
-      return { 
-        success: true, 
-        caInfo: {
-          certPath: caInfo.certPath,
-          fingerprint: caInfo.fingerprint,
-          validFrom: caInfo.validFrom.toISOString(),
-          validTo: caInfo.validTo.toISOString()
-        }
-      }
-    } catch (error) {
-      console.error('[KProxy] Init failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to init K-Proxy' }
-    }
-  })
-
-  // IPC: 启动 K-Proxy
-  ipcMain.handle('kproxy-start', async (_event, config?: Partial<KProxyConfig>) => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      if (config) {
-        service.updateConfig(config)
-      }
-      await service.start()
-      // 保存配置
-      if (store) {
-        store.set('kproxyConfig', service.getConfig())
-      }
-      return { success: true, port: service.getConfig().port }
-    } catch (error) {
-      console.error('[KProxy] Start failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to start K-Proxy' }
-    }
-  })
-
-  // IPC: 停止 K-Proxy
-  ipcMain.handle('kproxy-stop', async () => {
-    try {
-      const service = getKProxyService()
-      if (service) {
-        await service.stop()
-      }
-      return { success: true }
-    } catch (error) {
-      console.error('[KProxy] Stop failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to stop K-Proxy' }
-    }
-  })
-
-  // IPC: 获取 K-Proxy 状态
-  ipcMain.handle('kproxy-get-status', () => {
-    const service = getKProxyService()
-    if (!service) {
-      const savedConfig = store?.get('kproxyConfig') as KProxyConfig | undefined
-      return { running: false, config: savedConfig || null, stats: null, caInfo: null }
-    }
-    return {
-      running: service.isRunning(),
-      config: service.getConfig(),
-      stats: service.getStats(),
-      caInfo: service.getCACertInfo()
-    }
-  })
-
-  // IPC: 更新 K-Proxy 配置
-  ipcMain.handle('kproxy-update-config', async (_event, config: Partial<KProxyConfig>) => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      service.updateConfig(config)
-      const newConfig = service.getConfig()
-      if (store) {
-        store.set('kproxyConfig', newConfig)
-      }
-      return { success: true, config: newConfig }
-    } catch (error) {
-      console.error('[KProxy] Update config failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to update config' }
-    }
-  })
-
-  // IPC: 设置当前设备 ID
-  ipcMain.handle('kproxy-set-device-id', (_event, deviceId: string) => {
-    try {
-      if (!isValidDeviceId(deviceId)) {
-        return { success: false, error: 'Invalid device ID format (must be 64 hex characters)' }
-      }
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      service.setDeviceId(deviceId)
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to set device ID' }
-    }
-  })
-
-  // IPC: 生成新的设备 ID
-  ipcMain.handle('kproxy-generate-device-id', () => {
-    return { success: true, deviceId: generateDeviceId() }
-  })
-
-  // IPC: 添加设备 ID 映射
-  ipcMain.handle('kproxy-add-device-mapping', (_event, mapping: DeviceIdMapping) => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      service.addDeviceIdMapping(mapping)
-      // 保存映射
-      const mappings = service.getAllDeviceIdMappings()
-      if (store) {
-        store.set('kproxyDeviceMappings', mappings)
-      }
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to add mapping' }
-    }
-  })
-
-  // IPC: 获取所有设备 ID 映射
-  ipcMain.handle('kproxy-get-device-mappings', () => {
-    const service = getKProxyService()
-    if (!service) {
-      const savedMappings = store?.get('kproxyDeviceMappings') as DeviceIdMapping[] | undefined
-      return { success: true, mappings: savedMappings || [] }
-    }
-    return { success: true, mappings: service.getAllDeviceIdMappings() }
-  })
-
-  // IPC: 切换到账号设备 ID
-  ipcMain.handle('kproxy-switch-to-account', (_event, accountId: string) => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      const switched = service.switchToAccount(accountId)
-      return { success: switched, error: switched ? undefined : 'No device ID mapping for account' }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to switch account' }
-    }
-  })
-
-  // IPC: 获取 CA 证书 PEM（用于导出/安装）
-  ipcMain.handle('kproxy-get-ca-cert', () => {
-    const service = getKProxyService()
-    if (!service) {
-      return { success: false, error: 'K-Proxy not initialized' }
-    }
-    const certPem = service.getCACertPem()
-    const caInfo = service.getCACertInfo()
-    if (!certPem || !caInfo) {
-      return { success: false, error: 'CA certificate not available' }
-    }
-    return { 
-      success: true, 
-      certPem,
-      certPath: caInfo.certPath,
-      fingerprint: caInfo.fingerprint
-    }
-  })
-
-  // IPC: 导出 CA 证书到指定路径
-  ipcMain.handle('kproxy-export-ca-cert', async (_event, exportPath?: string) => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      const certPem = service.getCACertPem()
-      if (!certPem) {
-        return { success: false, error: 'CA certificate not available' }
-      }
-      
-      let targetPath = exportPath
-      if (!targetPath) {
-        const result = await dialog.showSaveDialog({
-          title: 'Export CA Certificate',
-          defaultPath: 'kproxy-ca.crt',
-          filters: [{ name: 'Certificate', extensions: ['crt', 'pem'] }]
-        })
-        if (result.canceled || !result.filePath) {
-          return { success: false, error: 'Export cancelled' }
-        }
-        targetPath = result.filePath
-      }
-      
-      await writeFile(targetPath, certPem, 'utf-8')
-      return { success: true, path: targetPath }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to export certificate' }
-    }
-  })
-
-  // IPC: 重置 K-Proxy 统计
-  ipcMain.handle('kproxy-reset-stats', () => {
-    const service = getKProxyService()
-    if (service) {
-      service.resetStats()
-    }
-    return { success: true }
-  })
-
-  // IPC: 检查 CA 证书是否已安装到系统信任存储
-  ipcMain.handle('kproxy-check-ca-cert-installed', async () => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, installed: false, error: 'K-Proxy not initialized' }
-      }
-
-      const { execSync } = await import('child_process')
-      const platform = process.platform
-
-      if (platform === 'win32') {
-        // Windows: 使用 certutil 检查证书
-        try {
-          const output = execSync('certutil -store -user Root "K-Proxy CA"', { encoding: 'utf-8' })
-          return { success: true, installed: output.includes('K-Proxy CA') }
-        } catch {
-          return { success: true, installed: false }
-        }
-      } else if (platform === 'darwin') {
-        // macOS: 使用 security 命令检查
-        try {
-          execSync('security find-certificate -c "K-Proxy CA" ~/Library/Keychains/login.keychain-db', { encoding: 'utf-8' })
-          return { success: true, installed: true }
-        } catch {
-          return { success: true, installed: false }
-        }
-      } else {
-        // Linux: 检查文件是否存在
-        const fs = await import('fs')
-        const targetPath = '/usr/local/share/ca-certificates/kproxy-ca.crt'
-        return { success: true, installed: fs.existsSync(targetPath) }
-      }
-    } catch (error) {
-      console.error('[KProxy] Check CA cert installed failed:', error)
-      return { success: false, installed: false, error: error instanceof Error ? error.message : 'Check failed' }
-    }
-  })
-
-  // IPC: 安装 CA 证书到系统信任存储
-  ipcMain.handle('kproxy-install-ca-cert', async () => {
-    try {
-      const service = getKProxyService()
-      if (!service) {
-        return { success: false, error: 'K-Proxy not initialized' }
-      }
-      const caInfo = service.getCACertInfo()
-      if (!caInfo) {
-        return { success: false, error: 'CA certificate not available' }
-      }
-
-      const { execSync } = await import('child_process')
-      const platform = process.platform
-
-      if (platform === 'win32') {
-        // Windows: 使用 certutil 安装到根证书存储
-        try {
-          execSync(`certutil -addstore -user Root "${caInfo.certPath}"`, { encoding: 'utf-8' })
-          return { success: true, message: 'CA certificate installed to Windows certificate store' }
-        } catch (error) {
-          const errMsg = error instanceof Error ? error.message : String(error)
-          if (errMsg.includes('already in store') || errMsg.includes('已在存储中')) {
-            return { success: true, message: 'CA certificate already installed' }
-          }
-          throw error
-        }
-      } else if (platform === 'darwin') {
-        // macOS: 使用 security 命令安装到钥匙串
-        execSync(`security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db "${caInfo.certPath}"`)
-        return { success: true, message: 'CA certificate installed to macOS Keychain' }
-      } else {
-        // Linux: 复制到系统 CA 目录
-        const fs = await import('fs')
-        const targetPath = '/usr/local/share/ca-certificates/kproxy-ca.crt'
-        fs.copyFileSync(caInfo.certPath, targetPath)
-        execSync('sudo update-ca-certificates')
-        return { success: true, message: 'CA certificate installed to Linux CA store' }
-      }
-    } catch (error) {
-      console.error('[KProxy] Install CA cert failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to install certificate' }
-    }
-  })
-
-  // IPC: 卸载 CA 证书从系统信任存储
-  ipcMain.handle('kproxy-uninstall-ca-cert', async () => {
-    try {
-      const { execSync } = await import('child_process')
-      const platform = process.platform
-
-      if (platform === 'win32') {
-        // Windows: 使用 certutil 删除证书
-        try {
-          execSync('certutil -delstore -user Root "K-Proxy CA"', { encoding: 'utf-8' })
-          return { success: true, message: 'CA certificate removed from Windows certificate store' }
-        } catch (error) {
-          const errMsg = error instanceof Error ? error.message : String(error)
-          if (errMsg.includes('not found') || errMsg.includes('找不到')) {
-            return { success: true, message: 'CA certificate not found in store' }
-          }
-          throw error
-        }
-      } else if (platform === 'darwin') {
-        // macOS: 使用 security 命令删除
-        execSync('security delete-certificate -c "K-Proxy CA" ~/Library/Keychains/login.keychain-db')
-        return { success: true, message: 'CA certificate removed from macOS Keychain' }
-      } else {
-        // Linux: 删除证书并更新
-        const fs = await import('fs')
-        const targetPath = '/usr/local/share/ca-certificates/kproxy-ca.crt'
-        if (fs.existsSync(targetPath)) {
-          fs.unlinkSync(targetPath)
-          execSync('sudo update-ca-certificates --fresh')
-        }
-        return { success: true, message: 'CA certificate removed from Linux CA store' }
-      }
-    } catch (error) {
-      console.error('[KProxy] Uninstall CA cert failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to uninstall certificate' }
     }
   })
 
@@ -7106,84 +6630,6 @@ app.whenReady().then(async () => {
       console.error('[KiroSettings] Failed to delete steering file:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete file' }
     }
-  })
-
-  // ============ 机器码管理 IPC ============
-  
-  // IPC: 获取操作系统类型
-  ipcMain.handle('machine-id:get-os-type', () => {
-    return machineIdModule.getOSType()
-  })
-
-  // IPC: 获取当前机器码
-  ipcMain.handle('machine-id:get-current', async () => {
-    console.log('[MachineId] Getting current machine ID...')
-    return await machineIdModule.getCurrentMachineId()
-  })
-
-  // IPC: 设置新机器码
-  ipcMain.handle('machine-id:set', async (_event, newMachineId: string) => {
-    console.log('[MachineId] Setting new machine ID:', newMachineId.substring(0, 8) + '...')
-    const result = await machineIdModule.setMachineId(newMachineId)
-    
-    if (!result.success && result.requiresAdmin) {
-      // 弹窗询问用户是否以管理员权限重启
-      const shouldRestart = await machineIdModule.showAdminRequiredDialog()
-      if (shouldRestart) {
-        await machineIdModule.requestAdminRestart()
-      }
-    }
-    
-    return result
-  })
-
-  // IPC: 生成随机机器码
-  ipcMain.handle('machine-id:generate-random', () => {
-    return machineIdModule.generateRandomMachineId()
-  })
-
-  // IPC: 检查管理员权限
-  ipcMain.handle('machine-id:check-admin', async () => {
-    return await machineIdModule.checkAdminPrivilege()
-  })
-
-  // IPC: 请求管理员权限重启
-  ipcMain.handle('machine-id:request-admin-restart', async () => {
-    const shouldRestart = await machineIdModule.showAdminRequiredDialog()
-    if (shouldRestart) {
-      return await machineIdModule.requestAdminRestart()
-    }
-    return false
-  })
-
-  // IPC: 备份机器码到文件
-  ipcMain.handle('machine-id:backup-to-file', async (_event, machineId: string) => {
-    const result = await dialog.showSaveDialog(mainWindow!, {
-      title: '备份机器码',
-      defaultPath: 'machine-id-backup.json',
-      filters: [{ name: 'JSON', extensions: ['json'] }]
-    })
-    
-    if (result.canceled || !result.filePath) {
-      return false
-    }
-    
-    return await machineIdModule.backupMachineIdToFile(machineId, result.filePath)
-  })
-
-  // IPC: 从文件恢复机器码
-  ipcMain.handle('machine-id:restore-from-file', async () => {
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      title: '恢复机器码',
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-      properties: ['openFile']
-    })
-    
-    if (result.canceled || !result.filePaths[0]) {
-      return { success: false, error: '用户取消' }
-    }
-    
-    return await machineIdModule.restoreMachineIdFromFile(result.filePaths[0])
   })
 
   // 更新协议处理函数以支持 Social Auth 回调

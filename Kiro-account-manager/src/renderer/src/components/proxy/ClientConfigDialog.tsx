@@ -121,7 +121,6 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
           account.credentials.accessToken,
           account.credentials.region || 'us-east-1',
           account.profileArn,
-          account.machineId,
           account.credentials.provider || account.idp,
           account.credentials.authMethod,
           account.id

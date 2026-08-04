@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useAccountsStore, isBannedAccountError } from '@/store/accounts'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui'
-import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, FolderPlus, Tag, TrendingUp, Activity, BarChart3, Ban, ChevronRight } from 'lucide-react'
+import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, FolderPlus, Tag, TrendingUp, Activity, BarChart3, Ban, ChevronRight } from 'lucide-react'
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -615,12 +615,12 @@ export function HomePage() {
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-lg bg-primary/10">
-                <Fingerprint className="h-5 w-5 text-primary" />
+                <Shield className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <p className="font-medium text-sm">{isEn ? 'Machine ID' : '机器码管理'}</p>
+                <p className="font-medium text-sm">{isEn ? 'API Proxy' : 'API 反代'}</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {isEn ? 'Modify device ID, auto-switch, account binding' : '修改设备标识符，切号时自动更换，支持账户绑定'}
+                  {isEn ? 'OpenAI, Anthropic and Gemini compatible endpoints' : '聚合 OpenAI、Anthropic 与 Gemini 兼容接口'}
                 </p>
               </div>
             </div>

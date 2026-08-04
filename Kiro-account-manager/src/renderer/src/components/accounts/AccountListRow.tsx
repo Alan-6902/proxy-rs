@@ -43,6 +43,8 @@ interface AccountListRowProps {
 
 // 紧凑列表行 — 视觉对齐 AccountCard
 // 高度 ~72px，圆角 + 流光边框 + 标签光晕 + 封禁红色背景
+import { canRefreshUpstreamCredential } from '../../types/account'
+
 function AccountListRowComponent({
   account,
   tags,
@@ -139,7 +141,7 @@ function AccountListRowComponent({
 
   const handleRefresh = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (isRefreshing) return
+    if (isRefreshing || !canRefreshUpstreamCredential(account.credentials)) return
     setIsRefreshing(true)
     try {
       await refreshAccountToken(account.id)
@@ -479,7 +481,7 @@ function AccountListRowComponent({
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-foreground"
           onClick={handleRefresh}
-          disabled={isRefreshing || account.status === 'refreshing'}
+          disabled={isRefreshing || account.status === 'refreshing' || !canRefreshUpstreamCredential(account.credentials)}
           title={isEn ? 'Check account info' : '检查账户信息'}
         >
           <RefreshCw className={cn('h-3.5 w-3.5', isRefreshing && 'animate-spin')} />

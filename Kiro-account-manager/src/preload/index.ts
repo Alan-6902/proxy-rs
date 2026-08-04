@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
+type UpstreamKiroCredentialInput =
+  | string
+  | {
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      accessToken?: string
+      kiroApiKey?: string
+    }
+
 const api = {
   // 打开外部链接
   openExternal: (url: string, usePrivateMode?: boolean): void => {
@@ -49,15 +57,19 @@ const api = {
     id: string
     email: string
     idp?: string
+    profileArn?: string
     needsTokenRefresh?: boolean
     credentials: {
-      refreshToken: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      kiroApiKey?: string
+      refreshToken?: string
       clientId?: string
       clientSecret?: string
       region?: string
       authMethod?: string
       accessToken?: string
       provider?: string
+      profileArn?: string
     }
   }>, concurrency?: number, syncInfo?: boolean): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
     return ipcRenderer.invoke('background-batch-refresh', accounts, concurrency, syncInfo)
@@ -90,7 +102,9 @@ const api = {
     id: string
     email: string
     credentials: {
-      accessToken: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      accessToken?: string
+      kiroApiKey?: string
       refreshToken?: string
       clientId?: string
       clientSecret?: string
@@ -408,7 +422,7 @@ const api = {
   },
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxyAddAccount: (account: ({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-add-account', account)
   },
 
@@ -418,7 +432,7 @@ const api = {
   },
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
+  proxySyncAccounts: (accounts: Array<({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)>): Promise<{ success: boolean; accountCount?: number; error?: string }> => {
     return ipcRenderer.invoke('proxy-sync-accounts', accounts)
   },
 
@@ -452,23 +466,23 @@ const api = {
   },
 
   // 获取账户可用模型列表
-  accountGetModels: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }> => {
-    return ipcRenderer.invoke('account-get-models', accessToken, region, profileArn, provider, authMethod, accountId)
+  accountGetModels: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }> => {
+    return ipcRenderer.invoke('account-get-models', credential, region, profileArn, provider, authMethod, accountId)
   },
 
   // 获取可用订阅列表
-  accountGetSubscriptions: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }> => {
-    return ipcRenderer.invoke('account-get-subscriptions', accessToken, region, profileArn, provider, authMethod, accountId)
+  accountGetSubscriptions: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }> => {
+    return ipcRenderer.invoke('account-get-subscriptions', credential, region, profileArn, provider, authMethod, accountId)
   },
 
   // 获取订阅管理/支付链接
-  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
-    return ipcRenderer.invoke('account-get-subscription-url', accessToken, subscriptionType, region, profileArn, provider, authMethod, accountId)
+  accountGetSubscriptionUrl: (credential: UpstreamKiroCredentialInput, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
+    return ipcRenderer.invoke('account-get-subscription-url', credential, subscriptionType, region, profileArn, provider, authMethod, accountId)
   },
 
   // 设置用户超额偏好
-  accountSetOverage: (accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('account-set-overage', accessToken, overageStatus, region, profileArn, provider, authMethod, accountId)
+  accountSetOverage: (credential: UpstreamKiroCredentialInput, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('account-set-overage', credential, overageStatus, region, profileArn, provider, authMethod, accountId)
   },
 
   // 在新窗口打开订阅链接

@@ -6,7 +6,7 @@ import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
 import { fetch as undiciFetch, type RequestInit as UndiciRequestInit, type Dispatcher } from 'undici'
 import icon from '../../resources/icon.png?asset'
-import { ADMIN_API_KEY_PREFIX, ADMIN_KEY_UPDATE_ERROR, assertDistinctAdminApiKey, ProxyServer, configureProxyClients, stripAdminApiKey, switchAdminApiKey, type ProxyAccount, type ProxyConfig, type ProxyClientTarget, type ProxyClientModel } from './proxy'
+import { ADMIN_API_KEY_PREFIX, ADMIN_KEY_UPDATE_ERROR, assertDistinctAdminApiKey, buildBackgroundRefreshPlan, buildProxyAccounts, ProxyServer, configureProxyClients, stripAdminApiKey, switchAdminApiKey, type ProxyAccount, type ProxyConfig, type ProxyClientTarget, type ProxyClientModel } from './proxy'
 import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback } from './proxy/kiroApi'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
@@ -267,6 +267,9 @@ function initProxyServer(): ProxyServer {
       },
       // Token 刷新回调 - 复用已有的刷新逻辑，含账号绑定代理
       onTokenRefresh: async (account) => {
+        if (account.credentialKind === 'kiro_api_key') {
+          return { success: false, error: 'Kiro API key accounts cannot refresh' }
+        }
         try {
           console.log(`[ProxyServer] Refreshing token for ${account.email || account.id}${account.proxyUrl ? ' [via bound proxy]' : ''}`)
           const refreshResult = await refreshTokenByMethod(
@@ -377,22 +380,7 @@ function initProxyServer(): ProxyServer {
           return p.url
         }
 
-        const proxyAccounts = Object.values(accountData.accounts)
-          .filter((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
-          .map((acc: any) => ({
-            id: acc.id,
-            email: acc.email,
-            accessToken: acc.credentials.accessToken,
-            refreshToken: acc.credentials?.refreshToken,
-            profileArn: acc.profileArn || acc.credentials?.profileArn,
-            expiresAt: acc.credentials?.expiresAt,
-            clientId: acc.credentials?.clientId,
-            clientSecret: acc.credentials?.clientSecret,
-            region: acc.credentials?.region || 'us-east-1',
-            authMethod: acc.credentials?.authMethod,
-            provider: acc.credentials?.provider || acc.idp,
-            proxyUrl: buildProxyUrl(acc.id)
-          }))
+        const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
         if (proxyAccounts.length > 0 && proxyServer) {
           const pool = proxyServer.getAccountPool()
           proxyAccounts.forEach(acc => pool.addAccount(acc))
@@ -864,74 +852,99 @@ async function ssoDeviceAuth(bearerToken: string, region: string = 'us-east-1'):
   return { success: false, error: '授权超时，请重试' }
 }
 
+type UpstreamKiroCredential =
+  | string
+  | {
+      credentialKind?: 'oauth'
+      accessToken: string
+      kiroApiKey?: never
+      idp?: string
+    }
+  | {
+      credentialKind: 'kiro_api_key'
+      accessToken?: never
+      kiroApiKey: string
+      idp?: string
+    }
+
+function resolveUpstreamKiroCredential(input: {
+  credentialKind?: 'oauth' | 'kiro_api_key'
+  accessToken?: string
+  kiroApiKey?: string
+  idp?: string
+}): Exclude<UpstreamKiroCredential, string> {
+  const kiroApiKey = input.kiroApiKey?.trim()
+  const credentialKind = input.credentialKind ?? (kiroApiKey ? 'kiro_api_key' : 'oauth')
+  if (credentialKind === 'kiro_api_key') {
+    if (!kiroApiKey) throw new Error('Missing Kiro API key')
+    return { credentialKind, kiroApiKey, idp: input.idp }
+  }
+
+  const accessToken = input.accessToken?.trim()
+  if (!accessToken) throw new Error('Missing OAuth access token')
+  return { credentialKind: 'oauth', accessToken, idp: input.idp }
+}
+
+function getUpstreamKiroAuth(credential: UpstreamKiroCredential, fallbackIdp = 'BuilderId'): {
+  accessToken: string
+  isApiKey: boolean
+  idp: string
+  headers: Record<string, string>
+} {
+  const source = typeof credential === 'string'
+    ? resolveUpstreamKiroCredential({ accessToken: credential })
+    : resolveUpstreamKiroCredential(credential)
+  const isApiKey = source.credentialKind === 'kiro_api_key'
+  const accessToken = isApiKey ? source.kiroApiKey : source.accessToken
+  const headers: Record<string, string> = { authorization: `Bearer ${accessToken}` }
+  if (isApiKey) headers.tokentype = 'API_KEY'
+  return { accessToken, isApiKey, idp: source.idp || fallbackIdp, headers }
+}
+
 async function kiroApiRequest<T>(
   operation: string,
   body: Record<string, unknown>,
-  accessToken: string,
-  idp: string = 'BuilderId',  // 支持 BuilderId, Github, Google
-  email?: string              // 用于日志标识
+  credential: UpstreamKiroCredential,
+  idp: string = 'BuilderId',
+  email?: string
 ): Promise<T> {
-  const logTag = email || `token:${accessToken?.slice(-6) || '?'}`
-  console.log(`[Kiro API] ${operation} [${logTag}] ${idp}`)
+  const auth = getUpstreamKiroAuth(credential, idp)
+  const logTag = email || 'upstream-account'
+  console.log(`[Kiro API] ${operation} [${logTag}] ${auth.idp}`)
   const agent = getNetworkAgent()
-  
-  // 使用 undici fetch 支持代理
+
   const headers: Record<string, string> = {
-    'accept': 'application/cbor',
+    accept: 'application/cbor',
     'content-type': 'application/cbor',
     'smithy-protocol': 'rpc-v2-cbor',
     'amz-sdk-invocation-id': generateInvocationId(),
     'amz-sdk-request': 'attempt=1; max=1',
     'x-amz-user-agent': getKiroAmzUserAgent(),
-    'authorization': `Bearer ${accessToken}`,
-    'cookie': `Idp=${idp}; AccessToken=${accessToken}`
+    ...auth.headers
   }
-  
-  let response: Response
-  if (agent) {
-    response = await undiciFetch(`${KIRO_API_BASE}/${operation}`, {
-      method: 'POST',
-      headers,
-      body: Buffer.from(encode(body)),
-      dispatcher: agent
-    } as UndiciRequestInit) as unknown as Response
-  } else {
-    response = await fetchWithAppProxy(`${KIRO_API_BASE}/${operation}`, {
-      method: 'POST',
-      headers,
-      body: Buffer.from(encode(body))
-    })
-  }
+  if (!auth.isApiKey) headers.cookie = `Idp=${auth.idp}; AccessToken=${auth.accessToken}`
+
+  const response = agent
+    ? await undiciFetch(`${KIRO_API_BASE}/${operation}`, { method: 'POST', headers, body: Buffer.from(encode(body)), dispatcher: agent } as UndiciRequestInit) as unknown as Response
+    : await fetchWithAppProxy(`${KIRO_API_BASE}/${operation}`, { method: 'POST', headers, body: Buffer.from(encode(body)) })
 
   if (!response.ok) {
-    // 尝试解析 CBOR 格式的错误响应
     let errorMessage = `HTTP ${response.status}`
     const errorBuffer = await response.arrayBuffer()
     try {
-      const errorData = decode(Buffer.from(errorBuffer)) as { __type?: string; message?: string }
-      if (errorData.__type && errorData.message) {
-        // 提取错误类型名称（去掉命名空间）
-        const errorType = errorData.__type.split('#').pop() || errorData.__type
-        // 在错误消息中包含 HTTP 状态码，便于封禁检测
-        errorMessage = `HTTP ${response.status}: ${errorType}: ${errorData.message}`
-      } else if (errorData.message) {
-        errorMessage = `HTTP ${response.status}: ${errorData.message}`
-      }
-      console.error(`[Kiro API] Error:`, errorData)
+      const errorData = decode(Buffer.from(errorBuffer)) as { __type?: string; message?: string; reason?: string; code?: string }
+      const errorType = errorData.__type?.split('#').pop()
+      const reason = errorData.reason || errorData.code
+      errorMessage = [`HTTP ${response.status}`, errorType, reason, errorData.message].filter(Boolean).join(': ')
+      console.error('[Kiro API] Error:', { status: response.status, errorType, reason })
     } catch {
-      // 如果 CBOR 解析失败，显示原始内容
-      const errorText = Buffer.from(errorBuffer).toString('utf-8')
-      console.error(`[Kiro API] Error (raw): ${errorText}`)
+      console.error('[Kiro API] Error response was not CBOR:', response.status)
     }
     throw new Error(errorMessage)
   }
 
-  const arrayBuffer = await response.arrayBuffer()
-  const result = decode(Buffer.from(arrayBuffer)) as T
-  // 精简响应日志：一行摘要 + 完整数据放 data（ⓘ 展开）
-  const r = result as Record<string, unknown>
-  const resSummary = r.email ? `${r.email} [${r.status || 'ok'}]` : `${response.status}`
-  console.log(`[Kiro API] ${operation} [${logTag}] → ${resSummary}`, result)
+  const result = decode(Buffer.from(await response.arrayBuffer())) as T
+  console.log(`[Kiro API] ${operation} [${logTag}] → ${response.status}`)
   return result
 }
 
@@ -1019,65 +1032,55 @@ function normalizeResetDate(value: number | string | undefined): string | undefi
 async function fetchRestApi(
   baseUrl: string,
   path: string,
-  accessToken: string
+  credential: UpstreamKiroCredential
 ): Promise<Response> {
   const agent = getNetworkAgent()
+  const auth = getUpstreamKiroAuth(credential)
   const headers: Record<string, string> = {
-    'Accept': 'application/json',
-    'Authorization': `Bearer ${accessToken}`,
+    Accept: 'application/json',
+    ...auth.headers,
     'User-Agent': getKiroUserAgent(),
     'x-amz-user-agent': getKiroAmzUserAgent()
   }
   const url = `${baseUrl}${path}`
   if (agent) {
-    return await undiciFetch(url, {
-      method: 'GET',
-      headers,
-      dispatcher: agent
-    } as UndiciRequestInit) as unknown as Response
+    return await undiciFetch(url, { method: 'GET', headers, dispatcher: agent } as UndiciRequestInit) as unknown as Response
   }
   return await fetchWithAppProxy(url, { method: 'GET', headers })
 }
 
 async function getUsageLimitsRest(
-  accessToken: string,
+  credential: UpstreamKiroCredential,
   profileArn?: string,
-  ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
-  email?: string              // 用于日志标识
+  ssoRegion?: string,
+  email?: string
 ): Promise<UsageLimitsResponse> {
-  const logTag = email || `token:${accessToken?.slice(-6) || '?'}`
+  const logTag = email || 'upstream-account'
   console.log(`[Kiro REST API] GetUsageLimits [${logTag}] region=${ssoRegion || 'default'}`)
-  
+
   const params = new URLSearchParams({
     origin: 'AI_EDITOR',
     resourceType: 'AGENTIC_REQUEST',
     isEmailRequired: 'true'
   })
-  if (profileArn) {
-    params.set('profileArn', profileArn)
-  }
+  if (profileArn) params.set('profileArn', profileArn)
   const path = `/getUsageLimits?${params.toString()}`
-  
-  // 根据 SSO 区域选择主端点
   const primaryBase = getRestApiBase(ssoRegion)
   const fallbackBase = getFallbackRestApiBase(ssoRegion)
-  
-  let response = await fetchRestApi(primaryBase, path, accessToken)
-  
-  // 如果主端点返回 403，尝试备用端点
+
+  let response = await fetchRestApi(primaryBase, path, credential)
   if (response.status === 403) {
     console.log(`[Kiro REST API] Primary 403, fallback → ${fallbackBase}`)
-    response = await fetchRestApi(fallbackBase, path, accessToken)
+    response = await fetchRestApi(fallbackBase, path, credential)
   }
-  
   if (!response.ok) {
     const errorText = await response.text()
-    console.error(`[Kiro REST API] GetUsageLimits failed: ${response.status}`, errorText)
+    console.error(`[Kiro REST API] GetUsageLimits failed: ${response.status}`)
     throw new Error(`HTTP ${response.status}: ${errorText}`)
   }
-  
+
   const result = await response.json()
-  console.log(`[Kiro REST API] GetUsageLimits [${logTag}] → ${response.status}`, result)
+  console.log(`[Kiro REST API] GetUsageLimits [${logTag}] → ${response.status}`)
   return result
 }
 
@@ -1137,13 +1140,13 @@ interface UnifiedUsageResponse {
 }
 
 async function getUsageAndLimits(
-  accessToken: string,
+  accessToken: UpstreamKiroCredential,
   idp: string = 'BuilderId',
   profileArn?: string,
   ssoRegion?: string,         // SSO 区域，用于选择正确的 REST API 端点
   email?: string              // 用于日志标识
 ): Promise<UnifiedUsageResponse> {
-  if (currentUsageApiType === 'rest') {
+  if (currentUsageApiType === 'rest' || (typeof accessToken !== 'string' && accessToken.credentialKind === 'kiro_api_key')) {
     // 使用 REST API (GetUsageLimits)
     const result = await getUsageLimitsRest(accessToken, profileArn, ssoRegion, email)
     // REST API 返回的字段名和 CBOR API 相同，直接返回
@@ -1513,7 +1516,9 @@ type BackgroundRefreshAccount = {
   profileArn?: string
   needsTokenRefresh?: boolean
   credentials: {
-    refreshToken: string
+    credentialKind?: 'oauth' | 'kiro_api_key'
+    kiroApiKey?: string
+    refreshToken?: string
     clientId?: string
     clientSecret?: string
     region?: string
@@ -1571,6 +1576,8 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
           provider?: string
           profileArn?: string
           expiresAt?: number
+          credentialKind?: 'oauth' | 'kiro_api_key'
+          kiroApiKey?: string
         }
       }>
       autoRefreshEnabled?: boolean
@@ -1588,10 +1595,10 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
     const toRefresh: BackgroundRefreshAccount[] = []
     for (const [id, acc] of Object.entries(data.accounts)) {
       const creds = acc?.credentials
-      if (!creds?.refreshToken) continue
+      const refreshPlan = buildBackgroundRefreshPlan(creds || {}, true)
+      if (!refreshPlan.shouldRefreshToken || !creds?.refreshToken) continue
       if (isBannedAccountErrorMain(acc.lastError)) continue
       const expiresAt = creds.expiresAt
-      // 只刷"即将过期/已过期"的；没有 expiresAt 的跳过（无从判断）
       if (!expiresAt || expiresAt - now > leadMs) continue
       toRefresh.push({
         id,
@@ -1599,12 +1606,14 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
         profileArn: acc.profileArn,
         needsTokenRefresh: true,
         credentials: {
+          credentialKind: refreshPlan.credentialKind,
+          kiroApiKey: refreshPlan.kiroApiKey,
           refreshToken: creds.refreshToken,
           clientId: creds.clientId,
           clientSecret: creds.clientSecret,
           region: creds.region,
           authMethod: creds.authMethod,
-          accessToken: creds.accessToken,
+          accessToken: refreshPlan.accessToken,
           provider: creds.provider,
           profileArn: creds.profileArn
         }
@@ -1613,7 +1622,6 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
 
     if (toRefresh.length === 0) return
     console.log(`[MainPoolRefresh] ${toRefresh.length} token(s) expiring within ${Math.round(leadMs / 60000)}min, refreshing...`)
-    // syncInfo=false：仅刷 token；用量/订阅等信息同步由渲染进程定时器负责，避免主进程跑重活
     await backgroundBatchRefreshImpl(toRefresh, concurrency, false)
   } catch (err) {
     console.warn('[MainPoolRefresh] tick failed:', err instanceof Error ? err.message : err)
@@ -1872,29 +1880,7 @@ function createWindow(): void {
             return p.url
           }
 
-          const proxyAccounts = Object.values(accountData.accounts)
-            .filter((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
-            .map((acc: any) => {
-              const provider = acc.credentials?.provider || acc.idp
-              const authMethod = acc.credentials?.authMethod
-              const profileArn = acc.profileArn || acc.credentials?.profileArn
-              // BuilderId/Social 不需要预填 profileArn（resolveProfileArn 会兜底，流式端点自动不传占位符）
-              // Enterprise 留给自愈获取真实 ARN
-              return {
-                id: acc.id,
-                email: acc.email,
-                accessToken: acc.credentials.accessToken,
-                refreshToken: acc.credentials?.refreshToken,
-                profileArn,
-                expiresAt: acc.credentials?.expiresAt,
-                clientId: acc.credentials?.clientId,
-                clientSecret: acc.credentials?.clientSecret,
-                region: acc.credentials?.region || 'us-east-1',
-                authMethod,
-                provider,
-                proxyUrl: buildProxyUrl(acc.id)
-              }
-            })
+          const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
           if (proxyAccounts.length > 0) {
             const pool = server.getAccountPool()
             pool.clear()
@@ -2464,7 +2450,10 @@ app.whenReady().then(async () => {
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
   ipcMain.handle('refresh-account-token', async (_event, account) => {
     try {
-      const { refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials || {}
+      const { credentialKind, kiroApiKey, refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials || {}
+      if (credentialKind === 'kiro_api_key' || kiroApiKey) {
+        return { success: false, error: { message: 'Kiro API key accounts cannot refresh' } }
+      }
 
       if (!refreshToken) {
         return { success: false, error: { message: '缺少 Refresh Token' } }
@@ -2886,7 +2875,14 @@ app.whenReady().then(async () => {
     }
 
     try {
-      const { accessToken, refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials || {}
+      const { accessToken, refreshToken, clientId, clientSecret, region, authMethod, provider, profileArn, kiroApiKey, credentialKind } = account.credentials || {}
+      const upstreamCredential = resolveUpstreamKiroCredential({
+        credentialKind,
+        accessToken,
+        kiroApiKey,
+        idp: provider || account.idp
+      })
+      const upstreamAuth = getUpstreamKiroAuth(upstreamCredential)
 
       // 查询账号绑定的代理（账号池）
       const boundProxyUrl = proxyServer
@@ -2902,23 +2898,21 @@ app.whenReady().then(async () => {
         idp = provider
       }
 
-      if (!accessToken) {
-        console.log('[IPC] Missing accessToken')
-        return { success: false, error: { message: '缺少 accessToken' } }
+      if (!upstreamAuth.accessToken) {
+        return { success: false, error: { message: '缺少上游 Kiro 凭据' } }
       }
 
       // 第一次尝试：使用当前 accessToken
       try {
         // 并行调用 GetUserInfo 和 getUsageAndLimits
         const [userInfoResult, usageResult] = await Promise.all([
-          getUserInfo(accessToken, idp, account?.email).catch((err: Error) => {
-            // 封禁错误不能吞掉，必须向上抛出
-            if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
-              throw err
-            }
-            return undefined
-          }),
-          getUsageAndLimits(accessToken, idp, undefined, region, account?.email)
+          upstreamAuth.isApiKey
+            ? Promise.resolve(undefined)
+            : getUserInfo(upstreamAuth.accessToken, idp, account?.email).catch((err: Error) => {
+                if (err.message.includes('423') || err.message.includes('AccountSuspended')) throw err
+                return undefined
+              }),
+          getUsageAndLimits(upstreamCredential, idp, account.profileArn || profileArn, region, account?.email)
         ])
         return parseUsageResponse(usageResult, undefined, userInfoResult)
       } catch (apiError) {
@@ -3011,9 +3005,11 @@ app.whenReady().then(async () => {
             return
           }
           if (account.id) poolRefreshInFlightIds.add(account.id)
+          const isApiKey = buildBackgroundRefreshPlan(account.credentials, false).credentialKind === 'kiro_api_key'
           try {
-            const { refreshToken, clientId, clientSecret, region, authMethod, accessToken, provider } = account.credentials
+            const { refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials
             const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
+            const refreshPlan = buildBackgroundRefreshPlan(account.credentials, needsTokenRefresh)
 
             // 查询账号绑定的代理（从主进程账号池）
             const boundProxyUrl = proxyServer
@@ -3028,12 +3024,12 @@ app.whenReady().then(async () => {
               idp = provider
             }
             
-            let newAccessToken = accessToken
+            let newAccessToken = refreshPlan.accessToken
             let newRefreshToken = refreshToken
             let newExpiresIn: number | undefined
 
-            // 只有需要刷新 Token 时才刷新
-            if (needsTokenRefresh) {
+            // API key 从不执行 OAuth 刷新；OAuth 保持原有刷新路径。
+            if (refreshPlan.shouldRefreshToken) {
               if (!refreshToken) {
                 failed++
                 completed++
@@ -3068,7 +3064,7 @@ app.whenReady().then(async () => {
                 return
               }
 
-              newAccessToken = refreshResult.accessToken || accessToken
+              newAccessToken = refreshResult.accessToken || refreshPlan.accessToken
               newRefreshToken = refreshResult.refreshToken || refreshToken
               newExpiresIn = refreshResult.expiresIn
 
@@ -3078,7 +3074,7 @@ app.whenReady().then(async () => {
             const existingProfileArn = account.profileArn || account.credentials?.profileArn
             let resolvedBgProfileArn: string | undefined
             const isEnt = (provider || account.idp) === 'Enterprise' || authMethod === 'external_idp'
-            if (!existingProfileArn && newAccessToken && isEnt) {
+            if (!isApiKey && !existingProfileArn && newAccessToken && isEnt) {
               try {
                 resolvedBgProfileArn = await fetchEnterpriseProfileArn({
                   id: account.id || '',
@@ -3096,7 +3092,7 @@ app.whenReady().then(async () => {
             }
 
             // 获取账号信息
-            if (!newAccessToken) {
+            if (!newAccessToken && !isApiKey) {
               failed++
               completed++
               return
@@ -3174,7 +3170,10 @@ app.whenReady().then(async () => {
                     overageLimit?: number | null
                   }
                 }
-                const rawUsage = await getUsageAndLimits(newAccessToken, idp, undefined, region) as UsageResponse
+                const upstreamCredential: UpstreamKiroCredential = isApiKey
+                  ? { credentialKind: 'kiro_api_key', kiroApiKey: refreshPlan.kiroApiKey || '' }
+                  : newAccessToken!
+                const rawUsage = await getUsageAndLimits(upstreamCredential, idp, account.profileArn, region) as UsageResponse
                 
                 // 解析使用量数据
                 const creditUsage = rawUsage.usageBreakdownList?.find(b => b.resourceType === 'CREDIT')
@@ -3262,16 +3261,17 @@ app.whenReady().then(async () => {
                 }
               } catch (apiError) {
                 const errMsg = apiError instanceof Error ? apiError.message : String(apiError)
-                console.log(`[BackgroundRefresh] Usage API error for ${account.id}:`, errMsg)
+                const safeErrorMessage = isApiKey ? 'API key usage sync failed' : errMsg
+                console.log(`[BackgroundRefresh] Usage API error for ${account.id}:`, safeErrorMessage)
                 if (errMsg.includes('AccountSuspendedException') || errMsg.includes('423')) {
                   status = 'error'
-                  errorMessage = errMsg
+                  errorMessage = isApiKey ? 'API key account suspended' : errMsg
                 }
               }
 
-              // 调用 GetUserInfo API 获取用户状态
-              try {
-                userInfoData = await getUserInfo(newAccessToken, idp)
+              // API key 没有 OAuth 用户信息端点，跳过该调用。
+              if (refreshPlan.shouldFetchUserInfo) try {
+                userInfoData = await getUserInfo(newAccessToken!, idp)
               } catch (apiError) {
                 const errMsg = apiError instanceof Error ? apiError.message : String(apiError)
                 if (errMsg.includes('AccountSuspendedException') || errMsg.includes('423')) {
@@ -3289,9 +3289,11 @@ app.whenReady().then(async () => {
               id: account.id,
               success: true,
               data: {
-                accessToken: newAccessToken,
-                refreshToken: newRefreshToken,
-                expiresIn: newExpiresIn,
+                ...(isApiKey ? {} : {
+                  accessToken: newAccessToken,
+                  refreshToken: newRefreshToken,
+                  expiresIn: newExpiresIn
+                }),
                 profileArn: resolvedBgProfileArn || undefined,
                 usage: parsedUsage,
                 subscription: subscriptionData,
@@ -3309,7 +3311,7 @@ app.whenReady().then(async () => {
             mainWindow?.webContents.send('background-refresh-result', {
               id: account.id,
               success: false,
-              error: e instanceof Error ? e.message : 'Unknown error'
+              error: isApiKey ? 'API key background sync failed' : (e instanceof Error ? e.message : 'Unknown error')
             })
           } finally {
             if (account.id) poolRefreshInFlightIds.delete(account.id)
@@ -3345,7 +3347,10 @@ app.whenReady().then(async () => {
     id: string
     email: string
     credentials: {
-      accessToken: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      accessToken?: string
+      kiroApiKey?: string
+      profileArn?: string
       refreshToken?: string
       clientId?: string
       clientSecret?: string
@@ -3368,18 +3373,14 @@ app.whenReady().then(async () => {
       await Promise.allSettled(
         batch.map(async (account) => {
           try {
-            const { accessToken, authMethod, provider } = account.credentials
-            
-            if (!accessToken) {
-              failed++
-              completed++
-              mainWindow?.webContents.send('background-check-result', {
-                id: account.id,
-                success: false,
-                error: '缺少 accessToken'
-              })
-              return
-            }
+            const { accessToken, kiroApiKey, credentialKind, authMethod, provider } = account.credentials
+            const upstreamCredential = resolveUpstreamKiroCredential({
+              credentialKind,
+              accessToken,
+              kiroApiKey,
+              idp: provider || account.idp
+            })
+            const upstreamAuth = getUpstreamKiroAuth(upstreamCredential)
 
             // 确定 idp
             let idp = account.idp || 'BuilderId'
@@ -3389,7 +3390,7 @@ app.whenReady().then(async () => {
 
             // 调用 API 获取用量和用户信息（根据配置选择 REST 或 CBOR 格式）
             const [usageRes, userInfoRes] = await Promise.allSettled([
-              getUsageAndLimits(accessToken, idp, undefined, account.credentials?.region, account.email) as Promise<{
+              getUsageAndLimits(upstreamCredential, idp, account.credentials.profileArn, account.credentials?.region, account.email) as Promise<{
                 usageBreakdownList?: Array<{
                   resourceType?: string
                   displayName?: string
@@ -3434,18 +3435,20 @@ app.whenReady().then(async () => {
                   userId?: string
                 }
               }>,
-              kiroApiRequest<{
-                email?: string
-                userId?: string
-                status?: string
-                idp?: string
-              }>('GetUserInfo', { origin: 'KIRO_IDE' }, accessToken, idp, account.email).catch((err: Error) => {
+              (upstreamAuth.isApiKey
+                ? Promise.resolve(null)
+                : kiroApiRequest<{
+                    email?: string
+                    userId?: string
+                    status?: string
+                    idp?: string
+                  }>('GetUserInfo', { origin: 'KIRO_IDE' }, upstreamAuth.accessToken, idp, account.email).catch((err: Error) => {
                 // 封禁错误不能吞掉，需要在后续逻辑中检测
                 if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
                   throw err
                 }
                 return null
-              })
+                  }))
             ])
 
             // 解析响应（kiroApiRequest 直接返回数据或抛出异常）
@@ -4541,24 +4544,28 @@ app.whenReady().then(async () => {
       if (!accountData?.accounts) return { models: [] }
 
       const allAccounts = Object.values(accountData.accounts) as any[]
-      const account = allAccounts.find((acc: any) => acc.isActive && acc.credentials?.accessToken)
-        || allAccounts.find((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
+      const account = allAccounts.find((acc: any) => acc.isActive && (acc.credentials?.accessToken || acc.credentials?.kiroApiKey))
+        || allAccounts.find((acc: any) => acc.status === 'active' && (acc.credentials?.accessToken || acc.credentials?.kiroApiKey))
       if (!account) return { models: [] }
 
-      const proxyAccount = {
+      const credential = resolveUpstreamKiroCredential({
+        credentialKind: account.credentials?.credentialKind,
+        accessToken: account.credentials?.accessToken,
+        kiroApiKey: account.credentials?.kiroApiKey,
+        idp: account.credentials?.provider || account.idp
+      })
+      const models = await fetchKiroModels({
         id: account.id,
         email: account.email,
-        accessToken: account.credentials.accessToken,
+        ...credential,
         refreshToken: account.credentials?.refreshToken,
-        profileArn: account.profileArn,
+        profileArn: account.profileArn || account.credentials?.profileArn,
         expiresAt: account.credentials?.expiresAt,
         clientId: account.credentials?.clientId,
         clientSecret: account.credentials?.clientSecret,
         region: account.credentials?.region || 'us-east-1',
         authMethod: account.credentials?.authMethod
-      }
-
-      const models = await fetchKiroModels(proxyAccount)
+      } as ProxyAccount)
       return {
         models: models.map(m => ({
           id: m.modelId,
@@ -4987,8 +4994,12 @@ app.whenReady().then(async () => {
   // IPC: 添加账号到反代池
   ipcMain.handle('proxy-add-account', (_event, account: ProxyAccount) => {
     try {
+      const [normalizedAccount] = buildProxyAccounts([account])
+      if (!normalizedAccount) {
+        return { success: false, error: 'Account is inactive or missing upstream credentials' }
+      }
       const server = initProxyServer()
-      server.getAccountPool().addAccount(account)
+      server.getAccountPool().addAccount(normalizedAccount)
       return { success: true, accountCount: server.getAccountPool().size }
     } catch (error) {
       console.error('[ProxyServer] Add account failed:', error)
@@ -5013,8 +5024,9 @@ app.whenReady().then(async () => {
     try {
       const server = initProxyServer()
       const pool = server.getAccountPool()
+      const normalizedAccounts = buildProxyAccounts(accounts)
       pool.clear()
-      for (const account of accounts) {
+      for (const account of normalizedAccounts) {
         pool.addAccount(account)
       }
       return { success: true, accountCount: pool.size }
@@ -5094,11 +5106,14 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取账户可用模型列表
-  ipcMain.handle('account-get-models', async (_event, accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-models', async (_event, credentialInput: UpstreamKiroCredential, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
+      const credential = typeof credentialInput === 'string'
+        ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+        : resolveUpstreamKiroCredential(credentialInput)
       const models = await fetchKiroModels({
         id: accountId || 'model-list-request',
-        accessToken,
+        ...credential,
         region: region || 'us-east-1',
         profileArn,
         provider,
@@ -5123,15 +5138,14 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取可用订阅列表
-  ipcMain.handle('account-get-subscriptions', async (_event, accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-subscriptions', async (_event, credentialInput: UpstreamKiroCredential, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
-      const result = await fetchAvailableSubscriptions({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount)
+      const credential = typeof credentialInput === 'string'
+        ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+        : resolveUpstreamKiroCredential(credentialInput)
+      const result = await fetchAvailableSubscriptions({ id: accountId || 'subscription-request', ...credential, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount)
       if (result.subscriptionPlans) {
-        return { 
-          success: true, 
-          plans: result.subscriptionPlans,
-          disclaimer: result.disclaimer 
-        }
+        return { success: true, plans: result.subscriptionPlans, disclaimer: result.disclaimer }
       }
       return { success: false, error: 'No subscription plans returned', plans: [] }
     } catch (error) {
@@ -5140,12 +5154,13 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取订阅管理/支付链接
-  ipcMain.handle('account-get-subscription-url', async (_event, accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-get-subscription-url', async (_event, credentialInput: UpstreamKiroCredential, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
-      const result = await fetchSubscriptionToken({ id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount, subscriptionType)
-      if (result.encodedVerificationUrl) {
-        return { success: true, url: result.encodedVerificationUrl, status: result.status }
-      }
+      const credential = typeof credentialInput === 'string'
+        ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+        : resolveUpstreamKiroCredential(credentialInput)
+      const result = await fetchSubscriptionToken({ id: accountId || 'subscription-request', ...credential, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount, subscriptionType)
+      if (result.encodedVerificationUrl) return { success: true, url: result.encodedVerificationUrl, status: result.status }
       return { success: false, error: result.message || 'No subscription URL returned' }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to get subscription URL' }
@@ -5153,13 +5168,15 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 设置用户偏好（超额开启/关闭）
-  ipcMain.handle('account-set-overage', async (_event, accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
+  ipcMain.handle('account-set-overage', async (_event, credentialInput: UpstreamKiroCredential, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => {
     try {
-      const result = await setUserPreference(
-        { id: accountId || 'subscription-request', accessToken, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount,
+      const credential = typeof credentialInput === 'string'
+        ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+        : resolveUpstreamKiroCredential(credentialInput)
+      return await setUserPreference(
+        { id: accountId || 'subscription-request', ...credential, region: region || 'us-east-1', profileArn, provider, authMethod } as ProxyAccount,
         overageStatus
       )
-      return result
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to set overage' }
     }

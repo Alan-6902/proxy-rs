@@ -135,6 +135,8 @@ function ensureProxyResponseListenerRegistered(): void {
   })
 }
 
+import { buildAccountsSyncSignature as buildAccountSyncSignature, hasUpstreamKiroCredential } from '../../types/account'
+
 export function ProxyPanel() {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -267,7 +269,7 @@ export function ProxyPanel() {
       const selMode = override?.mode ?? config.multiAccountSelectionMode ?? 'all'
       const selGroupIds = override?.groupIds ?? config.multiAccountGroupIds ?? []
       let candidates = Array.from(accounts.values())
-        .filter(acc => acc.status === 'active' && acc.credentials?.accessToken)
+        .filter(acc => acc.status === 'active' && acc.isActive !== false && hasUpstreamKiroCredential(acc.credentials))
 
       // 多账号轮询 + 'groups' 范围：按选中分组过滤（'__ungrouped__' 表示未分组账号）
       if (config.enableMultiAccount && selMode === 'groups') {
@@ -282,6 +284,8 @@ export function ProxyPanel() {
           id: acc.id,
           email: acc.email,
           accessToken: acc.credentials.accessToken,
+          kiroApiKey: acc.credentials?.kiroApiKey,
+          credentialKind: acc.credentials?.credentialKind || (acc.credentials?.kiroApiKey ? 'kiro_api_key' : 'oauth'),
           refreshToken: acc.credentials?.refreshToken,
           profileArn: acc.profileArn || acc.credentials?.profileArn,
           expiresAt: acc.credentials?.expiresAt,
@@ -446,13 +450,7 @@ export function ProxyPanel() {
    * 这样后台 token 刷新、用量更新等高频变动不会触发重新同步（避免按钮疯狂闪烁），
    * 仅在真正增删账号 / 改分组时才同步。token 更新由主进程账号池自身刷新逻辑处理。
    */
-  const accountsSyncSignature = useMemo(() => {
-    return Array.from(accounts.values())
-      .filter(a => a.status === 'active' && a.credentials?.accessToken)
-      .map(a => `${a.id}:${a.groupId || ''}`)
-      .sort()
-      .join('|')
-  }, [accounts])
+  const accountsSyncSignature = useMemo(() => buildAccountSyncSignature(accounts.values()), [accounts])
 
   // 账号集合变化时同步（防抖 600ms + 仅签名变化才触发；跳过首次 mount 避免每次进页面都同步）
   const syncMountedRef = useRef(false)
@@ -771,7 +769,7 @@ export function ProxyPanel() {
               const selMode = config.multiAccountSelectionMode || 'all'
               const selectedGids = new Set(config.multiAccountGroupIds || [])
               const sortedGroups = Array.from(groups.values()).sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-              const accountList = Array.from(accounts.values()).filter(a => a.status === 'active' && a.credentials?.accessToken)
+              const accountList = Array.from(accounts.values()).filter(a => a.status === 'active' && hasUpstreamKiroCredential(a.credentials))
               const ungroupedCount = accountList.filter(a => !a.groupId).length
               const countByGroup = new Map<string, number>()
               for (const a of accountList) if (a.groupId) countByGroup.set(a.groupId, (countByGroup.get(a.groupId) || 0) + 1)

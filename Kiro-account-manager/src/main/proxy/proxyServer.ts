@@ -20,7 +20,7 @@ import type {
 import { AccountPool, ErrorType, classifyError } from './accountPool'
 import { assertDistinctAdminApiKey } from './adminApiKey'
 import { ClaudeCodeStreamBuffer } from './claudeCodeStreamBuffer'
-import { callKiroApiStream, callKiroApi, callKiroMcpWebSearch, KiroMcpWebSearchError, fetchKiroModels, setModelContextWindow, type KiroModel, type KiroWebSearchResult } from './kiroApi'
+import { callKiroApiStream, callKiroApi, callKiroMcpWebSearch, isKiroApiKeyAccount, isMonthlyRequestQuotaError, KiroMcpWebSearchError, normalizeKiroUpstreamError, UpstreamRetryCategory, fetchKiroModels, setModelContextWindow, type KiroModel, type KiroWebSearchResult } from './kiroApi'
 import { proxyLogger } from './logger'
 import {
   openaiToKiro,
@@ -257,6 +257,16 @@ class BodyTooLargeError extends Error {
   }
 }
 
+class RetryExhaustedError extends Error {
+  constructor(
+    readonly upstreamError: Error,
+    readonly accountId: string
+  ) {
+    super(upstreamError.message)
+    this.name = 'RetryExhaustedError'
+  }
+}
+
 const ADMIN_RATE_LIMIT_BUCKET = 'admin:control'
 const API_KEY_RATE_LIMIT_PREFIX = 'api-key:'
 const IP_RATE_LIMIT_PREFIX = 'ip:'
@@ -340,6 +350,8 @@ export class ProxyServer {
     // 优先级 3：无显式 ID，返回 undefined（kiroApi 用 history fingerprint 兜底）
     return undefined
   }
+
+  private accountedUpstreamErrors: WeakMap<Error, Set<string>> = new WeakMap()
 
   constructor(config: Partial<ProxyConfig> = {}, events: ProxyServerEvents = {}) {
     this.config = {
@@ -1028,6 +1040,9 @@ export class ProxyServer {
   //   - 423 Locked
   private detectSuspendedError(errMsg: string): { reason: string; message: string } | null {
     if (!errMsg) return null
+    if (['TEMPORARILY_SUSPENDED', 'ACCOUNT_SUSPENDED', 'PERMANENTLY_SUSPENDED'].includes(errMsg)) {
+      return { reason: errMsg, message: errMsg }
+    }
 
     // 1) 显式 reason: "TEMPORARILY_SUSPENDED" (Kiro 风控)
     const reasonMatch = errMsg.match(/"reason"\s*:\s*"(TEMPORARILY_SUSPENDED|ACCOUNT_SUSPENDED|PERMANENTLY_SUSPENDED)"/i)
@@ -1175,7 +1190,7 @@ export class ProxyServer {
 
   // 检查 Token 是否需要刷新
   private isTokenExpiringSoon(account: ProxyAccount): boolean {
-    if (!account.expiresAt) return false
+    if (isKiroApiKeyAccount(account) || !account.expiresAt) return false
     const refreshBeforeMs = (this.config.tokenRefreshBeforeExpiry || 300) * 1000
     return Date.now() + refreshBeforeMs >= account.expiresAt
   }
@@ -1183,6 +1198,10 @@ export class ProxyServer {
   // 刷新 Token
   private async refreshToken(account: ProxyAccount, signal?: AbortSignal): Promise<boolean> {
     this.throwIfAborted(signal)
+    if (isKiroApiKeyAccount(account)) {
+      this.accountPool.updateAccount(account.id, { isAvailable: false })
+      return false
+    }
     if (!this.events.onTokenRefresh) {
       console.warn('[ProxyServer] No token refresh callback configured')
       return false
@@ -1266,109 +1285,95 @@ export class ProxyServer {
   // 获取可用账号（包含 Token 刷新检查）
   // P1-8 sessionHint：相同会话尽量复用同一账号（命中 prompt cache + 防风控）
   // P2-21 apiKeyId：用于过滤 API Key 允许使用的账号子集
-  private async getAvailableAccount(signal?: AbortSignal, sessionHint?: string, apiKeyId?: string): Promise<ProxyAccount | null> {
+  private isAccountAllowed(account: ProxyAccount, apiKeyId?: string): boolean {
     const allowedIds = this.getAllowedAccountIds(apiKeyId)
-    const groupMode = this.config.multiAccountSelectionMode === 'groups'
-    const allowedGroupIds = groupMode ? new Set(this.config.multiAccountGroupIds || []) : null
-    const isAllowed = (acc: ProxyAccount | null): boolean => {
-      if (!acc) return true
-      // API Key 白名单（apiKeyAccountBindings）
-      if (allowedIds && !allowedIds.has(acc.id)) return false
-      // 分组过滤（双保险：即便前端忘了重新同步账号池，这里也能拦住非选中分组的账号）
-      if (groupMode && allowedGroupIds) {
-        const gid = acc.groupId || '__ungrouped__'
-        if (!allowedGroupIds.has(gid)) return false
-      }
-      return true
+    if (allowedIds && !allowedIds.has(account.id)) return false
+    if (this.config.multiAccountSelectionMode === 'groups') {
+      const allowedGroups = new Set(this.config.multiAccountGroupIds || [])
+      if (!allowedGroups.has(account.groupId || '__ungrouped__')) return false
     }
+    return account.isAvailable !== false &&
+      !this.accountPool.isSuspended(account) &&
+      !this.accountPool.isQuotaExhausted(account) &&
+      (!account.cooldownUntil || account.cooldownUntil <= Date.now())
+  }
+
+  private getScopedNextAccount(apiKeyId?: string, excludeIds: Set<string> = new Set()): ProxyAccount | null {
+    const candidates = this.accountPool.getAllAccounts().filter(account =>
+      !excludeIds.has(account.id) && this.isAccountAllowed(account, apiKeyId)
+    )
+    if (!candidates.length) return null
+
+    if (!this.config.enableMultiAccount) {
+      const selectedId = this.config.selectedAccountIds?.[0]
+      const selected = selectedId ? candidates.find(account => account.id === selectedId) : undefined
+      if (selected) return selected
+      return this.config.autoSwitchOnQuotaExhausted || !selectedId ? candidates[0] : null
+    }
+
+    const excluded = new Set(this.accountPool.getAllAccounts()
+      .filter(account => !candidates.some(candidate => candidate.id === account.id))
+      .map(account => account.id))
+    for (const id of excludeIds) excluded.add(id)
+    const selected = this.accountPool.getNextAccount(excluded)
+    return selected && candidates.some(candidate => candidate.id === selected.id) ? selected : candidates[0]
+  }
+
+  private recordUpstreamAccountErrorOnce(account: { id: string }, error: Error): void {
+    let recordedAccountIds = this.accountedUpstreamErrors.get(error)
+    if (!recordedAccountIds) {
+      recordedAccountIds = new Set()
+      this.accountedUpstreamErrors.set(error, recordedAccountIds)
+    }
+    if (recordedAccountIds.has(account.id)) return
+    recordedAccountIds.add(account.id)
+
+    const upstreamError = normalizeKiroUpstreamError(error)
+    const statusCode = upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION ? 401 : upstreamError.statusCode || 500
+    this.accountPool.recordError(
+      account.id,
+      classifyError(statusCode, upstreamError.reason || upstreamError.code),
+      isMonthlyRequestQuotaError(upstreamError) ? 402 : undefined
+    )
+  }
+
+  private getTerminalRetryFailure(error: Error, fallbackAccount: ProxyAccount): { account: ProxyAccount; error: Error } {
+    if (error instanceof RetryExhaustedError) {
+      return {
+        account: this.accountPool.getAccount(error.accountId) || fallbackAccount,
+        error: error.upstreamError
+      }
+    }
+    return { account: fallbackAccount, error }
+  }
+
+  private async getAvailableAccount(signal?: AbortSignal, sessionHint?: string, apiKeyId?: string): Promise<ProxyAccount | null> {
     this.throwIfAborted(signal)
-    // 如果 pool 为空，触发懒加载回调尝试同步账号（冷启动场景）
     if (this.accountPool.size === 0 && this.events.onPoolEmpty) {
-      console.log('[ProxyServer] Account pool empty, triggering lazy sync...')
       await this.abortable(this.events.onPoolEmpty(), signal)
     }
     this.throwIfAborted(signal)
 
-    // P1-8 会话粘性：优先复用已绑定的账号（同时受 API Key 绑定过滤）
     if (this.config.sessionAffinityEnabled && sessionHint) {
       const sticky = this.pickAccountWithAffinity(sessionHint)
-      if (sticky && isAllowed(sticky)) {
-        proxyLogger.debug('ProxyServer', `Session affinity hit: ${sessionHint.slice(0, 16)} → ${sticky.email || sticky.id.slice(0, 8)}`)
-        // 仍需检查 token 是否需要刷新
-        if (this.isTokenExpiringSoon(sticky)) {
-          const refreshed = await this.refreshToken(sticky, signal)
-          if (refreshed) {
-            return this.accountPool.getAccount(sticky.id) || sticky
-          }
-        } else {
-          return sticky
+      if (sticky && this.isAccountAllowed(sticky, apiKeyId)) {
+        if (!this.isTokenExpiringSoon(sticky)) return sticky
+        if (await this.refreshToken(sticky, signal)) {
+          return this.accountPool.getAccount(sticky.id) || sticky
         }
       }
     }
 
-    let account: ProxyAccount | null
-
-    if (this.config.enableMultiAccount) {
-      account = this.accountPool.getNextAccount()
-      if (account && !isAllowed(account)) {
-        // 尝试找一个允许的账号（白名单 + 分组都已合并进 isAllowed）
-        const allAccounts = this.accountPool.getAllAccounts()
-        const exclude = new Set<string>()
-        for (const a of allAccounts) {
-          if (!isAllowed(a)) exclude.add(a.id)
-        }
-        account = this.accountPool.getNextAccount(exclude)
-      }
-      if (!account) {
-        const status = this.accountPool.getQuotaStatus()
-        if (status.exhausted > 0 && status.available === 0) {
-          console.log(`[ProxyServer] All accounts quota exhausted (${status.exhausted}/${status.total}), no available accounts`)
-        }
-      }
-    } else {
-      // 禁用多账号轮询时，优先使用指定的账号
-      if (this.config.selectedAccountIds && this.config.selectedAccountIds.length > 0) {
-        // 使用指定的第一个账号
-        account = this.accountPool.getAccount(this.config.selectedAccountIds[0])
-        // 检查指定账号是否配额耗尽，若是则尝试自动切换
-        if (account && this.accountPool.isQuotaExhausted(account) && this.config.autoSwitchOnQuotaExhausted) {
-          const nextAccount = this.accountPool.getNextAvailableAccount(account.id)
-          if (nextAccount) {
-            console.log(`[ProxyServer] Selected account ${account.email || account.id} quota exhausted, auto-switching to ${nextAccount.email || nextAccount.id}`)
-            this.config.selectedAccountIds = [nextAccount.id]
-            this.events.onAccountUpdate?.(nextAccount)
-            account = nextAccount
-          }
-        }
-        if (!account) {
-          console.log(`[ProxyServer] Selected account ${this.config.selectedAccountIds[0]} not found, using first available`)
-          const allAccounts = this.accountPool.getAllAccounts()
-          account = allAccounts.length > 0 ? allAccounts[0] : null
-        }
-      } else {
-        // 没有指定账号，使用第一个可用账号
-        const allAccounts = this.accountPool.getAllAccounts()
-        account = allAccounts.length > 0 ? allAccounts[0] : null
-      }
-    }
-    
+    let account = this.getScopedNextAccount(apiKeyId)
     if (!account) return null
 
-
-    // 检查是否需要刷新 Token
     if (this.isTokenExpiringSoon(account)) {
-      const refreshed = await this.refreshToken(account, signal)
-      if (!refreshed) {
-        // 刷新失败，如果启用多账号才尝试获取下一个账号
-        if (this.config.enableMultiAccount) {
-          return this.accountPool.getNextAccount()
-        }
-        return null
+      if (await this.refreshToken(account, signal)) {
+        account = this.accountPool.getAccount(account.id) || account
+      } else {
+        account = this.getScopedNextAccount(apiKeyId, new Set([account.id]))
+        if (!account) return null
       }
-      // 返回更新后的账号
-      const refreshedAccount = this.accountPool.getAccount(account.id)
-      if (refreshedAccount && sessionHint) this.rememberAffinity(sessionHint, refreshedAccount.id)
-      return refreshedAccount
     }
 
     if (sessionHint) this.rememberAffinity(sessionHint, account.id)
@@ -1376,11 +1381,48 @@ export class ProxyServer {
   }
 
   // 带重试的 API 调用
+  private async getStreamRetryAccount(
+    currentAccount: ProxyAccount,
+    error: Error,
+    apiKeyId: string | undefined,
+    state: { triedIds: Set<string>; refreshedAccountIds: Set<string> },
+    signal?: AbortSignal
+  ): Promise<ProxyAccount | null> {
+    const upstreamError = normalizeKiroUpstreamError(error)
+    const canSwitch = this.config.enableMultiAccount || this.config.autoSwitchOnQuotaExhausted
+    if (!canSwitch || (upstreamError.retryCategory !== UpstreamRetryCategory.AUTHENTICATION && !isMonthlyRequestQuotaError(upstreamError))) {
+      return null
+    }
+
+    if (upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION &&
+      !isKiroApiKeyAccount(currentAccount) &&
+      !state.refreshedAccountIds.has(currentAccount.id)) {
+      state.refreshedAccountIds.add(currentAccount.id)
+      if (await this.refreshToken(currentAccount, signal)) {
+        return this.accountPool.getAccount(currentAccount.id) || currentAccount
+      }
+    }
+
+    if (upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION && isKiroApiKeyAccount(currentAccount)) {
+      this.accountPool.updateAccount(currentAccount.id, { isAvailable: false })
+    }
+    this.recordUpstreamAccountErrorOnce(currentAccount, error)
+
+    state.triedIds.add(currentAccount.id)
+    const nextAccount = this.getScopedNextAccount(apiKeyId, state.triedIds)
+    if (nextAccount && !this.config.enableMultiAccount) {
+      this.config.selectedAccountIds = [nextAccount.id]
+      this.events.onAccountUpdate?.(nextAccount)
+    }
+    return nextAccount
+  }
+
   private async callWithRetry<T>(
     account: ProxyAccount,
     apiCall: (acc: ProxyAccount, endpointIndex: number) => Promise<T>,
     _path: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    apiKeyId?: string
   ): Promise<{ result: T; account: ProxyAccount }> {
     const maxRetries = this.config.maxRetries || 3
     const retryDelay = this.config.retryDelayMs || 1000
@@ -1389,16 +1431,8 @@ export class ProxyServer {
     let endpointIndex = 0
     // 本次请求累计已尝试的账号 ID，避免重试时循环命中已经失败过的账号
     const triedIds = new Set<string>([account.id])
-    /** 切到下一个可用账号；多账号模式带 triedIds 排除，单账号场景退化为旧逻辑 */
-    const switchToNextAccount = (): ProxyAccount | null => {
-      if (this.config.enableMultiAccount) {
-        return this.accountPool.getNextAccount(triedIds)
-      }
-      if (this.config.autoSwitchOnQuotaExhausted) {
-        return this.accountPool.getNextAvailableAccount(triedIds)
-      }
-      return null
-    }
+    /** 初选与重试共用同一 API Key/分组范围，避免重试越权到未绑定账号。 */
+    const switchToNextAccount = (): ProxyAccount | null => this.getScopedNextAccount(apiKeyId, triedIds)
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       this.throwIfAborted(signal)
@@ -1407,14 +1441,15 @@ export class ProxyServer {
         return { result, account: currentAccount }
       } catch (error) {
         if (this.isAbortError(error, signal)) throw error
-        lastError = error as Error
-        const errMsg = lastError.message || ''
+        lastError = error instanceof Error ? error : new Error('Upstream Kiro API request failed')
+        const upstreamError = normalizeKiroUpstreamError(lastError)
+        const errMsg = upstreamError.message
 
-        console.log(`[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): ${errMsg}`)
+        console.log(`[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): HTTP ${upstreamError.statusCode || 'unknown'}`)
 
         // 优先检测账号被长期封禁（不是 token 问题，刷新也没用）
         // 特征：HTTP 403 + reason: "TEMPORARILY_SUSPENDED" 或 AccountSuspendedException / 423
-        const suspendInfo = this.detectSuspendedError(errMsg)
+        const suspendInfo = this.detectSuspendedError(upstreamError.reason || upstreamError.code || errMsg)
         if (suspendInfo) {
           const newlyMarked = this.accountPool.markSuspended(currentAccount.id, suspendInfo.reason, suspendInfo.message)
           if (newlyMarked) {
@@ -1447,14 +1482,19 @@ export class ProxyServer {
         }
 
         // 401/403: 尝试刷新 Token
-        if (errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('Auth')) {
-          console.log('[ProxyServer] Auth error, attempting token refresh')
-          const refreshed = await this.refreshToken(currentAccount, signal)
-          if (refreshed) {
-            currentAccount = this.accountPool.getAccount(currentAccount.id) || currentAccount
-            continue
+        if (upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION) {
+          if (isKiroApiKeyAccount(currentAccount)) {
+            this.accountPool.updateAccount(currentAccount.id, { isAvailable: false })
+          } else {
+            console.log('[ProxyServer] Auth error, attempting token refresh')
+            const refreshed = await this.refreshToken(currentAccount, signal)
+            if (refreshed) {
+              currentAccount = this.accountPool.getAccount(currentAccount.id) || currentAccount
+              continue
+            }
           }
-          // 刷新失败 → 切到没试过的下个账号
+          // 认证失败或刷新失败 → 记账一次并切到没试过的下个账号。
+          this.recordUpstreamAccountErrorOnce(currentAccount, lastError)
           const nextAccount = switchToNextAccount()
           if (nextAccount && !triedIds.has(nextAccount.id)) {
             currentAccount = nextAccount
@@ -1463,16 +1503,13 @@ export class ProxyServer {
           }
         }
 
-        // 402/429: 额度耗尽，切换端点或账号
-        if (errMsg.includes('402') || errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('ThrottlingException') || errMsg.includes('reached the limit') || errMsg.includes('ServiceQuotaExceededException') || errMsg.includes('limit exceeded') || errMsg.includes('rate limit')) {
-          console.log('[ProxyServer] Quota/throttle error, switching endpoint or account')
-          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, 429)
-          endpointIndex = (endpointIndex + 1) % 2 // 切换端点
+        // 仅明确的月请求额度耗尽才隔离账号；其他 402 不改变账号状态。
+        if (upstreamError.retryCategory === UpstreamRetryCategory.MONTHLY_QUOTA) {
+          this.recordUpstreamAccountErrorOnce(currentAccount, lastError)
+          endpointIndex = (endpointIndex + 1) % 2
           if (endpointIndex === 0) {
-            // 已尝试所有端点，切换到没试过的下个账号
             const nextAccount = switchToNextAccount()
             if (nextAccount && !triedIds.has(nextAccount.id)) {
-              console.log(`[ProxyServer] Auto-switching to ${nextAccount.email || nextAccount.id.slice(0, 8)} due to quota exhausted`)
               currentAccount = nextAccount
               triedIds.add(nextAccount.id)
               if (!this.config.enableMultiAccount) {
@@ -1484,8 +1521,16 @@ export class ProxyServer {
           continue
         }
 
+        if (upstreamError.statusCode === 402) break
+
+        if (upstreamError.retryCategory === UpstreamRetryCategory.RATE_LIMIT) {
+          this.recordUpstreamAccountErrorOnce(currentAccount, lastError)
+          await this.waitForRetry(Math.min(upstreamError.retryAfterMs ?? retryDelay * (attempt + 1), WEB_SEARCH_RETRY_MAX_MS), signal)
+          continue
+        }
+
         // 5xx: 同账号短退避重试一次；再次 5xx 直接 fallback 到没试过的账号（瞬时故障跨账号绕过）
-        if (errMsg.includes('500') || errMsg.includes('502') || errMsg.includes('503') || errMsg.includes('504')) {
+        if (upstreamError.retryCategory === UpstreamRetryCategory.TRANSIENT) {
           console.log('[ProxyServer] Server error, retrying')
           // 第二次及以后的 5xx → 切换账号（旧逻辑会同账号撞死）
           if (attempt > 0) {
@@ -1506,7 +1551,7 @@ export class ProxyServer {
       }
     }
 
-    throw lastError || new Error('Unknown error')
+    throw new RetryExhaustedError(lastError || new Error('Unknown error'), currentAccount.id)
   }
 
   /**
@@ -2243,7 +2288,7 @@ export class ProxyServer {
     const startTime = Date.now()
     this.recordNewRequest()
     this.throwIfAborted(signal)
-    const account = await this.getAvailableAccount(signal)
+    const account = await this.getAvailableAccount(signal, undefined, matchedApiKey?.id)
     this.throwIfAborted(signal)
     if (!account) {
       this.sendError(res, 503, 'No available accounts')
@@ -2530,7 +2575,8 @@ export class ProxyServer {
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/chat/completions',
-          signal
+          signal,
+          matchedApiKey?.id
         )
         const response = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
 
@@ -2552,7 +2598,8 @@ export class ProxyServer {
         }
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/chat/completions', request.model, startTime, signal)
+      const failure = this.getTerminalRetryFailure(error as Error, account)
+      this.handleApiError(res, failure.account, failure.error, '/v1/chat/completions', request.model, startTime, signal)
     }
   }
 
@@ -2624,7 +2671,8 @@ export class ProxyServer {
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/responses',
-          signal
+          signal,
+          matchedApiKey?.id
         )
         const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
         this.throwIfResponseClosed(res, signal)
@@ -2676,7 +2724,8 @@ export class ProxyServer {
           return callKiroApi(acc, retryPayload, signal)
         },
         '/v1/responses',
-        signal
+        signal,
+        matchedApiKey?.id
       )
       const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
       this.throwIfResponseClosed(res, signal)
@@ -2697,14 +2746,15 @@ export class ProxyServer {
         this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, chatRequest.model, '/v1/responses')
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/responses', chatRequest.model, startTime, signal)
+      const failure = this.getTerminalRetryFailure(error as Error, account)
+      this.handleApiError(res, failure.account, failure.error, '/v1/responses', chatRequest.model, startTime, signal)
     }
   }
 
   // 处理 OpenAI 流式响应
   private async handleOpenAIStream(
     res: http.ServerResponse,
-    account: { id: string; accessToken: string; profileArn?: string },
+    account: ProxyAccount,
     kiroPayload: ReturnType<typeof openaiToKiro>,
     model: string,
     startTime: number,
@@ -2713,7 +2763,8 @@ export class ProxyServer {
     headersSent: boolean = false,
     matchedApiKey?: import('./types').ApiKey,
     toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    streamRetryState: { triedIds: Set<string>; refreshedAccountIds: Set<string> } = { triedIds: new Set([account.id]), refreshedAccountIds: new Set() }
   ): Promise<void> {
     if (!headersSent) {
       res.writeHead(200, {
@@ -2733,12 +2784,14 @@ export class ProxyServer {
       res.write(`data: ${JSON.stringify(initialChunk)}\n\n`)
     }
 
+    let hasWrittenUpstreamChunk = false
     return new Promise((resolve) => {
       callKiroApiStream(
         account as any,
         kiroPayload,
         (text, toolUse, isThinking) => {
           if (signal?.aborted || this.isResponseClosed(res)) return
+          hasWrittenUpstreamChunk = true
           if (text && text.trim()) {
             if (isThinking) {
               // 原生 thinking 内容 → 输出为 reasoning_content
@@ -2832,15 +2885,23 @@ export class ProxyServer {
             resolve()
             return
           }
-          console.error('[ProxyServer] Stream error:', error)
-          res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`)
-          res.end()
+          if (!hasWrittenUpstreamChunk) {
+            this.getStreamRetryAccount(account, error, matchedApiKey?.id, streamRetryState, signal).then(async nextAccount => {
+              if (nextAccount) {
+                await this.handleOpenAIStream(res, nextAccount, kiroPayload, model, startTime, currentRound + 1, id, true, matchedApiKey, toolNameRegistry, signal, streamRetryState)
+                resolve()
+                return
+              }
+              this.handleApiError(res, account, error, '/v1/chat/completions', model, startTime, signal)
+              resolve()
+            }).catch(() => {
+              this.handleApiError(res, account, error, '/v1/chat/completions', model, startTime, signal)
+              resolve()
+            })
+            return
+          }
 
-          this.recordRequestFailed()
-          const errStatusCode = error.message.match(/(\d{3})/)?.[1]
-          this.accountPool.recordError(account.id, errStatusCode ? classifyError(parseInt(errStatusCode)) : ErrorType.RECOVERABLE, errStatusCode ? parseInt(errStatusCode) : undefined)
-          this.events.onResponse?.({ path: '/v1/chat/completions', model, status: 500, error: error.message })
-          this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
+          this.handleApiError(res, account, error, '/v1/chat/completions', model, startTime, signal)
           resolve()
         },
         signal,
@@ -2958,15 +3019,19 @@ export class ProxyServer {
       } catch (error) {
         if (this.isAbortError(error, signal)) throw error
         lastError = error instanceof Error ? error : new KiroMcpWebSearchError()
-        const statusCode = error instanceof KiroMcpWebSearchError ? error.statusCode : undefined
+        const upstreamError = normalizeKiroUpstreamError(lastError)
+        const statusCode = upstreamError.statusCode
 
         if (statusCode === 401 || statusCode === 403) {
-          if (!refreshedAccountIds.has(currentAccount.id)) {
+          if (!isKiroApiKeyAccount(currentAccount) && !refreshedAccountIds.has(currentAccount.id)) {
             refreshedAccountIds.add(currentAccount.id)
             if (await this.refreshToken(currentAccount, signal)) {
               currentAccountId = currentAccount.id
               continue
             }
+          }
+          if (isKiroApiKeyAccount(currentAccount)) {
+            this.accountPool.updateAccount(currentAccount.id, { isAvailable: false })
           }
           this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
           permanentlyExcluded.add(currentAccount.id)
@@ -2977,22 +3042,32 @@ export class ProxyServer {
         }
 
         if (statusCode === 402) {
-          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
-          permanentlyExcluded.add(currentAccount.id)
-          const nextAccount = pickNextCandidate(currentAccount.id)
-          if (!nextAccount) break
-          currentAccountId = nextAccount.id
-          continue
+          if (isMonthlyRequestQuotaError(upstreamError)) {
+            this.recordUpstreamAccountErrorOnce(currentAccount, lastError)
+            permanentlyExcluded.add(currentAccount.id)
+            const nextAccount = pickNextCandidate(currentAccount.id)
+            if (!nextAccount) break
+            currentAccountId = nextAccount.id
+            continue
+          }
+          break
         }
 
         const retryable = error instanceof KiroMcpWebSearchError ? error.retryable : true
         if (!retryable || attempts >= maxAttempts) break
-        this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
+        this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE)
 
         const backoff = Math.min(WEB_SEARCH_RETRY_BASE_MS * (2 ** (attempts - 1)), WEB_SEARCH_RETRY_MAX_MS)
         const retryDelay = backoff + Math.floor(Math.random() * (Math.floor(backoff / 4) + 1))
-        await this.waitForRetry(retryDelay, signal)
+        await this.waitForRetry(upstreamError.retryCategory === UpstreamRetryCategory.RATE_LIMIT
+          ? Math.min(upstreamError.retryAfterMs ?? retryDelay, WEB_SEARCH_RETRY_MAX_MS)
+          : retryDelay, signal)
 
+        // 429 必须同账号退避重试；其它瞬态错误维持原有候选切换策略。
+        if (upstreamError.retryCategory === UpstreamRetryCategory.RATE_LIMIT) {
+          currentAccountId = currentAccount.id
+          continue
+        }
         const nextAccount = pickNextCandidate(currentAccount.id)
         if (!nextAccount) break
         currentAccountId = nextAccount.id
@@ -3283,7 +3358,8 @@ export class ProxyServer {
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/messages',
-          signal
+          signal,
+          matchedApiKey?.id
         )
         const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
 
@@ -3308,14 +3384,15 @@ export class ProxyServer {
         this.recordRequest({ path: '/v1/messages', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/messages', request.model, startTime, signal)
+      const failure = this.getTerminalRetryFailure(error as Error, account)
+      this.handleApiError(res, failure.account, failure.error, '/v1/messages', request.model, startTime, signal)
     }
   }
 
   // 处理 Claude 流式响应
   private async handleClaudeStream(
     res: http.ServerResponse,
-    account: { id: string; accessToken: string; profileArn?: string },
+    account: ProxyAccount,
     kiroPayload: ReturnType<typeof claudeToKiro>,
     model: string,
     startTime: number,
@@ -3327,7 +3404,8 @@ export class ProxyServer {
     toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
     signal?: AbortSignal,
     simulatedCacheUsage?: { cacheCreationInputTokens: number; cacheReadInputTokens: number; cacheProfile?: unknown; accountId?: string },
-    isClaudeCode: boolean = false
+    isClaudeCode: boolean = false,
+    streamRetryState: { triedIds: Set<string>; refreshedAccountIds: Set<string> } = { triedIds: new Set([account.id]), refreshedAccountIds: new Set() }
   ): Promise<void> {
     if (!headersSent) {
       res.writeHead(200, {
@@ -3391,6 +3469,7 @@ export class ProxyServer {
       await emitSse(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
     }
 
+    let hasWrittenUpstreamChunk = false
     return new Promise((resolve) => {
       let settled = false
       const settle = () => {
@@ -3409,6 +3488,7 @@ export class ProxyServer {
         kiroPayload,
         async (text, toolUse, isThinking, reasoningSignature, redactedContent) => {
           if (signal?.aborted || this.isResponseClosed(res)) return
+          hasWrittenUpstreamChunk = true
           // 优先处理 redacted_thinking（加密的 thinking 块，需单独 content_block）
           if (redactedContent) {
             if (hasStartedTextBlock) {
@@ -3604,19 +3684,29 @@ export class ProxyServer {
             settle()
             return
           }
+          if (!hasWrittenUpstreamChunk) {
+            const nextAccount = await this.getStreamRetryAccount(account, error, matchedApiKey?.id, streamRetryState, signal)
+            if (nextAccount) {
+              claudeCodeBuffer?.discard()
+              await this.handleClaudeStream(res, nextAccount, kiroPayload, model, startTime, currentRound + 1, id, true, contentBlockIndex, matchedApiKey, toolNameRegistry, signal, simulatedCacheUsage, isClaudeCode, streamRetryState)
+              settle()
+              return
+            }
+          }
           claudeCodeBuffer?.discard()
-          console.error('[ProxyServer] Stream error:', error)
+          const upstreamError = normalizeKiroUpstreamError(error)
+          console.error(`[ProxyServer] Stream error: HTTP ${upstreamError.statusCode || 'unknown'}`)
           const errorEvent = createClaudeStreamEvent('error', {
-            error: { type: 'api_error', message: error.message }
+            error: { type: 'api_error', message: upstreamError.message }
           })
           await writeSse(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
           res.end()
 
           this.recordRequestFailed()
-          const errStatusCode2 = error.message.match(/(\d{3})/)?.[1]
-          this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
-          this.events.onResponse?.({ path: '/v1/messages', model, status: 500, error: error.message })
-          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
+          const statusCode = upstreamError.statusCode || 500
+          this.recordUpstreamAccountErrorOnce(account, error)
+          this.events.onResponse?.({ path: '/v1/messages', model, status: statusCode, error: upstreamError.message })
+          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: upstreamError.message })
           } catch (callbackError) {
             proxyLogger.warn('ProxyServer', 'Claude stream error callback failed', callbackError)
             closeFailedStream(callbackError)
@@ -3656,31 +3746,28 @@ export class ProxyServer {
   private handleApiError(res: http.ServerResponse, account: { id: string }, error: Error, path: string, model?: string, startTime?: number, signal?: AbortSignal): void {
     if (this.isAbortError(error, signal) || this.isResponseClosed(res)) return
     this.recordRequestFailed()
-    const errCode = error.message.match(/(\d{3})/)?.[1]
-    const parsedCode = errCode ? parseInt(errCode) : 500
-    const errorType = classifyError(parsedCode)
-    const isAuthError = error.message.includes('401') || error.message.includes('403') || error.message.includes('Auth')
-
-    this.accountPool.recordError(account.id, errorType, parsedCode)
-
-    let statusCode = parsedCode
-    if (isAuthError) statusCode = 401
+    const upstreamError = normalizeKiroUpstreamError(error)
+    const statusCode = upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION ? 401 : upstreamError.statusCode || 500
+    this.recordUpstreamAccountErrorOnce(account, error)
 
     if (res.headersSent) {
       if (!this.isResponseClosed(res)) {
-        if (path === '/v1/responses' || path === '/responses') {
-          res.write(`event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', error: { type: 'api_error', message: error.message } })}\n\n`)
+        if (path === '/v1/chat/completions') {
+          res.write(`data: ${JSON.stringify({ error: { message: upstreamError.message, type: 'api_error', code: statusCode } })}\n\n`)
+          res.write('data: [DONE]\n\n')
+        } else if (path === '/v1/responses' || path === '/responses') {
+          res.write(`event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', error: { type: 'api_error', message: upstreamError.message } })}\n\n`)
         }
         res.end()
       }
-      this.events.onResponse?.({ path, status: statusCode, error: error.message })
-      this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: error.message })
+      this.events.onResponse?.({ path, status: statusCode, error: upstreamError.message })
+      this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: upstreamError.message })
       return
     }
 
-    this.sendError(res, statusCode, error.message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
-    this.events.onResponse?.({ path, status: statusCode, error: error.message })
-    this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: error.message })
+    this.sendError(res, statusCode, upstreamError.message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+    this.events.onResponse?.({ path, status: statusCode, error: upstreamError.message })
+    this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: upstreamError.message })
   }
 
   // 读取请求体

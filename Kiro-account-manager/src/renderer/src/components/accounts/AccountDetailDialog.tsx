@@ -75,6 +75,8 @@ const formatDateTime = (date: unknown): string => {
   }
 }
 
+import { getUpstreamKiroCredentialSignature, hasUpstreamKiroCredential } from '../../types/account'
+
 export function AccountDetailDialog({
   open,
   onOpenChange,
@@ -91,11 +93,11 @@ export function AccountDetailDialog({
 
   // 获取账户可用模型
   useEffect(() => {
-    if (open && account?.credentials?.accessToken) {
+    if (open && account && hasUpstreamKiroCredential(account.credentials)) {
       setModelsLoading(true)
       setModelsError(null)
       window.api.accountGetModels(
-        account.credentials.accessToken,
+        account.credentials,
         account.credentials?.region,
         account.profileArn,
         account.credentials.provider || account.idp,
@@ -114,7 +116,7 @@ export function AccountDetailDialog({
     } else {
       setModels([])
     }
-  }, [open, account?.credentials?.accessToken, account?.credentials?.region, account?.profileArn, account?.credentials?.provider, account?.idp, account?.credentials?.authMethod, account?.id])
+  }, [open, getUpstreamKiroCredentialSignature(account?.credentials), account?.credentials?.region, account?.profileArn, account?.credentials?.provider, account?.idp, account?.credentials?.authMethod, account?.id])
 
   if (!open || !account) return null
 

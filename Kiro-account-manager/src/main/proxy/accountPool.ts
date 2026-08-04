@@ -10,22 +10,11 @@ export enum ErrorType {
 
 // 根据 HTTP 状态码和错误原因分类错误
 export function classifyError(statusCode: number, reason?: string): ErrorType {
-  // RECOVERABLE: 配额/计费问题
-  if (statusCode === 402) return ErrorType.RECOVERABLE
-  // RECOVERABLE: Token 过期/无效
-  if (statusCode === 403) return ErrorType.RECOVERABLE
-  // RECOVERABLE: 限流
-  if (statusCode === 429) return ErrorType.RECOVERABLE
-  // 400: 根据原因细分
-  if (statusCode === 400) {
-    // 上下文超限 → 所有账号都会失败
-    if (reason === 'CONTENT_LENGTH_EXCEEDS_THRESHOLD') return ErrorType.FATAL
-    return ErrorType.FATAL
-  }
-  // 422: 请求格式错误
-  if (statusCode === 422) return ErrorType.FATAL
-  // 5xx: 服务端错误
-  if (statusCode >= 500) return ErrorType.FATAL
+  // 仅明确的月请求额度耗尽是账号级可恢复错误；其他 402 不隔离账号。
+  if (statusCode === 402) return reason === 'MONTHLY_REQUEST_COUNT' ? ErrorType.RECOVERABLE : ErrorType.FATAL
+  // Token 过期/无效与限流仍可按账号策略恢复。
+  if (statusCode === 401 || statusCode === 403 || statusCode === 429) return ErrorType.RECOVERABLE
+  // 400/422 是请求本身有问题，5xx 由调用方负责有限重试。
   return ErrorType.FATAL
 }
 
@@ -205,12 +194,8 @@ export class AccountPool {
       return false
     }
 
-    // 检查 token 是否过期
-    // - 无 refreshToken 时直接判为不可用（无法刷新）
-    // - 有 refreshToken 时让账号通过 —— proxyServer.getAvailableAccount 会检测
-    //   isTokenExpiringSoon 并主动调用 refreshToken；若刷新失败会通过 markNeedsRefresh
-    //   设置 isAvailable=false，下次循环再被本函数 line 210 跳过，形成闭环
-    if (account.expiresAt && account.expiresAt < now && !account.refreshToken) {
+    // API Key 不会过期；OAuth 无 refreshToken 的过期账号不可用。
+    if (account.credentialKind !== 'kiro_api_key' && account.expiresAt && account.expiresAt < now && !account.refreshToken) {
       return false
     }
 
@@ -376,7 +361,7 @@ export class AccountPool {
     // 配额类错误额外标记耗尽，并按配置的 quotaResetMs 设定自动恢复时间。
     // 否则 quotaExhaustedAt 一直 > 0，isQuotaExhausted 永远为 true，
     // 该账号会被永久跳过（直到 updateQuota/reset 被显式调用）。
-    const isQuotaError = statusCode === 402 || statusCode === 429
+    const isQuotaError = statusCode === 402
     if (isQuotaError) {
       quotaExhaustedAt = now
       // 仅在没有更明确的重置时间，或已有重置时间已过期时，按冷却窗口顺延

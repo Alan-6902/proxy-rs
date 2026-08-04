@@ -77,7 +77,7 @@ export function EditAccountDialog({
       setAccountInfo({
         email: account.email,
         userId: account.userId || '',
-        accessToken: account.credentials.accessToken,
+        accessToken: account.credentials.accessToken || '',
         subscriptionType: account.subscription.type,
         subscriptionTitle: account.subscription.title || account.subscription.type,
         usage: {

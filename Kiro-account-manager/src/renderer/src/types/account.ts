@@ -12,17 +12,67 @@ export type AccountStatus = 'active' | 'expired' | 'error' | 'refreshing' | 'unk
  * 账号凭证信息
  */
 export interface AccountCredentials {
-  accessToken: string
-  csrfToken: string
+  accessToken?: string
+  csrfToken?: string
   refreshToken?: string
-  clientId?: string      // OIDC 客户端 ID（用于刷新 token）
-  clientSecret?: string  // OIDC 客户端密钥
-  region?: string        // AWS 区域，默认 us-east-1
-  startUrl?: string      // SSO Start URL（Enterprise 账户专用）
-  expiresAt: number      // 时间戳
-  authMethod?: 'IdC' | 'social'  // 认证方式：IdC (BuilderId/Enterprise) 或 social (GitHub/Google)
-  provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'  // 身份提供商
-  profileArn?: string    // Enterprise 真实 profileArn（从 ListAvailableProfiles 获取）
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  startUrl?: string
+  expiresAt?: number
+  authMethod?: 'IdC' | 'social'
+  provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'
+  profileArn?: string
+  credentialKind?: 'oauth' | 'kiro_api_key'
+  kiroApiKey?: string
+}
+
+
+export function buildAccountsSyncSignature<T extends {
+  id: string
+  groupId?: string
+  isActive?: boolean
+  status: string
+  credentials?: { accessToken?: string; kiroApiKey?: string }
+}>(accounts: Iterable<T>): string {
+  return Array.from(accounts)
+    .filter(a => a.status === 'active' && a.isActive !== false && hasUpstreamKiroCredential(a.credentials))
+    .map(a => {
+      const keyFingerprint = a.credentials?.kiroApiKey
+        ? Array.from(a.credentials.kiroApiKey).reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0, 0).toString(16)
+        : ''
+      return `${a.id}:${a.groupId || ''}:${a.isActive === false ? 1 : 0}:${keyFingerprint}`
+    })
+    .sort()
+    .join('|')
+}
+
+
+export function hasUpstreamKiroCredential(
+  credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
+): boolean {
+  return Boolean(credentials?.accessToken || credentials?.kiroApiKey)
+}
+
+
+export function canRefreshUpstreamCredential(
+  credentials?: Pick<AccountCredentials, 'credentialKind' | 'kiroApiKey' | 'refreshToken'>
+): boolean {
+  return credentials?.credentialKind !== 'kiro_api_key' && !credentials?.kiroApiKey && Boolean(credentials?.refreshToken)
+}
+
+
+export function getUpstreamKiroCredentialSignature(
+  credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
+): string {
+  const credential = credentials?.kiroApiKey || credentials?.accessToken || ''
+  if (!credential) return ''
+  const fingerprint = Array.from(credential).reduce(
+    (hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0,
+    0
+  ).toString(16)
+  const kind = credentials?.credentialKind || (credentials?.kiroApiKey ? 'kiro_api_key' : 'oauth')
+  return `${kind}:${fingerprint}`
 }
 
 /**

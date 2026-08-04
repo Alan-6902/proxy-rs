@@ -104,6 +104,14 @@ interface StatusResult {
   error?: { message: string }
 }
 
+type UpstreamKiroCredentialInput =
+  | string
+  | {
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      accessToken?: string
+      kiroApiKey?: string
+    }
+
 interface KiroApi {
   openExternal: (url: string, usePrivateMode?: boolean) => void
   getAppVersion: () => Promise<string>
@@ -120,15 +128,19 @@ interface KiroApi {
     id: string
     email: string
     idp?: string
+    profileArn?: string
     needsTokenRefresh?: boolean
     credentials: {
-      refreshToken: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      kiroApiKey?: string
+      refreshToken?: string
       clientId?: string
       clientSecret?: string
       region?: string
       authMethod?: string
       accessToken?: string
       provider?: string
+      profileArn?: string
     }
   }>, concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
   onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
@@ -139,7 +151,9 @@ interface KiroApi {
     id: string
     email: string
     credentials: {
-      accessToken: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      accessToken?: string
+      kiroApiKey?: string
       refreshToken?: string
       clientId?: string
       clientSecret?: string
@@ -387,13 +401,13 @@ interface KiroApi {
   onLocalNotificationNavigate: (callback: (page: 'accounts' | 'proxy' | 'register') => void) => (() => void)
 
   // 添加账号到反代池
-  proxyAddAccount: (account: { id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyAddAccount: (account: ({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 从反代池移除账号
   proxyRemoveAccount: (accountId: string) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<{ id: string; email?: string; accessToken: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string }>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxySyncAccounts: (accounts: Array<({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 获取反代池账号列表
   proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>
@@ -413,16 +427,16 @@ interface KiroApi {
   proxyConfigureClients: (input: { clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>; modelId: string; modelName?: string; models?: Array<{ id: string; name?: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null }> }) => Promise<{ success: boolean; error?: string; proxyOrigin: string; openaiBaseUrl: string; results: Array<{ client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'; success: boolean; paths: string[]; backupPaths: string[]; error?: string }> }>
 
   // 获取账户可用模型列表
-  accountGetModels: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }>
+  accountGetModels: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }>
 
   // 获取可用订阅列表
-  accountGetSubscriptions: (accessToken: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }>
+  accountGetSubscriptions: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }>
 
   // 获取订阅管理/支付链接
-  accountGetSubscriptionUrl: (accessToken: string, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
+  accountGetSubscriptionUrl: (credential: UpstreamKiroCredentialInput, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
 
   // 设置用户超额偏好
-  accountSetOverage: (accessToken: string, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string }>
+  accountSetOverage: (credential: UpstreamKiroCredentialInput, overageStatus: 'ENABLED' | 'DISABLED', region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string }>
 
   // 在新窗口打开订阅链接
   openSubscriptionWindow: (url: string) => Promise<{ success: boolean; error?: string }>

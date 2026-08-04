@@ -33,7 +33,7 @@ import { useTranslation } from '@/hooks/useTranslation'
  */
 type EligibilityReason = 'ok' | 'no-token' | 'already-pro' | 'banned' | 'cant-upgrade' | 'unknown-status'
 function checkUpgradeEligibility(account: ReturnType<typeof useAccountsStore.getState>['accounts'] extends Map<string, infer T> ? T : never): { eligible: boolean; reason: EligibilityReason; detail?: string } {
-  if (!account.credentials?.accessToken) return { eligible: false, reason: 'no-token' }
+  if (!hasUpstreamKiroCredential(account.credentials)) return { eligible: false, reason: 'no-token' }
 
   const type = (account.subscription?.type || '').toUpperCase()
   const title = (account.subscription?.title || '').toUpperCase()
@@ -133,6 +133,8 @@ function parseImportedLinks(text: string): Array<{ email: string; url: string }>
   return out
 }
 
+import { hasUpstreamKiroCredential } from '../../types/account'
+
 export function SubscriptionPage() {
   const { accounts, selectedIds, updateAccount, removeAccount } = useAccountsStore()
   const { actualLanguage } = useTranslation()
@@ -215,7 +217,7 @@ export function SubscriptionPage() {
       const type = (acc.subscription?.type || '').toUpperCase()
       const title = (acc.subscription?.title || '').toUpperCase()
       const isFreeTier = type.includes('FREE') || title.includes('FREE') || (!type && !title)
-      const hasToken = !!acc.credentials?.accessToken
+      const hasToken = hasUpstreamKiroCredential(acc.credentials)
       return isFreeTier && hasToken
     })
   }, [accounts, selectedIds])
@@ -252,7 +254,7 @@ export function SubscriptionPage() {
     
     try {
       const result = await window.api.accountGetSubscriptions(
-        acc.credentials.accessToken,
+        acc.credentials,
         acc.credentials?.region,
         acc.profileArn,
         acc.credentials?.provider || acc.idp,
@@ -304,7 +306,7 @@ export function SubscriptionPage() {
 
       try {
         const tokenResult = await window.api.accountGetSubscriptionUrl(
-          acc.credentials.accessToken,
+          acc.credentials,
           selectedPlanType,
           acc.credentials?.region,
           acc.profileArn,
@@ -507,12 +509,12 @@ export function SubscriptionPage() {
       return
     }
     const acc = accounts.get(accountId)
-    if (!acc || !acc.credentials?.accessToken) return
+    if (!acc || !hasUpstreamKiroCredential(acc.credentials)) return
 
     setLinks(prev => prev.map((l) => l.accountId === accountId ? { ...l, status: 'loading', error: undefined } : l))
     try {
       const r = await window.api.accountGetSubscriptionUrl(
-        acc.credentials.accessToken,
+        acc.credentials,
         selectedPlanType,
         acc.credentials?.region,
         acc.profileArn,
@@ -636,7 +638,7 @@ export function SubscriptionPage() {
 
     return source.filter(acc => {
       if (!acc) return false
-      const hasToken = !!acc.credentials?.accessToken
+      const hasToken = hasUpstreamKiroCredential(acc.credentials)
       const type = (acc.subscription?.type || '').toUpperCase()
       const title = (acc.subscription?.title || '').toUpperCase()
       const isSubscribed = type.includes('PRO') || type.includes('ENTERPRISE') || type.includes('TEAMS') || title.includes('PRO') || title.includes('ENTERPRISE') || title.includes('TEAMS')
@@ -666,7 +668,7 @@ export function SubscriptionPage() {
 
       try {
         const res = await window.api.accountSetOverage(
-          acc.credentials.accessToken,
+          acc.credentials,
           'ENABLED',
           acc.credentials?.region,
           acc.profileArn,
@@ -1112,7 +1114,7 @@ export function SubscriptionPage() {
                               onClick={async () => {
                                 // 复用 fetchSubscriptionToken 获取门户链接，在浏览器无痕中打开
                                 const r = await window.api.accountGetSubscriptionUrl(
-                                  acc.credentials.accessToken,
+                                  acc.credentials,
                                   undefined,
                                   acc.credentials?.region,
                                   acc.profileArn,
@@ -1141,7 +1143,7 @@ export function SubscriptionPage() {
                                     : `关闭 ${acc.email} 的超额？`
                                   )) return
                                   const r = await window.api.accountSetOverage(
-                                    acc.credentials.accessToken,
+                                    acc.credentials,
                                     'DISABLED',
                                     acc.credentials?.region,
                                     acc.profileArn,
@@ -1859,7 +1861,7 @@ function ManageSubscriptionsTab({ getAllSubscribed, updateAccount, concurrency, 
           if (!acc) continue
           try {
             const r = await window.api.accountGetSubscriptionUrl(
-              acc.credentials.accessToken,
+              acc.credentials,
               undefined,
               acc.credentials?.region,
               acc.profileArn,
@@ -1906,7 +1908,7 @@ function ManageSubscriptionsTab({ getAllSubscribed, updateAccount, concurrency, 
           if (!acc) continue
           try {
             const r = await window.api.accountSetOverage(
-              acc.credentials.accessToken,
+              acc.credentials,
               'DISABLED',
               acc.credentials?.region,
               acc.profileArn,
@@ -2113,7 +2115,7 @@ function ManageSubscriptionsTab({ getAllSubscribed, updateAccount, concurrency, 
                     <button
                       onClick={async () => {
                         const r = await window.api.accountGetSubscriptionUrl(
-                          acc.credentials.accessToken,
+                          acc.credentials,
                           undefined,
                           acc.credentials?.region,
                           acc.profileArn,
@@ -2277,7 +2279,7 @@ function SubscribedRow({ acc, idx, selected, onToggleSelect, isEn }: {
         <button
           onClick={async () => {
             const r = await window.api.accountGetSubscriptionUrl(
-              acc.credentials.accessToken,
+              acc.credentials,
               undefined,
               acc.credentials?.region,
               acc.profileArn,

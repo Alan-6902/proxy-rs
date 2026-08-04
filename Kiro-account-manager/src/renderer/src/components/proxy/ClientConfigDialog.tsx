@@ -45,6 +45,8 @@ const clientLabels: Record<ClientTarget, string> = {
   openclaw: 'OpenClaw'
 }
 
+import { hasUpstreamKiroCredential } from '../../types/account'
+
 export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDialogProps) {
   const accounts = useAccountsStore(state => state.accounts)
   const activeAccountId = useAccountsStore(state => state.activeAccountId)
@@ -113,12 +115,12 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
 
       // 代理未启动或无模型时，回退到账号直连
       const activeAccount = activeAccountId ? accounts.get(activeAccountId) : undefined
-      const account = activeAccount?.status === 'active' && activeAccount.credentials?.accessToken
+      const account = activeAccount?.status === 'active' && hasUpstreamKiroCredential(activeAccount.credentials)
         ? activeAccount
-        : Array.from(accounts.values()).find(item => item.status === 'active' && item.credentials?.accessToken)
+        : Array.from(accounts.values()).find(item => item.status === 'active' && hasUpstreamKiroCredential(item.credentials))
       if (account) {
         const accountModels = await window.api.accountGetModels(
-          account.credentials.accessToken,
+          account.credentials,
           account.credentials.region || 'us-east-1',
           account.profileArn,
           account.credentials.provider || account.idp,

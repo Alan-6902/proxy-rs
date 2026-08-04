@@ -141,6 +141,10 @@ function formatTokenExpiry(expiresAt: number, isEn: boolean): string {
   }
 }
 
+import { hasUpstreamKiroCredential } from '../../types/account'
+
+import { canRefreshUpstreamCredential } from '../../types/account'
+
 export const AccountCard = memo(function AccountCard({
   account,
   tags,
@@ -218,6 +222,7 @@ export const AccountCard = memo(function AccountCard({
 
   const [isRefreshingToken, setIsRefreshingToken] = useState(false)
   const handleRefreshToken = async (): Promise<void> => {
+    if (!canRefreshUpstreamCredential(account.credentials)) return
     setIsRefreshingToken(true)
     try {
       await refreshAccountToken(account.id)
@@ -305,12 +310,12 @@ export const AccountCard = memo(function AccountCard({
   // 点击订阅标签打开订阅管理
   const handleSubscriptionClick = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
-    if (subscriptionLoading || !account.credentials?.accessToken) return
+    if (subscriptionLoading || !hasUpstreamKiroCredential(account.credentials)) return
     
     setSubscriptionLoading(true)
     try {
       // 统一先获取可用订阅列表
-      const result = await window.api.accountGetSubscriptions(account.credentials.accessToken, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptions(account.credentials, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
       if (result.success && result.plans.length > 0) {
         setSubscriptionPlans(result.plans)
         // 检查是否是首次用户（当前订阅类型为 FREE 或无订阅）
@@ -330,13 +335,13 @@ export const AccountCard = memo(function AccountCard({
 
   // 选择订阅计划并获取支付链接
   const handleSelectPlan = async (planName: string): Promise<void> => {
-    if (paymentLoading || !account.credentials?.accessToken) return
+    if (paymentLoading || !hasUpstreamKiroCredential(account.credentials)) return
     
     setSelectedPlan(planName)
     setPaymentLoading(true)
     setSubscriptionError(null)
     try {
-      const result = await window.api.accountGetSubscriptionUrl(account.credentials.accessToken, planName, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptionUrl(account.credentials, planName, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
       if (result.success && result.url) {
         // 自动复制链接到剪贴板
         await navigator.clipboard.writeText(result.url)
@@ -366,12 +371,12 @@ export const AccountCard = memo(function AccountCard({
 
   // 获取订阅管理链接（已有订阅用户）
   const handleManageSubscription = async (): Promise<void> => {
-    if (paymentLoading || !account.credentials?.accessToken) return
+    if (paymentLoading || !hasUpstreamKiroCredential(account.credentials)) return
     
     setPaymentLoading(true)
     setSubscriptionError(null)
     try {
-      const result = await window.api.accountGetSubscriptionUrl(account.credentials.accessToken, undefined, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptionUrl(account.credentials, undefined, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
       if (result.success && result.url) {
         setShowSubscriptionDialog(false)
         await window.api.openSubscriptionWindow(result.url)
@@ -745,7 +750,7 @@ export const AccountCard = memo(function AccountCard({
                <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleRefresh() }} disabled={account.status === 'refreshing'} title={isEn ? 'Check account info' : '检查账户信息（用量、订阅、封禁状态）'}>
                   <RefreshCw className={cn("h-3.5 w-3.5", account.status === 'refreshing' && "animate-spin")} />
                </Button>
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleRefreshToken() }} disabled={isRefreshingToken} title={isEn ? 'Refresh Token' : '刷新 Token（仅刷新访问令牌）'}>
+               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleRefreshToken() }} disabled={isRefreshingToken || !canRefreshUpstreamCredential(account.credentials)} title={isEn ? 'Refresh Token' : '刷新 Token（仅刷新访问令牌）'}>
                   <KeyRound className={cn("h-3.5 w-3.5", isRefreshingToken && "animate-pulse")} />
                </Button>
                

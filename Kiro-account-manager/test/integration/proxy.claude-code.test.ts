@@ -102,6 +102,108 @@ describe('ProxyServer Claude Code 兼容', () => {
     }
   })
 
+  it('普通非流式初选和重试均不越过 API Key binding 与分组', async () => {
+    const apiKeyId = server.getConfig().apiKeys![0].id
+    server.updateConfig({
+      enableMultiAccount: true,
+      multiAccountSelectionMode: 'groups',
+      multiAccountGroupIds: ['allowed-group'],
+      apiKeyAccountBindings: { [apiKeyId]: ['account-2', 'account-3'] },
+      retryDelayMs: 1
+    })
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'account-2', accessToken: 'allowed-token', groupId: 'allowed-group' })
+    pool.addAccount({ id: 'account-3', accessToken: 'out-of-group-token', groupId: 'other-group' })
+    requestMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+      .mockResolvedValueOnce({ content: 'scoped', toolUses: [], usage: USAGE })
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'scope retry' }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(requestMock.mock.calls.map(call => call[0].id)).toEqual(['account-2', 'account-2', 'account-2'])
+  })
+
+  it('Gemini 绑定 API Key 时绝不选择未绑定账号', async () => {
+    const apiKeyId = server.getConfig().apiKeys![0].id
+    server.updateConfig({
+      enableMultiAccount: true,
+      apiKeyAccountBindings: { [apiKeyId]: ['gemini-a'] }
+    })
+    const pool = server.getAccountPool()
+    pool.clear()
+    pool.addAccount({ id: 'gemini-a', accessToken: 'allowed-token' })
+    pool.addAccount({ id: 'gemini-b', accessToken: 'not-bound-token' })
+    requestMock.mockResolvedValue({ content: 'gemini scoped', toolUses: [], usage: USAGE })
+
+    const response = await request('/v1beta/models/gemini-2.0-flash:generateContent', {
+      contents: [{ role: 'user', parts: [{ text: 'scope gemini' }] }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(requestMock.mock.calls.map(call => call[0].id)).toEqual(['gemini-a'])
+  })
+
+  it('普通非流式 429 同账号退避且不标记 quota', async () => {
+    server.updateConfig({ retryDelayMs: 1 })
+    requestMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(429, true))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(429, true))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(429, true))
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'rate limit' }]
+    })
+
+    expect(response.status).toBe(429)
+    expect(requestMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-1', 'account-1'])
+    expect(server.getAccountPool().isQuotaExhausted(server.getAccountPool().getAccount('account-1')!)).toBe(false)
+  })
+
+  it('非流式切换到 B 后终态失败只记账 B', async () => {
+    server.updateConfig({ enableMultiAccount: true, retryDelayMs: 1 })
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'account-2', accessToken: 'fallback-token' })
+    requestMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'terminal account' }]
+    })
+
+    expect(response.status).toBe(500)
+    expect(requestMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-1', 'account-2'])
+    expect(pool.getStats().accounts.get('account-1')?.errors).toBe(0)
+    expect(pool.getStats().accounts.get('account-2')?.errors).toBe(1)
+  })
+
+  it('同一错误对象按账号去重，同账号重复不重复记账', () => {
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'account-2', accessToken: 'second-token' })
+    const error = new KiroMcpWebSearchError(429, true)
+    const record = server as unknown as {
+      recordUpstreamAccountErrorOnce: (account: { id: string }, upstreamError: Error) => void
+    }
+
+    record.recordUpstreamAccountErrorOnce({ id: 'account-1' }, error)
+    record.recordUpstreamAccountErrorOnce({ id: 'account-1' }, error)
+    record.recordUpstreamAccountErrorOnce({ id: 'account-2' }, error)
+
+    expect(pool.getStats().accounts.get('account-1')?.errors).toBe(1)
+    expect(pool.getStats().accounts.get('account-2')?.errors).toBe(1)
+  })
+
   it('Claude Code 非流式消息沿用 Anthropic 响应格式', async () => {
     requestMock.mockResolvedValue({ content: 'non-stream reply', toolUses: [], usage: USAGE })
 
@@ -116,6 +218,25 @@ describe('ProxyServer Claude Code 兼容', () => {
     expect(payload.type).toBe('message')
     expect(payload.content).toEqual([{ type: 'text', text: 'non-stream reply' }])
     expect(requestMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('OpenAI 流式首帧后失败会输出脱敏 error 和 DONE', async () => {
+    streamMock.mockImplementationOnce(async (_account, _payload, _onChunk, _onComplete, onError) => {
+      await onError(new KiroMcpWebSearchError(403, false, 'ksk_should_not_leak'))
+    })
+
+    const response = await request('/v1/chat/completions', {
+      model: 'claude-sonnet-4',
+      stream: true,
+      messages: [{ role: 'user', content: 'safe stream error' }]
+    })
+    const output = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(output).toContain('data: {"error":')
+    expect(output).toContain('data: [DONE]')
+    expect(output).not.toContain('ksk_should_not_leak')
+    expect(server.getAccountPool().getStats().accounts.get('account-1')?.errors).toBe(1)
   })
 
   it('普通 Anthropic 流保持实时 message_start，不等待完成', async () => {
@@ -426,11 +547,12 @@ describe('ProxyServer Claude Code 兼容', () => {
       messages: [{ role: 'user', content: 'Perform a web search for the query: retry' }]
     })
     expect(response.status).toBe(200)
-    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-2'])
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-1'])
     const apiKey = server.getConfig().apiKeys![0]
     expect(apiKey.usage.totalInputTokens).toBe(0)
     expect(apiKey.usage.totalOutputTokens).toBe(0)
-    expect(server.getAccountPool().getStats().accounts.get('account-2')).toMatchObject({ requests: 1, tokens: 0 })
+    expect(server.getAccountPool().getStats().accounts.get('account-1')).toMatchObject({ requests: 1, tokens: 0 })
+    expect(server.getAccountPool().isQuotaExhausted(server.getAccountPool().getAccount('account-1')!)).toBe(false)
   })
 
   it('WebSearch 不越过分组、禁用或封禁账号', async () => {
@@ -453,6 +575,25 @@ describe('ProxyServer Claude Code 兼容', () => {
     expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['allowed'])
   })
 
+  it('WebSearch 的非月度 402 不隔离账号或切换备用账号', async () => {
+    server.updateConfig({ enableMultiAccount: true })
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'account-2', accessToken: 'second-token' })
+    webSearchMock.mockRejectedValueOnce(new KiroMcpWebSearchError(402, false, 'PAYMENT_REQUIRED'))
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: non-monthly-402' }]
+    })
+
+    expect(response.status).toBe(502)
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1'])
+    expect(pool.isQuotaExhausted(pool.getAccount('account-1')!)).toBe(false)
+    expect(pool.getAccount('account-2')?.isAvailable).toBe(true)
+  })
+
   it('WebSearch 对 402 实时排除账号，并对认证错误每账号只刷新一次', async () => {
     server.updateConfig({ enableMultiAccount: true })
     server.getAccountPool().addAccount({ id: 'account-2', accessToken: 'second-token' })
@@ -461,7 +602,7 @@ describe('ProxyServer Claude Code 兼容', () => {
       refreshToken: (account: unknown, signal?: AbortSignal) => Promise<boolean>
     }, 'refreshToken').mockResolvedValue(true)
     webSearchMock
-      .mockRejectedValueOnce(new KiroMcpWebSearchError(402, false))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(402, false, 'MONTHLY_REQUEST_COUNT'))
       .mockRejectedValueOnce(new KiroMcpWebSearchError(401, false))
       .mockRejectedValueOnce(new KiroMcpWebSearchError(403, false))
       .mockResolvedValueOnce([])
@@ -477,6 +618,99 @@ describe('ProxyServer Claude Code 兼容', () => {
     expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-2', 'account-2', 'account-3'])
     expect(refreshToken).toHaveBeenCalledTimes(1)
     refreshToken.mockRestore()
+  })
+
+  it('WebSearch 的 Kiro API key 遇到认证错误不刷新且切换账号', async () => {
+    server.updateConfig({ enableMultiAccount: true })
+    const pool = server.getAccountPool()
+    pool.updateAccount('account-1', { isAvailable: false })
+    pool.addAccount({ id: 'kiro-api-key', credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' })
+    pool.addAccount({ id: 'oauth-fallback', accessToken: 'oauth-token' })
+    const refreshToken = vi.spyOn(server as unknown as {
+      refreshToken: (account: unknown, signal?: AbortSignal) => Promise<boolean>
+    }, 'refreshToken')
+    webSearchMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(401, false))
+      .mockResolvedValueOnce([])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: api-key-auth' }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['kiro-api-key', 'oauth-fallback'])
+    expect(refreshToken).not.toHaveBeenCalled()
+    expect(pool.getAccount('kiro-api-key')?.isAvailable).toBe(false)
+    refreshToken.mockRestore()
+  })
+
+  it('API Key 流式 403 不刷新，并在首个上游 chunk 前切换备用账号', async () => {
+    server.updateConfig({ enableMultiAccount: true })
+    const pool = server.getAccountPool()
+    pool.updateAccount('account-1', { isAvailable: false })
+    pool.addAccount({ id: 'kiro-api-key', credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' })
+    pool.addAccount({ id: 'oauth-fallback', accessToken: 'oauth-token' })
+    const refreshToken = vi.spyOn(server as unknown as {
+      refreshToken: (account: unknown, signal?: AbortSignal) => Promise<boolean>
+    }, 'refreshToken')
+    streamMock
+      .mockImplementationOnce(async (_account, _payload, _onChunk, _onComplete, onError) => { await onError(new KiroMcpWebSearchError(403, false)) })
+      .mockImplementationOnce(async (_account, _payload, _onChunk, onComplete) => { await onComplete(USAGE) })
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: true,
+      messages: [{ role: 'user', content: 'stream fallback' }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(streamMock.mock.calls.map(call => call[0].id)).toEqual(['kiro-api-key', 'oauth-fallback'])
+    expect(refreshToken).not.toHaveBeenCalled()
+    expect(pool.getAccount('kiro-api-key')?.isAvailable).toBe(false)
+    refreshToken.mockRestore()
+  })
+
+  it('流式已写出上游 chunk 后不重放或切换账号', async () => {
+    server.updateConfig({ enableMultiAccount: true })
+    server.getAccountPool().addAccount({ id: 'account-2', accessToken: 'second-token' })
+    streamMock.mockImplementationOnce(async (_account, _payload, onChunk, _onComplete, onError) => {
+      await onChunk('partial')
+      await onError(new KiroMcpWebSearchError(403, false))
+    })
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: true,
+      messages: [{ role: 'user', content: 'do not replay' }]
+    })
+
+    expect(response.status).toBe(200)
+    const output = await response.text()
+    expect(output.match(/partial/g)).toHaveLength(1)
+    expect(streamMock).toHaveBeenCalledTimes(1)
+    expect(streamMock.mock.calls[0][0].id).toBe('account-1')
+  })
+
+
+  it('accepts a key-only account without synthesizing an OAuth access token', () => {
+    const pool = server.getAccountPool()
+    pool.addAccount({
+      id: 'key-only-sync-input',
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted'
+    })
+    const account = pool.getAccount('key-only-sync-input')
+
+    expect(account).toMatchObject({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted'
+    })
+    expect(account?.accessToken).toBeUndefined()
   })
 
   it('WebSearch 对瞬态错误执行可控退避并在单账号上封顶', async () => {

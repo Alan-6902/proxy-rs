@@ -193,6 +193,10 @@ export function getEnterpriseFallbackArn(region?: string): string {
  * - BuilderId → 占位符 ARN
  */
 function resolveProfileArn(account: ProxyAccount): string | undefined {
+  if (isKiroApiKeyAccount(account)) {
+    const profileArn = account.profileArn?.trim()
+    return profileArn && !isPlaceholderProfileArn(profileArn) ? profileArn : undefined
+  }
   if (account.profileArn && !isPlaceholderProfileArn(account.profileArn)) {
     return account.profileArn
   }
@@ -1141,23 +1145,40 @@ export function clearAllCaches(): { conversation: number; model: number } {
 
 
 // 获取认证方式对应的请求头
-function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
+const KIRO_API_KEY_TOKEN_TYPE = 'API_KEY'
+
+export function isKiroApiKeyAccount(account: ProxyAccount): boolean {
+  return account.credentialKind === 'kiro_api_key'
+}
+
+function getKiroAuthenticationHeaders(account: ProxyAccount): Record<string, string> {
+  const credential = isKiroApiKeyAccount(account) ? account.kiroApiKey : account.accessToken
+  if (!credential) {
+    throw new Error('Missing upstream Kiro credentials')
+  }
+
   const headers: Record<string, string> = {
+    Authorization: `Bearer ${credential}`
+  }
+  if (isKiroApiKeyAccount(account)) {
+    headers.tokentype = KIRO_API_KEY_TOKEN_TYPE
+  } else if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
+    // Enterprise External IdP 需要额外的 TokenType header（官方 addExternalIdpTokenTypeMiddleware）。
+    headers.TokenType = 'EXTERNAL_IDP'
+  }
+  return headers
+}
+
+function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
+  return {
     'content-type': 'application/json',
     'x-amzn-kiro-agent-mode': 'vibe',
     'x-amz-user-agent': getKiroAmzUserAgent(),
     'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=3',
-    'Authorization': `Bearer ${account.accessToken}`
+    ...getKiroAuthenticationHeaders(account)
   }
-
-  // Enterprise External IdP 需要额外的 TokenType header（官方 addExternalIdpTokenTypeMiddleware）。
-  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
-    headers['TokenType'] = 'EXTERNAL_IDP'
-  }
-
-  return headers
 }
 
 // 获取排序后的端点列表（根据首选端点配置）
@@ -1192,6 +1213,109 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 // 调用 Kiro API（流式）
+export const UPSTREAM_ERROR_REASON = {
+  MONTHLY_REQUEST_COUNT: 'MONTHLY_REQUEST_COUNT'
+} as const
+
+export enum UpstreamRetryCategory {
+  AUTHENTICATION = 'authentication',
+  MONTHLY_QUOTA = 'monthly_quota',
+  RATE_LIMIT = 'rate_limit',
+  TRANSIENT = 'transient',
+  NONE = 'none'
+}
+
+export interface KiroUpstreamErrorDetails {
+  statusCode?: number
+  reason?: string
+  code?: string
+  retryAfterMs?: number
+}
+
+function getRetryCategory({ statusCode, reason, code }: KiroUpstreamErrorDetails): UpstreamRetryCategory {
+  if (statusCode === 401 || statusCode === 403) return UpstreamRetryCategory.AUTHENTICATION
+  if (statusCode === 402 && (reason === UPSTREAM_ERROR_REASON.MONTHLY_REQUEST_COUNT || code === UPSTREAM_ERROR_REASON.MONTHLY_REQUEST_COUNT)) {
+    return UpstreamRetryCategory.MONTHLY_QUOTA
+  }
+  if (statusCode === 429) return UpstreamRetryCategory.RATE_LIMIT
+  if (statusCode === 408 || (statusCode !== undefined && statusCode >= 500)) return UpstreamRetryCategory.TRANSIENT
+  return UpstreamRetryCategory.NONE
+}
+
+export class KiroUpstreamError extends Error {
+  readonly statusCode?: number
+  readonly reason?: string
+  readonly code?: string
+  readonly retryAfterMs?: number
+  readonly retryCategory: UpstreamRetryCategory
+
+  constructor(details: KiroUpstreamErrorDetails = {}) {
+    super(details.statusCode === 401 || details.statusCode === 403
+      ? `Auth error ${details.statusCode}`
+      : details.statusCode
+        ? `Upstream Kiro API request failed (HTTP ${details.statusCode})`
+        : 'Upstream Kiro API request failed')
+    this.name = 'KiroUpstreamError'
+    this.statusCode = details.statusCode
+    this.reason = details.reason
+    this.code = details.code
+    this.retryAfterMs = details.retryAfterMs
+    this.retryCategory = getRetryCategory(details)
+  }
+}
+
+function extractUpstreamErrorDetails(statusCode: number, body: string, retryAfterMs?: number): KiroUpstreamErrorDetails {
+  let reason: string | undefined
+  let code: string | undefined
+  try {
+    const payload = JSON.parse(body) as Record<string, unknown>
+    const source = typeof payload.error === 'object' && payload.error !== null ? payload.error as Record<string, unknown> : payload
+    reason = typeof source.reason === 'string' ? source.reason : undefined
+    code = typeof source.code === 'string' ? source.code : undefined
+  } catch {
+    // 非 JSON 上游错误不透传正文，保持安全的结构化 HTTP 错误。
+  }
+  return { statusCode, reason, code, retryAfterMs }
+}
+
+function getRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const retryAt = Date.parse(value)
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined
+}
+
+const STREAM_RATE_LIMIT_RETRY_BASE_MS = 200
+const STREAM_RATE_LIMIT_RETRY_MAX_MS = 2_000
+const STREAM_RATE_LIMIT_MAX_RETRIES = 2
+
+async function waitForStreamRateLimitRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(resolve, ms)
+    const abort = () => {
+      clearTimeout(timeout)
+      reject(getAbortError(signal))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
+export function normalizeKiroUpstreamError(error: unknown): KiroUpstreamError {
+  if (error instanceof KiroUpstreamError) return error
+  const message = error instanceof Error ? error.message : ''
+  // 仅兼容旧调用方抛出的文本错误；新上游响应始终在边界保留 reason/code。
+  const statusCode = /\b([1-5]\d{2})\b/.exec(message)?.[1]
+  const reason = message.includes(UPSTREAM_ERROR_REASON.MONTHLY_REQUEST_COUNT)
+    ? UPSTREAM_ERROR_REASON.MONTHLY_REQUEST_COUNT
+    : undefined
+  return new KiroUpstreamError({ statusCode: statusCode ? Number(statusCode) : undefined, reason, code: reason })
+}
+
+export function isMonthlyRequestQuotaError(error: unknown): boolean {
+  return normalizeKiroUpstreamError(error).retryCategory === UpstreamRetryCategory.MONTHLY_QUOTA
+}
+
 export async function callKiroApiStream(
   account: ProxyAccount,
   payload: KiroPayload,
@@ -1201,14 +1325,15 @@ export async function callKiroApiStream(
   onError: (error: Error) => void | Promise<void>,
   signal?: AbortSignal,
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli',
-  onContextUsage?: (usage: KiroUsage) => void | Promise<void>
+  onContextUsage?: (usage: KiroUsage) => void | Promise<void>,
+  rateLimitAttempt: number = 0
 ): Promise<void> {
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
   // 所有账号类型均走正常端点优先级（含 fallback），不再强制 Enterprise 走 CodeWhisperer
   const endpoints = getSortedEndpoints(preferredEndpoint)
 
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底，流式端点自动不传占位符）
-  if (!account.profileArn && isEnterprise) {
+  if (!isKiroApiKeyAccount(account) && !account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
     if (fetchedArn) {
       account.profileArn = fetchedArn
@@ -1235,8 +1360,10 @@ export async function callKiroApiStream(
       // profileArn 决策：后端所有端点均强制要求 profileArn（400 "profileArn is required"）
       // resolveProfileArn 按账号类型返回：BuilderId→占位符 / Social→固定 / Enterprise→真实ARN
       const resolvedArn = resolveProfileArn(account)
-      if (resolvedArn) {
+      if (resolvedArn && !isPlaceholderProfileArn(resolvedArn)) {
         requestPayload.profileArn = resolvedArn
+      } else {
+        delete requestPayload.profileArn
       }
       const requestedModelId = getPayloadModelId(requestPayload)
       if (endpoint.name === 'CodeWhisperer') {
@@ -1275,23 +1402,22 @@ export async function callKiroApiStream(
         : await fetch(endpoint.url, { method: 'POST', headers, body: payloadStr, signal })
 
       if (response.status === 429) {
-        console.log(`[KiroAPI] Endpoint ${endpoint.name} quota exhausted, trying next...`)
-        lastError = new Error(`Quota exhausted on ${endpoint.name}`)
-        continue
+        const retryAfterMs = getRetryAfterMs(response.headers.get('retry-after'))
+        const error = new KiroUpstreamError({ statusCode: 429, retryAfterMs })
+        if (rateLimitAttempt < STREAM_RATE_LIMIT_MAX_RETRIES) {
+          const backoff = Math.min(STREAM_RATE_LIMIT_RETRY_BASE_MS * (2 ** rateLimitAttempt), STREAM_RATE_LIMIT_RETRY_MAX_MS)
+          await waitForStreamRateLimitRetry(Math.min(retryAfterMs ?? backoff, STREAM_RATE_LIMIT_RETRY_MAX_MS), signal)
+          return callKiroApiStream(account, payload, onChunk, onComplete, onError, signal, preferredEndpoint, onContextUsage, rateLimitAttempt + 1)
+        }
+        await reportError(error)
+        return
       }
 
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401 || response.status === 403 || !response.ok) {
         throwIfAborted(signal)
         const body = await response.text()
         throwIfAborted(signal)
-        throw new Error(`Auth error ${response.status}: ${body}`)
-      }
-
-      if (!response.ok) {
-        throwIfAborted(signal)
-        const body = await response.text()
-        throwIfAborted(signal)
-        throw new Error(`API error ${response.status}: ${body}`)
+        throw new KiroUpstreamError(extractUpstreamErrorDetails(response.status, body, getRetryAfterMs(response.headers.get('retry-after'))))
       }
 
       // 解析 Event Stream
@@ -1307,9 +1433,11 @@ export async function callKiroApiStream(
       lastError = error as Error
       console.error(`[KiroAPI] Endpoint ${endpoint.name} failed:`, error)
       
-      // 如果是认证错误，不继续尝试其他端点
-      if ((error as Error).message.includes('Auth error')) {
-        await reportError(error as Error)
+      // 认证和 4xx 由调用方统一分类；5xx 仍可尝试下一个上游端点。
+      const upstreamError = normalizeKiroUpstreamError(error)
+      if (upstreamError.retryCategory === UpstreamRetryCategory.AUTHENTICATION ||
+        (error instanceof KiroUpstreamError && (upstreamError.statusCode === 402 || upstreamError.retryCategory === UpstreamRetryCategory.NONE))) {
+        await reportError(upstreamError)
         return
       }
 
@@ -1330,7 +1458,7 @@ export async function callKiroApiStream(
           }
           // 复用同一端点的配置（与主流程 profileArn 逻辑一致）
           const resolvedArn2 = resolveProfileArn(account)
-          if (resolvedArn2 && (!isPlaceholderProfileArn(resolvedArn2) || isEnterprise)) {
+          if (resolvedArn2 && !isPlaceholderProfileArn(resolvedArn2)) {
             retryPayload.profileArn = resolvedArn2
           } else {
             delete retryPayload.profileArn
@@ -1349,8 +1477,8 @@ export async function callKiroApiStream(
             await parseEventStream(retryResponse.body!, onChunk, onComplete, onError, onContextUsage, retryStr.length, signal, getPayloadModelId(retryPayload), retryStr)
             return
           }
-          const retryBody = await retryResponse.text()
-          console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry also failed: ${retryResponse.status} ${retryBody.slice(0, 200)}`)
+          await retryResponse.text()
+          console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry also failed: HTTP ${retryResponse.status}`)
         } catch (retryErr) {
           if (signal?.aborted) { await reportError(getAbortError(signal)); return }
           console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry error:`, retryErr)
@@ -2236,13 +2364,21 @@ function getQServiceEndpoint(region?: string): string {
 const AWS_REGION_PATTERN = /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d+$/
 const WEB_SEARCH_MCP_PATH = '/mcp'
 
-export class KiroMcpWebSearchError extends Error {
+export class KiroMcpWebSearchError extends KiroUpstreamError {
+  readonly retryable: boolean
+
   constructor(
-    readonly statusCode?: number,
-    readonly retryable: boolean = false
+    statusCode?: number,
+    retryable: boolean = false,
+    reason?: string,
+    retryAfterMs?: number
   ) {
-    super(statusCode ? `Web search MCP request failed (HTTP ${statusCode})` : 'Web search MCP request failed')
+    super({ statusCode, reason, code: reason, retryAfterMs })
     this.name = 'KiroMcpWebSearchError'
+    this.message = statusCode
+      ? `Web search MCP request failed (HTTP ${statusCode})`
+      : 'Web search MCP request failed'
+    this.retryable = retryable
   }
 }
 
@@ -2295,10 +2431,7 @@ export async function callKiroMcpWebSearch(
     'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=3',
-    'Authorization': `Bearer ${account.accessToken}`
-  }
-  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
-    headers.TokenType = 'EXTERNAL_IDP'
+    ...getKiroAuthenticationHeaders(account)
   }
   const profileArn = account.profileArn?.trim()
   if (profileArn && !isPlaceholderProfileArn(profileArn)) headers['x-amzn-kiro-profile-arn'] = profileArn
@@ -2319,7 +2452,15 @@ export async function callKiroMcpWebSearch(
     if (signal?.aborted) throw error
     throw new KiroMcpWebSearchError(undefined, true)
   }
-  if (!response.ok) throw new KiroMcpWebSearchError(response.status, response.status === 408 || response.status === 429 || response.status >= 500)
+  if (!response.ok) {
+    const details = extractUpstreamErrorDetails(response.status, await response.text(), getRetryAfterMs(response.headers.get('retry-after')))
+    throw new KiroMcpWebSearchError(
+      details.statusCode,
+      response.status === 408 || response.status === 429 || response.status >= 500,
+      details.reason ?? details.code,
+      details.retryAfterMs
+    )
+  }
 
   let payload: unknown
   try {
@@ -2383,12 +2524,13 @@ function getCodeWhispererEndpoint(region?: string): string {
  * 反代自动取第一个 profile。
  */
 export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<string | undefined> {
+  if (isKiroApiKeyAccount(account)) return undefined
   const baseUrl = getCodeWhispererEndpoint(account.region)
   const url = `${baseUrl}/ListAvailableProfiles`
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${account.accessToken}`,
+    ...getKiroAuthenticationHeaders(account),
     'x-amz-user-agent': getKiroAmzUserAgent(),
     'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
@@ -2439,7 +2581,7 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   const baseUrl = getQServiceEndpoint(account.region)
   
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${account.accessToken}`,
+    ...getKiroAuthenticationHeaders(account),
     'Content-Type': 'application/json',
     'Accept': 'application/json',
     'User-Agent': getKiroUserAgent(),
@@ -2452,7 +2594,7 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
 
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底）
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
-  if (!account.profileArn && isEnterprise) {
+  if (!isKiroApiKeyAccount(account) && !account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
     if (fetchedArn) {
       account.profileArn = fetchedArn
@@ -2534,7 +2676,7 @@ export async function fetchAvailableSubscriptions(account: ProxyAccount): Promis
   const url = `${baseUrl}/listAvailableSubscriptions`
   
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${account.accessToken}`,
+    ...getKiroAuthenticationHeaders(account),
     'content-type': 'application/json',
     'user-agent': getSubscriptionUserAgent(),
     'x-amz-user-agent': getSubscriptionAmzUserAgent(),
@@ -2583,7 +2725,7 @@ export async function fetchSubscriptionToken(
   const url = `${baseUrl}/CreateSubscriptionToken`
   
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${account.accessToken}`,
+    ...getKiroAuthenticationHeaders(account),
     'content-type': 'application/json',
     'user-agent': getSubscriptionUserAgent(),
     'x-amz-user-agent': getSubscriptionAmzUserAgent(),
@@ -2631,7 +2773,7 @@ export async function setUserPreference(
   const url = `${baseUrl}/setUserPreference`
 
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${account.accessToken}`,
+    ...getKiroAuthenticationHeaders(account),
     'content-type': 'application/json',
     'user-agent': getSubscriptionUserAgent(),
     'x-amz-user-agent': getSubscriptionAmzUserAgent(),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { callKiroApiStream, callKiroMcpWebSearch } from '../../src/main/proxy/kiroApi'
+import { callKiroApiStream, callKiroMcpWebSearch, fetchKiroModels } from '../../src/main/proxy/kiroApi'
+import { buildProxyAccounts } from '../../src/main/proxy/types'
 
 function eventStreamFrame(eventType: string, payload: unknown): Uint8Array {
   const encoder = new TextEncoder()
@@ -33,6 +34,11 @@ function fakeResponse(frames: Uint8Array[]): Response {
   })
   return new Response(body, { status: 200 })
 }
+
+vi.mock('../../src/main/proxy/systemProxy', async (importActual) => {
+  const actual = await importActual<typeof import('../../src/main/proxy/systemProxy')>()
+  return { ...actual, safeCreateProxyAgent: () => undefined }
+})
 
 const account = { id: 'stream-test', accessToken: 'fake-access-token' }
 const payload = {
@@ -136,6 +142,57 @@ describe('callKiroApiStream 真实 EventStream 解析', () => {
     expect(errors[0].message).toContain('Auth error 401')
   })
 
+  it('OAuth 失败后切至无 ARN API key 时不携带旧 profileArn', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('denied', { status: 403 }))
+      .mockResolvedValueOnce(fakeResponse([
+        eventStreamFrame('contextUsageEvent', { contextUsageEvent: { contextUsagePercentage: 10 } })
+      ]))
+    vi.stubGlobal('fetch', fetchMock)
+    const staleOAuthPayload = {
+      ...payload,
+      profileArn: 'arn:aws:codewhisperer:us-east-1:123456789012:profile/oauth-account'
+    }
+
+    await callKiroApiStream(
+      { id: 'oauth-failed', accessToken: 'oauth-token', profileArn: staleOAuthPayload.profileArn },
+      staleOAuthPayload,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      undefined,
+      'amazonq'
+    )
+    await callKiroApiStream(
+      { id: 'api-key-fallback', credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' },
+      staleOAuthPayload,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      undefined,
+      'amazonq'
+    )
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('profileArn')
+    expect(init.headers).toMatchObject({ tokentype: 'API_KEY' })
+  })
+
+  it('429 在同一账号按 Retry-After 退避后重试，不标记为配额错误', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'retry-after': '0' } }))
+      .mockResolvedValueOnce(fakeResponse([eventStreamFrame('contextUsageEvent', { contextUsageEvent: { contextUsagePercentage: 10 } })]))
+    vi.stubGlobal('fetch', fetchMock)
+    const completed: number[] = []
+    const errors: Error[] = []
+
+    await callKiroApiStream(account, payload, () => undefined, usage => { completed.push(usage.inputTokens) }, error => { errors.push(error) }, undefined, 'amazonq')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(completed).toHaveLength(1)
+    expect(errors).toHaveLength(0)
+  })
+
   it('客户端 abort 只回调一次且不会尝试下一端点', async () => {
     const controller = new AbortController()
     const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -218,6 +275,40 @@ describe('Kiro MCP WebSearch', () => {
     const request = JSON.parse(String(init.body))
     expect(request).toMatchObject({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'web_search', arguments: { query: 'safe query' } } })
     expect(request.id).toMatch(/^web_search_tooluse_[a-f0-9]{22}_\d+_[a-f0-9]{8}$/)
+  })
+
+  it('Kiro API key 在 WebSearch 和模型请求中使用 API_KEY 认证头', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      if (init.method === 'GET') {
+        return new Response(JSON.stringify({ models: [] }), { status: 200 })
+      }
+      const request = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({
+        id: request.id,
+        jsonrpc: '2.0',
+        result: { content: [{ type: 'text', text: JSON.stringify({ results: [] }) }] }
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const account = {
+      id: 'kiro-api-key',
+      credentialKind: 'kiro_api_key' as const,
+      kiroApiKey: 'ksk_test_redacted'
+    }
+    await callKiroMcpWebSearch(account, 'safe query')
+    await fetchKiroModels(account)
+
+    for (const [, init] of fetchMock.mock.calls as Array<[string, RequestInit]>) {
+      const headers = init.headers as Record<string, string>
+      expect(headers).toMatchObject({
+        Authorization: 'Bearer ksk_test_redacted',
+        tokentype: 'API_KEY'
+      })
+      expect(headers).not.toHaveProperty('TokenType')
+      expect(headers).not.toHaveProperty('cookie')
+      expect(headers).not.toHaveProperty('Cookie')
+    }
   })
 
   it('拒绝 JSON-RPC 错误和不匹配的响应，且错误不包含查询内容', async () => {
@@ -324,5 +415,161 @@ describe('Kiro MCP WebSearch', () => {
 
     await expect(pending).rejects.toThrow()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+describe('Kiro API key account sync signature', () => {
+  it('ignores lastCheckedAt while detecting key rotation without exposing the raw key', async () => {
+    const { buildAccountsSyncSignature } = await import('../../src/renderer/src/types/account')
+    const base = {
+      id: 'key-only-account',
+      groupId: 'group-a',
+      status: 'active',
+      isActive: true,
+      credentials: { credentialKind: 'kiro_api_key' as const, kiroApiKey: 'ksk_first_secret' }
+    }
+    const initial = buildAccountsSyncSignature([base])
+    const checkedLater = buildAccountsSyncSignature([{ ...base, lastCheckedAt: Date.now() }])
+    const rotated = buildAccountsSyncSignature([{
+      ...base,
+      credentials: { credentialKind: 'kiro_api_key' as const, kiroApiKey: 'ksk_rotated_secret' }
+    }])
+
+    expect(checkedLater).toBe(initial)
+    expect(rotated).not.toBe(initial)
+    expect(initial).not.toContain(base.credentials.kiroApiKey)
+  })
+
+
+  it('accepts key-only and OAuth credentials while rejecting missing credentials', async () => {
+    const { hasUpstreamKiroCredential } = await import('../../src/renderer/src/types/account')
+
+    expect(hasUpstreamKiroCredential({ credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' })).toBe(true)
+    expect(hasUpstreamKiroCredential({ accessToken: 'oauth-token' })).toBe(true)
+    expect(hasUpstreamKiroCredential({})).toBe(false)
+    expect(hasUpstreamKiroCredential()).toBe(false)
+  })
+
+
+  it('only permits OAuth credentials with a refresh token to refresh', async () => {
+    const { canRefreshUpstreamCredential } = await import('../../src/renderer/src/types/account')
+
+    expect(canRefreshUpstreamCredential({ credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted', refreshToken: 'ignored' })).toBe(false)
+    expect(canRefreshUpstreamCredential({})).toBe(false)
+    expect(canRefreshUpstreamCredential({ refreshToken: 'refresh-token' })).toBe(true)
+  })
+})
+
+describe('主进程账号池同步', () => {
+  it('跳过禁用账号，保留分组，并接纳仅 API key 的账号', () => {
+    const mapped = buildProxyAccounts([
+      {
+        id: 'disabled',
+        status: 'active',
+        isActive: false,
+        groupId: 'group-disabled',
+        credentials: { accessToken: 'disabled-token' }
+      },
+      {
+        id: 'oauth-group',
+        status: 'active',
+        groupId: 'group-a',
+        credentials: { accessToken: 'oauth-token' }
+      },
+      {
+        id: 'key-only',
+        status: 'active',
+        groupId: 'group-b',
+        credentials: { credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' }
+      }
+    ])
+
+    expect(mapped.map(account => account.id)).toEqual(['oauth-group', 'key-only'])
+    expect(mapped.find(account => account.id === 'oauth-group')?.groupId).toBe('group-a')
+    expect(mapped.find(account => account.id === 'key-only')).toMatchObject({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      groupId: 'group-b'
+    })
+  })
+})
+
+describe('后台刷新凭据计划', () => {
+  it('API key 不刷新 OAuth、不会读取残留 accessToken，且跳过用户信息', async () => {
+    const { buildBackgroundRefreshPlan } = await import('../../src/main/proxy/types')
+    const plan = buildBackgroundRefreshPlan({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      accessToken: 'stale-oauth-token'
+    }, true)
+
+    expect(plan).toMatchObject({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      shouldRefreshToken: false,
+      shouldFetchUserInfo: false
+    })
+    expect(plan.accessToken).toBeUndefined()
+  })
+
+  it('OAuth 保持原有的刷新和用户信息同步计划', async () => {
+    const { buildBackgroundRefreshPlan } = await import('../../src/main/proxy/types')
+    const plan = buildBackgroundRefreshPlan({ accessToken: 'oauth-token' }, true)
+
+    expect(plan).toMatchObject({
+      credentialKind: 'oauth',
+      accessToken: 'oauth-token',
+      shouldRefreshToken: true,
+      shouldFetchUserInfo: true
+    })
+  })
+
+  it('IPC 形状的禁用、封禁和无凭据账号不会进入账号池', async () => {
+    const { buildProxyAccounts } = await import('../../src/main/proxy/types')
+    const mapped = buildProxyAccounts([
+      { id: 'disabled', isActive: false, accessToken: 'token' },
+      { id: 'suspended', status: 'suspended', accessToken: 'token' },
+      { id: 'missing', status: 'active' },
+      { id: 'key', status: 'active', groupId: 'group-key', credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted', accessToken: 'stale-oauth-token' }
+    ])
+
+    expect(mapped).toEqual([expect.objectContaining({
+      id: 'key',
+      groupId: 'group-key',
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      accessToken: undefined
+    })])
+  })
+})
+
+describe('token-only 刷新生产者', () => {
+  it('batchRefreshTokens 使用的资格判断会排除带残留 OAuth 字段的 API key', async () => {
+    const { canRefreshUpstreamCredential } = await import('../../src/renderer/src/types/account')
+
+    expect(canRefreshUpstreamCredential({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      refreshToken: 'stale-refresh-token'
+    })).toBe(false)
+    expect(canRefreshUpstreamCredential({ refreshToken: 'oauth-refresh-token' })).toBe(true)
+  })
+
+  it('主进程池计划从 API key 推断凭据类型并禁止 token 刷新和 OAuth 回写', async () => {
+    const { buildBackgroundRefreshPlan } = await import('../../src/main/proxy/types')
+    const plan = buildBackgroundRefreshPlan({
+      kiroApiKey: 'ksk_test_redacted',
+      refreshToken: 'stale-refresh-token',
+      accessToken: 'stale-access-token'
+    }, true)
+
+    expect(plan).toMatchObject({
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      shouldRefreshToken: false,
+      shouldFetchUserInfo: false
+    })
+    expect(plan.accessToken).toBeUndefined()
   })
 })

@@ -358,6 +358,11 @@ const loadActiveGroupTab = (): string => {
   }
 }
 
+import { hasUpstreamKiroCredential } from '../types/account'
+
+import { canRefreshUpstreamCredential } from '../types/account'
+import { resolveBackgroundRefreshPlan } from '../../../shared/upstreamKiroCredentials'
+
 export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // 初始状态
   appVersion: '1.0.0',
@@ -1055,31 +1060,26 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   refreshAccountToken: async (id) => {
     const { accounts, updateAccountStatus } = get()
     const account = accounts.get(id)
-
-    if (!account) return false
+    if (!account || !canRefreshUpstreamCredential(account.credentials)) return false
 
     updateAccountStatus(id, 'refreshing')
-
     try {
-      // 通过主进程调用 Kiro API 刷新 Token（避免 CORS）
       const result = await window.api.refreshAccountToken(account)
-
-      if (result.success && result.data) {
+      const refreshed = result.data
+      if (result.success && refreshed) {
         set((state) => {
           const accounts = new Map(state.accounts)
           const acc = accounts.get(id)
           if (acc) {
-            // Enterprise 账号刷新时主进程会返回真实 profileArn，持久化避免后续重复获取
-            const resolvedProfileArn = result.data!.profileArn || acc.credentials.profileArn || acc.profileArn
+            const resolvedProfileArn = refreshed.profileArn || acc.credentials.profileArn || acc.profileArn
             accounts.set(id, {
               ...acc,
               profileArn: resolvedProfileArn,
               credentials: {
                 ...acc.credentials,
-                accessToken: result.data!.accessToken,
-                // 如果返回了新的 refreshToken，更新它
-                refreshToken: result.data!.refreshToken || acc.credentials.refreshToken,
-                expiresAt: Date.now() + result.data!.expiresIn * 1000,
+                accessToken: refreshed.accessToken,
+                refreshToken: refreshed.refreshToken || acc.credentials.refreshToken,
+                expiresAt: Date.now() + refreshed.expiresIn * 1000,
                 profileArn: resolvedProfileArn
               },
               status: 'active',
@@ -1091,10 +1091,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         })
         get().saveToStorage()
         return true
-      } else {
-        updateAccountStatus(id, 'error', result.error?.message)
-        return false
       }
+      updateAccountStatus(id, 'error', result.error?.message)
+      return false
     } catch (error) {
       updateAccountStatus(id, 'error', error instanceof Error ? error.message : 'Unknown error')
       return false
@@ -1103,14 +1102,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   batchRefreshTokens: async (ids) => {
     const { accounts, autoRefreshConcurrency } = get()
-    
-    // 收集需要刷新的账号
+
     const accountsToRefresh: Array<{
       id: string
       email: string
       profileArn?: string
+      needsTokenRefresh: boolean
       credentials: {
-        refreshToken: string
+        credentialKind?: 'oauth' | 'kiro_api_key'
+        kiroApiKey?: string
+        refreshToken?: string
         clientId?: string
         clientSecret?: string
         region?: string
@@ -1123,13 +1124,18 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     for (const id of ids) {
       const account = accounts.get(id)
-      if (!account?.credentials.refreshToken) continue
-      
+      if (!account) continue
+      const refreshPlan = resolveBackgroundRefreshPlan(account.credentials, true)
+      if (!refreshPlan.shouldRefreshToken || !account.credentials.refreshToken) continue
+
       accountsToRefresh.push({
         id,
         email: account.email,
         profileArn: account.profileArn,
+        needsTokenRefresh: true,
         credentials: {
+          credentialKind: account.credentials.credentialKind,
+          kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
@@ -1147,14 +1153,12 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
 
     console.log(`[BatchRefresh] Triggering background refresh for ${accountsToRefresh.length} accounts...`)
-    
-    // 使用后台刷新 API（不阻塞 UI）
     const result = await window.api.backgroundBatchRefresh(accountsToRefresh, autoRefreshConcurrency)
-    
-    return { 
-      success: result.successCount, 
-      failed: result.failedCount, 
-      errors: [] 
+
+    return {
+      success: result.successCount,
+      failed: result.failedCount,
+      errors: []
     }
   },
 
@@ -1261,57 +1265,54 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   batchCheckStatus: async (ids) => {
     const { accounts, autoRefreshConcurrency } = get()
-    
-    // 收集需要检查的账号（使用批量检查 API，不刷新 Token）
     const accountsToCheck: Array<{
       id: string
       email: string
       credentials: {
-        accessToken: string
+        credentialKind?: 'oauth' | 'kiro_api_key'
+        accessToken?: string
+        kiroApiKey?: string
         refreshToken?: string
         clientId?: string
         clientSecret?: string
         region?: string
         authMethod?: string
         provider?: string
+        profileArn?: string
       }
+      profileArn?: string
       idp?: string
     }> = []
 
     for (const id of ids) {
       const account = accounts.get(id)
-      if (!account?.credentials.accessToken) continue
-      
+      if (!account || !hasUpstreamKiroCredential(account.credentials)) continue
+
       accountsToCheck.push({
         id,
         email: account.email,
         credentials: {
+          credentialKind: account.credentials.credentialKind,
           accessToken: account.credentials.accessToken,
+          kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
           authMethod: account.credentials.authMethod,
-          provider: account.credentials.provider
+          provider: account.credentials.provider,
+          profileArn: account.credentials.profileArn
         },
+        profileArn: account.profileArn,
         idp: account.idp
       })
     }
 
-    if (accountsToCheck.length === 0) {
-      return { success: 0, failed: 0, errors: [] }
-    }
+    if (accountsToCheck.length === 0) return { success: 0, failed: 0, errors: [] }
 
     console.log(`[BatchCheck] Triggering background check for ${accountsToCheck.length} accounts...`)
-    
-    // 使用后台检查 API（只检查状态，不刷新 Token）
     const result = await window.api.backgroundBatchCheck(accountsToCheck, autoRefreshConcurrency)
-    
-    return { 
-      success: result.successCount, 
-      failed: result.failedCount, 
-      errors: [] 
-    }
+    return { success: result.successCount, failed: result.failedCount, errors: [] }
   },
 
   // ==================== 统计 ====================
@@ -1972,7 +1973,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     const now = Date.now()
     const refreshLeadMs = tokenRefreshLeadMs(autoRefreshInterval)
 
-    // 筛选需要处理的账号
     const accountsToRefresh: Array<{
       id: string
       email: string
@@ -1980,7 +1980,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       profileArn?: string
       needsTokenRefresh: boolean
       credentials: {
-        refreshToken: string
+        credentialKind?: 'oauth' | 'kiro_api_key'
+        kiroApiKey?: string
+        refreshToken?: string
         clientId?: string
         clientSecret?: string
         region?: string
@@ -1990,9 +1992,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         profileArn?: string
       }
     }> = []
-    
+
     for (const [id, account] of accounts) {
-      // 跳过已封禁或错误状态的账号
       if (isBannedAccountError(account.lastError)) {
         continue
       }
@@ -2000,8 +2001,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const expiresAt = account.credentials.expiresAt
       const timeUntilExpiry = expiresAt ? expiresAt - now : Infinity
       const needsTokenRefresh = expiresAt && timeUntilExpiry <= refreshLeadMs
-      
-      // Token 即将过期需要刷新，或开启了同步检测/自动换号需要检查账户信息
+
       if (needsTokenRefresh || autoRefreshSyncInfo || autoSwitchEnabled) {
         accountsToRefresh.push({
           id,
@@ -2010,7 +2010,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           profileArn: account.profileArn,
           needsTokenRefresh: !!needsTokenRefresh,
           credentials: {
-            refreshToken: account.credentials.refreshToken || '',
+            credentialKind: account.credentials.credentialKind,
+            kiroApiKey: account.credentials.kiroApiKey,
+            refreshToken: account.credentials.refreshToken,
             clientId: account.credentials.clientId,
             clientSecret: account.credentials.clientSecret,
             region: account.credentials.region,
@@ -2029,8 +2031,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
 
     console.log(`[BackgroundRefresh] Triggering refresh for ${accountsToRefresh.length} accounts (syncInfo: ${autoRefreshSyncInfo})...`)
-    
-    // 调用主进程后台刷新，不等待结果（通过 IPC 事件接收）
     window.api.backgroundBatchRefresh(accountsToRefresh, autoRefreshConcurrency, autoRefreshSyncInfo)
   },
 

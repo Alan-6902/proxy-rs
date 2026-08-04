@@ -381,7 +381,13 @@ export interface KiroUsage {
 export interface ProxyAccount {
   id: string
   email?: string
-  accessToken: string
+  /** IPC 同步资格；旧渲染进程传入禁用/封禁账号时主进程必须拒绝入池。 */
+  status?: string
+  isActive?: boolean
+  accessToken?: string
+  /** 上游 Kiro API Key；仅 credentialKind='kiro_api_key' 时使用。 */
+  kiroApiKey?: string
+  credentialKind?: 'oauth' | 'kiro_api_key'
   refreshToken?: string
   clientId?: string
   clientSecret?: string
@@ -574,6 +580,87 @@ export interface TlsConfig {
   // 或直接提供 PEM 内容
   cert?: string
   key?: string
+}
+
+export interface StoredProxyAccount {
+  id: string
+  email?: string
+  status?: string
+  isActive?: boolean
+  groupId?: string
+  idp?: string
+  profileArn?: string
+  credentials?: {
+    accessToken?: string
+    kiroApiKey?: string
+    credentialKind?: 'oauth' | 'kiro_api_key'
+    refreshToken?: string
+    profileArn?: string
+    expiresAt?: number
+    clientId?: string
+    clientSecret?: string
+    region?: string
+    authMethod?: ProxyAccount['authMethod']
+    provider?: string
+  }
+}
+
+/** 将持久化账号转换为反代池账号，供冷启动与懒加载共用。 */
+import { resolveBackgroundRefreshPlan } from '../../shared/upstreamKiroCredentials'
+
+export interface BackgroundRefreshPlan {
+  credentialKind: 'oauth' | 'kiro_api_key'
+  accessToken?: string
+  kiroApiKey?: string
+  shouldRefreshToken: boolean
+  shouldFetchUserInfo: boolean
+}
+
+export function buildBackgroundRefreshPlan(
+  credentials: Pick<ProxyAccount, 'credentialKind' | 'accessToken' | 'kiroApiKey' | 'refreshToken'>,
+  needsTokenRefresh: boolean
+): BackgroundRefreshPlan {
+  return resolveBackgroundRefreshPlan(credentials, needsTokenRefresh)
+}
+
+function getProxyAccountCredentials(account: StoredProxyAccount | ProxyAccount): Partial<ProxyAccount> {
+  if ('credentials' in account) return account.credentials || {}
+  return account
+}
+
+export function buildProxyAccounts(
+  accounts: Iterable<StoredProxyAccount | ProxyAccount>,
+  getProxyUrl: (accountId: string) => string | undefined = () => undefined
+): ProxyAccount[] {
+  return Array.from(accounts)
+    .filter(account => {
+      if ('isActive' in account && account.isActive === false) return false
+      if ('status' in account && account.status !== undefined && account.status !== 'active') return false
+
+      const plan = buildBackgroundRefreshPlan(getProxyAccountCredentials(account), false)
+      return plan.credentialKind === 'kiro_api_key' ? Boolean(plan.kiroApiKey) : Boolean(plan.accessToken)
+    })
+    .map(account => {
+      const credentials = getProxyAccountCredentials(account)
+      const plan = buildBackgroundRefreshPlan(credentials, false)
+      return {
+        id: account.id,
+        email: account.email,
+        accessToken: plan.accessToken,
+        kiroApiKey: plan.kiroApiKey,
+        credentialKind: plan.credentialKind,
+        refreshToken: credentials.refreshToken,
+        profileArn: account.profileArn || credentials.profileArn,
+        expiresAt: credentials.expiresAt,
+        clientId: credentials.clientId,
+        clientSecret: credentials.clientSecret,
+        region: credentials.region || 'us-east-1',
+        authMethod: credentials.authMethod,
+        provider: credentials.provider || ('idp' in account ? account.idp : undefined),
+        proxyUrl: getProxyUrl(account.id),
+        groupId: account.groupId
+      }
+    })
 }
 
 // Token 刷新回调类型

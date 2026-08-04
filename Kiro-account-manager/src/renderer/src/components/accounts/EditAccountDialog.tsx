@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { X, Loader2, RefreshCw, Download, CheckCircle, Copy, Check } from 'lucide-react'
+import { X, Loader2, RefreshCw, CheckCircle, Copy, Check } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
 import { useAccountsStore } from '@/store'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -90,24 +90,6 @@ export function EditAccountDialog({
       setError(null)
     }
   }, [account])
-
-  // 从本地配置导入
-  const handleImportFromLocal = async () => {
-    try {
-      const result = await window.api.loadKiroCredentials()
-      if (result.success && result.data) {
-        setRefreshToken(result.data.refreshToken)
-        setClientId(result.data.clientId)
-        setClientSecret(result.data.clientSecret)
-        setRegion(result.data.region)
-        setError(null)
-      } else {
-        setError(result.error || '导入失败')
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '导入失败')
-    }
-  }
 
   // 验证并刷新信息
   const handleVerifyAndRefresh = async () => {
@@ -283,18 +265,6 @@ export function EditAccountDialog({
                   </span>
                 )}
               </div>
-              {account?.credentials.authMethod !== 'social' && (
-                <Button 
-                  type="button" 
-                  variant="outline" 
-                  size="sm"
-                  className="h-8 rounded-lg text-xs"
-                  onClick={handleImportFromLocal}
-                >
-                  <Download className="h-3 w-3 mr-1.5" />
-                  {isEn ? 'Import Local' : '从本地导入'}
-                </Button>
-              )}
             </div>
 
             {account?.credentials.authMethod === 'social' && (

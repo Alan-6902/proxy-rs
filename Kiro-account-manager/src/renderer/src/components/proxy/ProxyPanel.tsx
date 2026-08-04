@@ -84,8 +84,6 @@ interface ProxyConfig {
   multiAccountSelectionMode?: 'all' | 'groups'
   multiAccountGroupIds?: string[]
   modelMappings?: ModelMappingRule[]
-  // Agent 模式
-  agentMode?: 'vibe' | 'spec'
   // v1.8 安全 / 限流 / 可观测
   maxRequestBodyBytes?: number
   allowedIPs?: string[]
@@ -1064,25 +1062,6 @@ export function ProxyPanel() {
                     disabled={isRunning || !config.enableTokenBufferReserve}
                     placeholder={isEn ? 'Reserve tokens (default 20000)' : '预留 token 数（默认 20000）'}
                     className="h-9 flex-1"
-                  />
-                </div>
-              </div>
-              {/* Agent Mode */}
-              <div className="col-span-3 grid grid-cols-3 gap-x-3 items-end">
-                <div className="space-y-1.5">
-                  <Label className="text-xs" title={isEn ? 'Agent mode sent to Kiro backend. Vibe=chat-first, Spec=plan-first.' : 'Kiro 后端 Agent 模式。Vibe=对话优先，Spec=计划优先。'}>{isEn ? 'Agent Mode' : 'Agent 模式'}</Label>
-                  <Select
-                    value={config.agentMode || 'vibe'}
-                    options={[
-                      { value: 'vibe', label: 'Vibe', description: isEn ? 'Chat first, then build' : '对话优先，边聊边做' },
-                      { value: 'spec', label: 'Spec', description: isEn ? 'Plan first, then build' : '先规划后执行' }
-                    ]}
-                    onChange={(value) => {
-                      const mode = value as 'vibe' | 'spec'
-                      setConfig(prev => ({ ...prev, agentMode: mode }))
-                      window.api.proxyUpdateConfig({ agentMode: mode })
-                    }}
-                    placeholder={isEn ? 'Select mode' : '选择模式'}
                   />
                 </div>
               </div>

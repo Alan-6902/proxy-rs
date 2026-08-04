@@ -166,31 +166,23 @@ function getKiroAmzUserAgent(): string {
   return `aws-sdk-js/${AWS_SDK_VERSION} KiroIDE-${KIRO_VERSION}`
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const KIRO_CLI_OS = OS_PLATFORM === 'win32' ? 'windows' : OS_PLATFORM === 'macos' ? 'macos' : 'linux'
-void KIRO_CLI_OS // reserved for future kiro-cli UA
+export const KIRO_BUILDER_ID_PLACEHOLDER_ARN =
+  'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
+export const KIRO_SOCIAL_PROFILE_ARN =
+  'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
 
-// Agent 模式（可通过 setAgentMode 配置切换）
-let configuredAgentMode: 'vibe' | 'spec' = 'vibe'
-export function setAgentMode(mode: 'vibe' | 'spec'): void {
-  configuredAgentMode = mode
+const ENTERPRISE_FALLBACK_PROFILE_ID = 'VNECVYCYYAWN'
+const ENTERPRISE_FALLBACK_ACCOUNT_ID = '610548660232'
+const PLACEHOLDER_PROFILE_ARNS = new Set<string>([KIRO_BUILDER_ID_PLACEHOLDER_ARN])
+
+export function isPlaceholderProfileArn(arn: string | undefined | null): boolean {
+  return !!arn && PLACEHOLDER_PROFILE_ARNS.has(arn)
 }
-export function getAgentMode(): 'vibe' | 'spec' {
-  return configuredAgentMode
+
+export function getEnterpriseFallbackArn(region?: string): string {
+  const selectedRegion = region?.startsWith('eu-') ? 'eu-central-1' : 'us-east-1'
+  return `arn:aws:codewhisperer:${selectedRegion}:${ENTERPRISE_FALLBACK_ACCOUNT_ID}:profile/${ENTERPRISE_FALLBACK_PROFILE_ID}`
 }
-
-// profileArn 决策中心已迁移到 ../kiroAuthSync，反代和账号管理器主进程共用同一份定义，
-// 防止多处常量漂移。注意 KIRO_BUILDER_ID_PLACEHOLDER_ARN 仍以本模块为出口 re-export，
-// 这样 main/index.ts 等老 import 路径不需要改。
-import {
-  KIRO_BUILDER_ID_PLACEHOLDER_ARN as _KIRO_BUILDER_ID_PLACEHOLDER_ARN,
-  KIRO_SOCIAL_PROFILE_ARN,
-  isPlaceholderProfileArn as _isPlaceholderProfileArn,
-  getEnterpriseFallbackArn
-} from '../kiroAuthSync'
-
-export const KIRO_BUILDER_ID_PLACEHOLDER_ARN = _KIRO_BUILDER_ID_PLACEHOLDER_ARN
-export const isPlaceholderProfileArn = _isPlaceholderProfileArn
 
 /**
  * 反代调 Kiro API 时使用的 profileArn 决策。
@@ -212,9 +204,6 @@ function resolveProfileArn(account: ProxyAccount): string | undefined {
   }
   return KIRO_BUILDER_ID_PLACEHOLDER_ARN
 }
-
-// 兼容 SDK 部分调用仍想知道社交 ARN 的场景（极少；保留 export 不破坏外部 import）
-export { KIRO_SOCIAL_PROFILE_ARN }
 
 // Agentic 模式系统提示 - 防止大文件写入超时
 const AGENTIC_SYSTEM_PROMPT = `# CRITICAL: CHUNKED WRITE PROTOCOL (MANDATORY)
@@ -1137,12 +1126,9 @@ export function clearAllCaches(): { conversation: number; model: number } {
 
 // 获取认证方式对应的请求头
 function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
-  // 按配置的 agent 模式（vibe 或 spec）设置 header
-  const agentMode = configuredAgentMode
-  
   const headers: Record<string, string> = {
     'content-type': 'application/json',
-    'x-amzn-kiro-agent-mode': agentMode,
+    'x-amzn-kiro-agent-mode': 'vibe',
     'x-amz-user-agent': getKiroAmzUserAgent(),
     'user-agent': getKiroUserAgent(),
     'amz-sdk-invocation-id': uuidv4(),
@@ -1150,7 +1136,7 @@ function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[
     'Authorization': `Bearer ${account.accessToken}`
   }
 
-  // Enterprise External IdP 需要额外的 TokenType header（官方 addExternalIdpTokenTypeMiddleware）
+  // Enterprise External IdP 需要额外的 TokenType header（官方 addExternalIdpTokenTypeMiddleware）。
   if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
     headers['TokenType'] = 'EXTERNAL_IDP'
   }

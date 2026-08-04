@@ -563,9 +563,6 @@ export interface ProxyConfig {
   /** 启用审计日志（管理 API 操作、config 变更） */
   enableAuditLog?: boolean
 
-  // ============ Agent 模式 ============
-  /** Agent 模式：vibe（对话优先）或 spec（计划优先）。默认 vibe */
-  agentMode?: 'vibe' | 'spec'
 }
 
 export interface TlsConfig {

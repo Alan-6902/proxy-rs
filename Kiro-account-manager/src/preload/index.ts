@@ -125,64 +125,6 @@ const api = {
     }
   },
 
-  // 切换账号 - 写入凭证到本地 SSO 缓存
-  switchAccount: (credentials: {
-    accessToken: string
-    refreshToken: string
-    clientId: string
-    clientSecret: string
-    region?: string
-    startUrl?: string
-    authMethod?: 'IdC' | 'social'
-    provider?: 'BuilderId' | 'Github' | 'Google' | 'Enterprise'
-    profileArn?: string
-    accountId?: string
-  }): Promise<{
-    success: boolean
-    error?: string
-    refreshedCredentials?: { accessToken: string; refreshToken: string; expiresIn: number }
-  }> => {
-    return ipcRenderer.invoke('switch-account', credentials)
-  },
-
-  // 订阅 Kiro IDE 自己 refresh token 后反代检测到的事件
-  onKiroIdeTokenChanged: (callback: (data: { accountId: string; reason: string }) => void): (() => void) => {
-    const handler = (_event: unknown, data: { accountId: string; reason: string }): void => {
-      callback(data)
-    }
-    ipcRenderer.on('kiro-ide-token-changed', handler)
-    return (): void => {
-      ipcRenderer.removeListener('kiro-ide-token-changed', handler)
-    }
-  },
-
-  // 主动续期开关：开启后账号管理器会在 IDE refresh 阈值前抢先 refresh，IDE 永不自刷
-  setProactiveRenewalEnabled: (enabled: boolean): Promise<{ success: boolean; enabled?: boolean; error?: string }> => {
-    return ipcRenderer.invoke('set-proactive-renewal-enabled', enabled)
-  },
-  getProactiveRenewalEnabled: (): Promise<{ success: boolean; enabled: boolean; leadTimeMinutes?: number; error?: string }> => {
-    return ipcRenderer.invoke('get-proactive-renewal-enabled')
-  },
-
-  // 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
-  switchAccountCli: (credentials: {
-    accessToken: string
-    refreshToken: string
-    clientId?: string
-    clientSecret?: string
-    region?: string
-    profileArn?: string
-    provider?: string
-    scopes?: string[]
-  }): Promise<{ success: boolean; error?: string; dbPath?: string }> => {
-    return ipcRenderer.invoke('switch-account-cli', credentials)
-  },
-
-  // 退出登录 - 清除本地 SSO 缓存
-  logoutAccount: (): Promise<{ success: boolean; deletedCount?: number; error?: string }> => {
-    return ipcRenderer.invoke('logout-account')
-  },
-
   // 文件操作 - 导出到文件
   exportToFile: (data: string, filename: string): Promise<boolean> => {
     return ipcRenderer.invoke('export-to-file', data, filename)
@@ -218,37 +160,6 @@ const api = {
     error?: string
   }> => {
     return ipcRenderer.invoke('verify-account-credentials', credentials)
-  },
-
-  // 获取本地 SSO 缓存中当前使用的账号信息
-  getLocalActiveAccount: (): Promise<{
-    success: boolean
-    data?: {
-      refreshToken: string
-      accessToken?: string
-      authMethod?: string
-      provider?: string
-    }
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('get-local-active-account')
-  },
-
-  // 从 Kiro 本地配置导入凭证
-  loadKiroCredentials: (): Promise<{
-    success: boolean
-    data?: {
-      accessToken: string
-      refreshToken: string
-      clientId: string
-      clientSecret: string
-      region: string
-      authMethod: string  // 'IdC' 或 'social'
-      provider: string    // 'BuilderId', 'Github', 'Google'
-    }
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('load-kiro-credentials')
   },
 
   // 从 AWS SSO Token (x-amz-sso_authn) 导入账号

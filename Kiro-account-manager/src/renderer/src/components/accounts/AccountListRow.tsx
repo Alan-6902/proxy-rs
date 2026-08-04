@@ -11,7 +11,6 @@ import {
   Info,
   AlertCircle,
   Power,
-  LogOut,
   RotateCcw,
   ExternalLink,
   Loader2,
@@ -133,83 +132,10 @@ function AccountListRowComponent({
   }, [account.isActive, isUnauthorized, tagColors])
 
   // === Handlers ===
-  const handleSwitch = useCallback(async (e: React.MouseEvent) => {
+  const handleSwitch = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
-    const { credentials } = account
-    const { switchTarget } = useAccountsStore.getState()
-
-    if (!credentials.refreshToken) {
-      alert(isEn ? 'Incomplete credentials, cannot switch' : '账号凭证不完整，无法切换')
-      return
-    }
-    if (credentials.authMethod !== 'social' && (!credentials.clientId || !credentials.clientSecret)) {
-      alert(isEn ? 'Incomplete credentials, cannot switch' : '账号凭证不完整，无法切换')
-      return
-    }
-
-    const cliPayload = {
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId,
-      clientSecret: credentials.clientSecret,
-      region: credentials.region || 'us-east-1',
-      profileArn: account.profileArn,
-      provider: credentials.provider
-    }
-    const idePayload = {
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      clientId: credentials.clientId || '',
-      clientSecret: credentials.clientSecret || '',
-      region: credentials.region || 'us-east-1',
-      startUrl: credentials.startUrl,
-      authMethod: credentials.authMethod,
-      provider: credentials.provider,
-      profileArn: account.profileArn,
-      accountId: account.id
-    }
-
-    let success = true
-    let errorMsg = ''
-    const target = switchTarget || 'ide'
-    if (target === 'ide' || target === 'both') {
-      const result = await window.api.switchAccount(idePayload)
-      if (!result.success) {
-        success = false
-        errorMsg = result.error || ''
-      } else if (result.refreshedCredentials) {
-        // 同步 main 进程 refresh 后的最新 credentials 到 store，避免反代 store 留下已作废的 refreshToken
-        const rc = result.refreshedCredentials
-        useAccountsStore.setState((state) => {
-          const accounts = new Map(state.accounts)
-          const acc = accounts.get(account.id)
-          if (acc) {
-            accounts.set(account.id, {
-              ...acc,
-              credentials: {
-                ...acc.credentials,
-                accessToken: rc.accessToken,
-                refreshToken: rc.refreshToken,
-                expiresAt: Date.now() + rc.expiresIn * 1000
-              }
-            })
-          }
-          return { accounts }
-        })
-        useAccountsStore.getState().saveToStorage()
-      }
-    }
-    if (target === 'cli' || target === 'both') {
-      const result = await window.api.switchAccountCli(cliPayload)
-      if (!result.success && target === 'cli') { success = false; errorMsg = result.error || '' }
-    }
-
-    if (success) {
-      setActiveAccount(account.id)
-    } else {
-      alert(isEn ? `Switch failed: ${errorMsg}` : `切换失败：${errorMsg}`)
-    }
-  }, [account, isEn, setActiveAccount])
+    setActiveAccount(account.id)
+  }, [account.id, setActiveAccount])
 
   const handleRefresh = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -228,17 +154,6 @@ function AccountListRowComponent({
     if (!confirm(isEn ? `Delete account "${account.email}"?` : `确定删除账号 "${account.email}"？`)) return
     removeAccount(account.id)
   }, [account.id, account.email, isEn, removeAccount])
-
-  const handleLogout = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!confirm(isEn ? 'Clear local SSO cache and logout from Kiro?' : '清除本地 SSO 缓存并退出 Kiro 登录？')) return
-    const result = await window.api.logoutAccount()
-    if (result.success) {
-      setActiveAccount(null)
-    } else {
-      alert(isEn ? `Logout failed: ${result.error}` : `退出失败：${result.error}`)
-    }
-  }, [isEn, setActiveAccount])
 
   const handleClearSuspended = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -590,17 +505,7 @@ function AccountListRowComponent({
           <Edit className="h-3.5 w-3.5" />
         </Button>
 
-        {account.isActive ? (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 hover:bg-destructive/10 hover:text-destructive"
-            onClick={handleLogout}
-            title={isEn ? 'Logout (clear SSO cache)' : '退出登录（清除 SSO 缓存）'}
-          >
-            <LogOut className="h-3.5 w-3.5" />
-          </Button>
-        ) : (
+        {!account.isActive && (
           <Button
             size="icon"
             variant="ghost"

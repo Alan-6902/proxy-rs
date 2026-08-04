@@ -3,7 +3,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select 
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import type { SubscriptionType } from '@/types/account'
-import { X, Loader2, Download, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
+import { X, Loader2, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
 
 interface AddAccountDialogProps {
@@ -490,26 +490,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
       await navigator.clipboard.writeText(builderIdLoginData.userCode)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    }
-  }
-
-  // 从本地配置导入
-  const handleImportFromLocal = async () => {
-    try {
-      const result = await window.api.loadKiroCredentials()
-      if (result.success && result.data) {
-        setRefreshToken(result.data.refreshToken)
-        setClientId(result.data.clientId)
-        setClientSecret(result.data.clientSecret)
-        setRegion(result.data.region)
-        setAuthMethod(result.data.authMethod as 'IdC' | 'social' || 'IdC')
-        setProvider(result.data.provider || 'BuilderId')
-        setError(null)
-      } else {
-        setError(result.error || '导入失败')
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '导入失败')
     }
   }
 
@@ -1528,18 +1508,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                       {isEn ? 'Batch' : '批量'}
                     </button>
                   </div>
-                  {oidcImportMode === 'single' && (
-                    <Button 
-                      type="button" 
-                      variant="outline" 
-                      size="sm"
-                      className="h-7 rounded-lg text-xs"
-                      onClick={handleImportFromLocal}
-                    >
-                      <Download className="h-3 w-3 mr-1" />
-                      {isEn ? 'Import' : '本地导入'}
-                    </Button>
-                  )}
                 </div>
               </div>
 

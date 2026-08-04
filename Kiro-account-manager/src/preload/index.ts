@@ -365,6 +365,11 @@ const api = {
     return ipcRenderer.invoke('proxy-update-config', config)
   },
 
+  proxyAdminKeyStatus: (): Promise<{ configured: boolean }> => ipcRenderer.invoke('proxy-admin-key-status'),
+  proxyAdminKeyRotate: (): Promise<{ success: boolean; adminApiKey?: string }> => ipcRenderer.invoke('proxy-admin-key-rotate'),
+  proxyAdminKeySet: (adminApiKey: string): Promise<{ success: boolean; adminApiKey?: string; error?: string }> => ipcRenderer.invoke('proxy-admin-key-set', adminApiKey),
+  proxyAdminKeyClear: (): Promise<{ success: boolean }> => ipcRenderer.invoke('proxy-admin-key-clear'),
+
   // ============ v1.8 反代安全 / 可观测 IPC ============
 
   /** 获取反代自签证书信息（用于在 UI 显示指纹/有效期 + 让用户导出 .crt） */

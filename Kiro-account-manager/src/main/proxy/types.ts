@@ -487,6 +487,8 @@ export interface ProxyConfig {
   host: string
   apiKey?: string  // 保留兼容性
   apiKeys?: ApiKey[]  // 多 API Key 支持
+  /** 管理 API 专用密钥；绝不参与业务 API 鉴权或普通密钥统计 */
+  adminApiKey?: string
   enableMultiAccount: boolean
   selectedAccountIds: string[]
   logRequests: boolean

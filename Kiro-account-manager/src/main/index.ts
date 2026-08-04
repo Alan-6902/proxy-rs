@@ -1,11 +1,12 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
 import { join } from 'path'
+import { randomBytes } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
 import { fetch as undiciFetch, type RequestInit as UndiciRequestInit, type Dispatcher } from 'undici'
 import icon from '../../resources/icon.png?asset'
-import { ProxyServer, configureProxyClients, type ProxyAccount, type ProxyConfig, type ProxyClientTarget, type ProxyClientModel } from './proxy'
+import { ADMIN_API_KEY_PREFIX, ADMIN_KEY_UPDATE_ERROR, assertDistinctAdminApiKey, ProxyServer, configureProxyClients, stripAdminApiKey, switchAdminApiKey, type ProxyAccount, type ProxyConfig, type ProxyClientTarget, type ProxyClientModel } from './proxy'
 import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback } from './proxy/kiroApi'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
@@ -1312,6 +1313,26 @@ function sanitizeProxyConfig(
   config: Partial<ProxyConfig>
 ): { value: Partial<ProxyConfig>; changed: boolean } {
   return removeLegacyStorageKeys(config, LEGACY_PROXY_CONFIG_KEYS)
+}
+
+/** 先持久化再更新运行时，避免高权限密钥只存在于内存或磁盘。 */
+function updateAdminApiKeyAtomically(adminApiKey: string | undefined): { success: boolean; error?: string } {
+  try {
+    const server = initProxyServer()
+    const currentStore = store
+    if (!currentStore) return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+
+    const previousConfig = server.getConfig()
+    assertDistinctAdminApiKey({ ...previousConfig, adminApiKey })
+    return switchAdminApiKey(
+      previousConfig,
+      adminApiKey,
+      { write: config => currentStore.set('proxyConfig', sanitizeProxyConfig(config).value) },
+      { update: key => server.updateConfig({ adminApiKey: key }) }
+    )
+  } catch {
+    return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+  }
 }
 
 async function initStore(): Promise<void> {
@@ -4558,7 +4579,7 @@ app.whenReady().then(async () => {
     try {
       const server = initProxyServer()
       if (config) {
-        server.updateConfig(config)
+        server.updateConfig(sanitizeProxyConfig(stripAdminApiKey(config)).value)
       }
       await server.start()
       // 更新托盘菜单状态
@@ -4590,11 +4611,13 @@ app.whenReady().then(async () => {
     if (!proxyServer) {
       // 未初始化时从 store 读取保存的配置
       const savedConfig = store?.get('proxyConfig') as ProxyConfig | undefined
-      return { running: false, config: savedConfig || null, stats: null, sessionStats: null }
+      const { adminApiKey: _adminApiKey, ...safeConfig } = savedConfig || {}
+      return { running: false, config: savedConfig ? safeConfig : null, stats: null, sessionStats: null }
     }
+    const { adminApiKey: _adminApiKey, ...safeConfig } = proxyServer.getConfig()
     return {
       running: proxyServer.isRunning(),
-      config: proxyServer.getConfig(),
+      config: safeConfig,
       stats: proxyServer.getStats(),
       sessionStats: proxyServer.getSessionStats()
     }
@@ -4673,7 +4696,8 @@ app.whenReady().then(async () => {
   // IPC: 更新反代服务器配置
   ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) => {
     try {
-      const sanitizedConfig = sanitizeProxyConfig(config)
+      // 管理员密钥只能经专用 IPC 变更，泛型设置绝不能覆盖或读回它。
+      const sanitizedConfig = sanitizeProxyConfig(stripAdminApiKey(config))
       const server = initProxyServer()
       server.updateConfig(sanitizedConfig.value)
       const newConfig = server.getConfig()
@@ -4696,10 +4720,49 @@ app.whenReady().then(async () => {
       if (store) {
         store.set('proxyConfig', sanitizeProxyConfig(newConfig).value)
       }
-      return { success: true, config: newConfig }
+      const { adminApiKey: _adminApiKey, ...safeConfig } = newConfig
+      return { success: true, config: safeConfig }
     } catch (error) {
       console.error('[ProxyServer] Update config failed:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update config' }
+    }
+  })
+
+  // 管理员密钥始终在主进程生成、持久化和清除；原文只在本次 rotate/set 响应返回。
+  ipcMain.handle('proxy-admin-key-status', () => {
+    try {
+      return { configured: !!initProxyServer().getConfig().adminApiKey }
+    } catch {
+      return { configured: false, success: false, error: ADMIN_KEY_UPDATE_ERROR }
+    }
+  })
+
+  ipcMain.handle('proxy-admin-key-rotate', () => {
+    try {
+      const adminApiKey = `${ADMIN_API_KEY_PREFIX}${randomBytes(32).toString('base64url')}`
+      const result = updateAdminApiKeyAtomically(adminApiKey)
+      return result.success ? { success: true, adminApiKey } : result
+    } catch {
+      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+    }
+  })
+
+  ipcMain.handle('proxy-admin-key-set', (_event, value: unknown) => {
+    try {
+      if (typeof value !== 'string' || !value.trim()) return { success: false, error: 'Invalid admin API key' }
+      const adminApiKey = value.trim()
+      const result = updateAdminApiKeyAtomically(adminApiKey)
+      return result.success ? { success: true, adminApiKey } : result
+    } catch {
+      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+    }
+  })
+
+  ipcMain.handle('proxy-admin-key-clear', () => {
+    try {
+      return updateAdminApiKeyAtomically(undefined)
+    } catch {
+      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
     }
   })
 
@@ -4779,7 +4842,7 @@ app.whenReady().then(async () => {
       const crypto = await import('crypto')
       const server = initProxyServer()
       const config = server.getConfig()
-      const apiKeys = config.apiKeys || []
+      const apiKeys = [...(config.apiKeys || [])]
       
       // 根据格式生成随机 Key
       const format = apiKey.format || 'sk'
@@ -4818,8 +4881,8 @@ app.whenReady().then(async () => {
         }
       }
       
-      apiKeys.push(newApiKey)
-      server.updateConfig({ apiKeys })
+      const nextApiKeys = [...apiKeys, newApiKey]
+      server.updateConfig({ apiKeys: nextApiKeys })
       
       if (store) {
         store.set('proxyConfig', server.getConfig())
@@ -4845,15 +4908,16 @@ app.whenReady().then(async () => {
       
       // 更新字段（不允许更新 id、createdAt、usage）
       const { id: _, createdAt: __, usage: ___, ...allowedUpdates } = updates
-      apiKeys[index] = { ...apiKeys[index], ...allowedUpdates }
+      const updatedApiKey = { ...apiKeys[index], ...allowedUpdates }
+      const nextApiKeys = apiKeys.map((apiKey, currentIndex) => currentIndex === index ? updatedApiKey : apiKey)
       
-      server.updateConfig({ apiKeys })
+      server.updateConfig({ apiKeys: nextApiKeys })
       
       if (store) {
         store.set('proxyConfig', server.getConfig())
       }
       
-      return { success: true, apiKey: apiKeys[index] }
+      return { success: true, apiKey: updatedApiKey }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update API key' }
     }
@@ -4871,8 +4935,8 @@ app.whenReady().then(async () => {
         return { success: false, error: 'API key not found' }
       }
       
-      apiKeys.splice(index, 1)
-      server.updateConfig({ apiKeys })
+      const nextApiKeys = apiKeys.filter(apiKey => apiKey.id !== id)
+      server.updateConfig({ apiKeys: nextApiKeys })
       
       if (store) {
         store.set('proxyConfig', server.getConfig())
@@ -4896,15 +4960,19 @@ app.whenReady().then(async () => {
         return { success: false, error: 'API key not found' }
       }
       
-      apiKey.usage = {
+      const resetApiKey = {
+        ...apiKey,
+        usage: {
         totalRequests: 0,
         totalCredits: 0,
         totalInputTokens: 0,
         totalOutputTokens: 0,
         daily: {}
+        }
       }
+      const nextApiKeys = apiKeys.map(currentApiKey => currentApiKey.id === id ? resetApiKey : currentApiKey)
       
-      server.updateConfig({ apiKeys })
+      server.updateConfig({ apiKeys: nextApiKeys })
       
       if (store) {
         store.set('proxyConfig', server.getConfig())

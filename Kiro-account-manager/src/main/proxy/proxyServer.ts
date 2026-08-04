@@ -18,6 +18,7 @@ import type {
   TokenRefreshCallback
 } from './types'
 import { AccountPool, ErrorType, classifyError } from './accountPool'
+import { assertDistinctAdminApiKey } from './adminApiKey'
 import { callKiroApiStream, callKiroApi, fetchKiroModels, setModelContextWindow, type KiroModel } from './kiroApi'
 import { proxyLogger } from './logger'
 import {
@@ -255,6 +256,10 @@ class BodyTooLargeError extends Error {
   }
 }
 
+const ADMIN_RATE_LIMIT_BUCKET = 'admin:control'
+const API_KEY_RATE_LIMIT_PREFIX = 'api-key:'
+const IP_RATE_LIMIT_PREFIX = 'ip:'
+
 export class ProxyServer {
   private server: http.Server | https.Server | null = null
   private fallbackServer: http.Server | null = null  // HTTPS 启用时同时监听 HTTP（可选）
@@ -335,6 +340,7 @@ export class ProxyServer {
       clientDrivenToolExecution: true,
       ...config
     }
+    assertDistinctAdminApiKey(this.config)
     this.accountPool = new AccountPool()
     this.accountPool.setStrategy(this.config.accountSelectionStrategy || 'round-robin')
     this.stats = {
@@ -401,8 +407,16 @@ export class ProxyServer {
 
     return new Promise((resolve, reject) => {
       this.isStopping = false
-      const requestHandler = (req: http.IncomingMessage, res: http.ServerResponse) => 
-        this.handleRequest(req, res)
+      const requestHandler = (req: http.IncomingMessage, res: http.ServerResponse) => {
+        void this.handleRequest(req, res).catch(() => {
+          try {
+            if (!res.headersSent && !res.writableEnded) this.sendError(res, 500, 'Internal server error')
+            else if (!res.writableEnded) res.end()
+          } catch {
+            if (!res.destroyed) res.destroy()
+          }
+        })
+      }
 
       // 检查是否启用 TLS
       if (this.config.tls?.enabled) {
@@ -620,6 +634,8 @@ export class ProxyServer {
   // P2-18 检测到 port/host/tls 变更时，标记 needsRestart=true，UI 可读取并提示
   private _needsRestart = false
   updateConfig(config: Partial<ProxyConfig>): void {
+    const nextConfig = { ...this.config, ...config }
+    assertDistinctAdminApiKey(nextConfig)
     // 标记需要重启的字段
     const restartTriggerFields: Array<keyof ProxyConfig> = ['port', 'host', 'tls', 'fallbackPort']
     const willRestart = restartTriggerFields.some(k => k in config && JSON.stringify(this.config[k]) !== JSON.stringify(config[k]))
@@ -628,7 +644,7 @@ export class ProxyServer {
       proxyLogger.warn('ProxyServer', `Config change requires restart: ${restartTriggerFields.filter(k => k in config).join(', ')}`)
     }
     this.appendAuditLog('config_changed', { fields: Object.keys(config), needsRestart: willRestart })
-    this.config = { ...this.config, ...config }
+    this.config = nextConfig
     // 同步账号选择策略到 accountPool
     if (config.accountSelectionStrategy !== undefined) {
       this.accountPool.setStrategy(this.config.accountSelectionStrategy || 'round-robin')
@@ -654,7 +670,18 @@ export class ProxyServer {
 
   // 获取配置
   getConfig(): ProxyConfig {
-    return { ...this.config }
+    return {
+      ...this.config,
+      apiKeys: this.config.apiKeys?.map(apiKey => ({
+        ...apiKey,
+        usage: {
+          ...apiKey.usage,
+          daily: { ...apiKey.usage.daily },
+          byModel: apiKey.usage.byModel ? { ...apiKey.usage.byModel } : undefined
+        },
+        usageHistory: apiKey.usageHistory ? [...apiKey.usageHistory] : undefined
+      }))
+    }
   }
 
   private validateCacheControl(cacheControl?: ClaudeCacheControl): void {
@@ -915,6 +942,12 @@ export class ProxyServer {
   // 是否运行中
   isRunning(): boolean {
     return this.server !== null
+  }
+
+  /** 仅供隔离集成测试读取实际绑定的临时端口。 */
+  getListeningPort(): number {
+    const address = this.server?.address()
+    return typeof address === 'object' && address ? address.port : 0
   }
 
   private getAbortError(signal?: AbortSignal): Error {
@@ -1473,37 +1506,34 @@ export class ProxyServer {
 
   // 验证 API Key 并返回匹配的 Key（用于统计）
   // P0-3 使用 timingSafeEqual 防止时序攻击逐字猜 Key
+  private extractProvidedApiKey(req: http.IncomingMessage): string {
+    const authHeader = req.headers.authorization || ''
+    const apiKeyHeader = req.headers['x-api-key']
+    if (authHeader.startsWith('Bearer ')) return authHeader.slice(7)
+    return typeof apiKeyHeader === 'string' ? apiKeyHeader : ''
+  }
+
+  private validateAdminApiKey(req: http.IncomingMessage): boolean {
+    const configuredKey = this.config.adminApiKey
+    const providedKey = this.extractProvidedApiKey(req)
+    return !!configuredKey && !!providedKey && this.safeStringEq(configuredKey, providedKey)
+  }
+
   private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string } {
-    // 如果没有配置任何 API Key，则跳过验证
+    // 如果没有配置任何业务 API Key，则跳过业务路由验证。
+    // 管理员密钥绝不计入这里，避免管理员凭证获得业务代理权限。
     const hasApiKeys = this.config.apiKeys && this.config.apiKeys.length > 0
     const hasLegacyKey = !!this.config.apiKey
     if (!hasApiKeys && !hasLegacyKey) return { valid: true }
 
-    // 从 Authorization 头或 X-Api-Key 头获取 API Key
-    const authHeader = req.headers['authorization'] || ''
-    const apiKeyHeader = (req.headers['x-api-key'] as string) || ''
-
-    let providedKey = ''
-    // Bearer token 格式
-    if (authHeader.startsWith('Bearer ')) {
-      providedKey = authHeader.slice(7)
-    }
-    // 直接 API Key 格式
-    if (!providedKey && apiKeyHeader) {
-      providedKey = apiKeyHeader
-    }
-
+    const providedKey = this.extractProvidedApiKey(req)
     if (!providedKey) return { valid: false }
 
-    // 检查多 API Key（常数时间比较）
     if (hasApiKeys) {
       let matched: import('./types').ApiKey | undefined
       for (const k of this.config.apiKeys!) {
         if (!k.enabled || !k.key) continue
-        if (this.safeStringEq(k.key, providedKey)) {
-          matched = k
-          // 不 break：继续遍历保持时间一致（小数量数组 OK）
-        }
+        if (this.safeStringEq(k.key, providedKey)) matched = k
       }
       if (matched) {
         if (matched.creditsLimit && matched.usage.totalCredits >= matched.creditsLimit) {
@@ -1513,11 +1543,7 @@ export class ProxyServer {
       }
     }
 
-    // 兼容旧的单 API Key（常数时间比较）
-    if (hasLegacyKey && this.safeStringEq(this.config.apiKey!, providedKey)) {
-      return { valid: true }
-    }
-
+    if (hasLegacyKey && this.safeStringEq(this.config.apiKey!, providedKey)) return { valid: true }
     return { valid: false }
   }
 
@@ -1745,35 +1771,29 @@ export class ProxyServer {
 
   // 处理请求
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const path = req.url || '/'
+    const rawUrl = req.url || '/'
+    let path = '/'
     const method = req.method || 'GET'
     const clientIP = this.getClientIP(req)
     const controller = new AbortController()
     const abortRequest = () => {
       if (!this.isStopping && res.writableEnded) return
-      if (!controller.signal.aborted) {
-        controller.abort(new Error(this.isStopping ? 'Proxy server stopped' : 'Client disconnected'))
-      }
+      if (!controller.signal.aborted) controller.abort(new Error(this.isStopping ? 'Proxy server stopped' : 'Client disconnected'))
     }
     this.activeRequests.add(controller)
     req.on('aborted', abortRequest)
     res.on('close', abortRequest)
 
-    // CORS 预检
-    if (method === 'OPTIONS') {
-      this.setCorsHeaders(res)
-      res.writeHead(204)
-      res.end()
-      req.off('aborted', abortRequest)
-      res.off('close', abortRequest)
-      this.activeRequests.delete(controller)
-      return
-    }
-
     try {
       this.setCorsHeaders(res)
+      try {
+        path = new URL(rawUrl, 'http://proxy.local').pathname
+      } catch {
+        this.sendError(res, 400, 'Bad Request')
+        return
+      }
 
-      // P0-4 IP 访问控制（健康检查也走，防止扫描器）
+      // 所有请求均先通过 IP 闸门，避免 OPTIONS/管理路径绕过。
       const ipCheck = this.isClientIPAllowed(clientIP)
       if (!ipCheck.allowed) {
         proxyLogger.warn('ProxyServer', `Blocked request from ${clientIP}: ${ipCheck.reason}`)
@@ -1782,89 +1802,93 @@ export class ProxyServer {
         return
       }
 
-      // API Key 验证（健康检查端点除外）
+      if (method === 'OPTIONS') {
+        res.writeHead(204)
+        res.end()
+        return
+      }
+
+      const isAdminPath = path.startsWith('/admin/')
       if (path !== '/health' && path !== '/') {
-        const authResult = this.validateApiKey(req)
-        if (!authResult.valid) {
-          const errorMsg = authResult.reason || 'Invalid or missing API key'
-          const statusCode = authResult.reason === 'Credits limit exceeded' ? 429 : 401
-          // 401 不返回 reason 详情（防止指纹爬取）
-          this.sendError(res, statusCode, statusCode === 401 ? 'Unauthorized' : errorMsg,
-            this.isAnthropicPath(path) ? 'anthropic' : 'openai')
-          return
-        }
-        // 将匹配的 API Key 存储到请求对象中，用于后续统计
-        ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey = authResult.apiKey
+        if (isAdminPath) {
+          // Admin API 一律 fail-closed：未配置和错误凭证响应完全一致。
+          if (!this.validateAdminApiKey(req)) {
+            this.sendError(res, 401, 'Unauthorized')
+            return
+          }
+          const adminRateLimit = this.checkRateLimit(ADMIN_RATE_LIMIT_BUCKET)
+          if (!adminRateLimit.allowed) {
+            res.setHeader('Retry-After', String(Math.ceil(adminRateLimit.retryAfterMs / 1000)))
+            res.setHeader('X-RateLimit-Limit', String(this.config.rateLimitPerKeyPerMinute || 0))
+            res.setHeader('X-RateLimit-Remaining', '0')
+            this.sendError(res, 429, 'Rate limit exceeded')
+            return
+          }
+        } else {
+          const authResult = this.validateApiKey(req)
+          if (!authResult.valid) {
+            const errorMsg = authResult.reason || 'Invalid or missing API key'
+            const statusCode = authResult.reason === 'Credits limit exceeded' ? 429 : 401
+            this.sendError(res, statusCode, statusCode === 401 ? 'Unauthorized' : errorMsg,
+              this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+            return
+          }
+          ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey = authResult.apiKey
 
-        // P1-7 按 API Key（或匿名时按 IP）请求限流
-        const rateLimitId = authResult.apiKey?.id || `ip:${clientIP || 'unknown'}`
-        const rl = this.checkRateLimit(rateLimitId)
-        if (!rl.allowed) {
-          res.setHeader('Retry-After', String(Math.ceil(rl.retryAfterMs / 1000)))
-          res.setHeader('X-RateLimit-Limit', String(this.config.rateLimitPerKeyPerMinute || 0))
-          res.setHeader('X-RateLimit-Remaining', '0')
-          this.sendError(res, 429, 'Rate limit exceeded',
-            this.isAnthropicPath(path) ? 'anthropic' : 'openai')
-          return
+          const rateLimitId = authResult.apiKey
+            ? `${API_KEY_RATE_LIMIT_PREFIX}${authResult.apiKey.id}`
+            : `${IP_RATE_LIMIT_PREFIX}${clientIP || 'unknown'}`
+          const rl = this.checkRateLimit(rateLimitId)
+          if (!rl.allowed) {
+            res.setHeader('Retry-After', String(Math.ceil(rl.retryAfterMs / 1000)))
+            res.setHeader('X-RateLimit-Limit', String(this.config.rateLimitPerKeyPerMinute || 0))
+            res.setHeader('X-RateLimit-Remaining', '0')
+            this.sendError(res, 429, 'Rate limit exceeded', this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+            return
+          }
         }
       }
 
-      // 记录请求
-      if (this.config.logRequests) {
-        proxyLogger.info('ProxyServer', `${method} ${path}`)
-      }
+      if (this.config.logRequests) proxyLogger.info('ProxyServer', `${method} ${path}`)
 
-      // 路由（移除查询参数）
-      const pathWithoutQuery = path.split('?')[0]
-      
-      if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
+      if (path === '/v1/models' || path === '/models') {
         await this.handleModels(res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/chat/completions' || pathWithoutQuery === '/chat/completions') {
+      } else if (path === '/v1/chat/completions' || path === '/chat/completions') {
         await this.handleOpenAIChat(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/responses' || pathWithoutQuery === '/responses') {
+      } else if (path === '/v1/responses' || path === '/responses') {
         await this.handleOpenAIResponses(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/messages' || pathWithoutQuery === '/messages' || pathWithoutQuery === '/anthropic/v1/messages') {
+      } else if (path === '/v1/messages' || path === '/messages' || path === '/anthropic/v1/messages') {
         await this.handleClaudeMessages(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/messages/count_tokens' || pathWithoutQuery === '/messages/count_tokens') {
-        // Claude Code token 计数端点 - 返回模拟响应
+      } else if (path === '/v1/messages/count_tokens' || path === '/messages/count_tokens') {
         await this.handleCountTokens(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/api/event_logging/batch') {
-        // Claude Code 遥测端点 - 直接返回 200 OK
+      } else if (path === '/api/event_logging/batch') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ status: 'ok' }))
-      } else if (pathWithoutQuery.startsWith('/v1beta/models/')) {
-        // Gemini v1beta 兼容路由
-        await this.handleGeminiRequest(req, res, pathWithoutQuery, controller.signal)
-      } else if (pathWithoutQuery === '/v1beta/models') {
-        // Gemini 模型列表
+      } else if (path.startsWith('/v1beta/models/')) {
+        await this.handleGeminiRequest(req, res, path, controller.signal)
+      } else if (path === '/v1beta/models') {
         await this.handleGeminiModels(res, controller.signal)
-      } else if (pathWithoutQuery === '/health' || pathWithoutQuery === '/') {
+      } else if (path === '/health' || path === '/') {
         this.handleHealth(res)
-      } else if (pathWithoutQuery === '/metrics' && this.config.enableMetrics) {
-        // P2-16 Prometheus metrics
+      } else if (path === '/metrics' && this.config.enableMetrics) {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' })
         res.end(this.renderPrometheusMetrics())
-      } else if (pathWithoutQuery.startsWith('/admin/')) {
-        // 管理 API 端点
-        await this.handleAdminApi(req, res, pathWithoutQuery, controller.signal)
+      } else if (isAdminPath) {
+        await this.handleAdminApi(req, res, path, controller.signal)
       } else {
-        // 记录未知路径以便调试
         console.log(`[ProxyServer] Unknown path: ${path} (method: ${method})`)
-        this.sendError(res, 404, `Not Found: ${pathWithoutQuery}`)
+        this.sendError(res, 404, `Not Found: ${path}`)
       }
     } catch (error) {
       if (this.isAbortError(error, controller.signal)) {
         proxyLogger.info('ProxyServer', `Request aborted: ${method} ${path}`)
         return
       }
-      // P0-1 body 超限 → 413
       if (error instanceof BodyTooLargeError) {
         proxyLogger.warn('ProxyServer', `Body too large from ${clientIP}: ${error.received}/${error.limit} bytes (${path})`)
-        this.sendError(res, 413, `Request body too large (max ${error.limit} bytes)`,
-          this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+        this.sendError(res, 413, `Request body too large (max ${error.limit} bytes)`, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
         return
       }
-      // P0-5 错误响应 sanitize：500 类不吐内部 message
       console.error('[ProxyServer] Request error:', error)
       this.sendError(res, 500, 'Internal server error', this.isAnthropicPath(path) ? 'anthropic' : 'openai')
       this.events.onError?.(error as Error)
@@ -1879,24 +1903,14 @@ export class ProxyServer {
   private async handleAdminApi(req: http.IncomingMessage, res: http.ServerResponse, path: string, signal?: AbortSignal): Promise<void> {
     const method = req.method || 'GET'
 
-    // 管理 API 需要 API Key 验证
-    const authResult = this.validateApiKey(req)
-    if (!authResult.valid) {
-      this.sendError(res, 401, 'Admin API requires authentication')
-      return
-    }
-
+    // 鉴权和独立限流已在 handleRequest 完成，避免普通 API Key 访问管理面。
     if (path === '/admin/stats' && method === 'GET') {
-      // 获取详细统计
       this.handleAdminStats(res)
     } else if (path === '/admin/accounts' && method === 'GET') {
-      // 获取账号列表
       this.handleAdminAccounts(res)
     } else if (path === '/admin/config' && method === 'GET') {
-      // 获取配置
       this.handleAdminConfig(res)
     } else if (path === '/admin/config' && method === 'POST') {
-      // 更新配置（P1-9 schema 白名单校验，防止任意字段注入）
       const body = await this.readBody(req, signal)
       let parsed: Record<string, unknown>
       try { parsed = JSON.parse(body) } catch {
@@ -1909,14 +1923,11 @@ export class ProxyServer {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ success: true, applied: Object.keys(safeUpdate), config: this.handleAdminConfigPayload() }))
     } else if (path === '/admin/audit' && method === 'GET') {
-      // P2-17 审计日志
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ entries: this.auditLog.slice(-100) }))
     } else if (path === '/admin/logs' && method === 'GET') {
-      // 获取最近日志
       this.handleAdminLogs(res)
     } else if (path === '/admin/cache/clear' && method === 'POST') {
-      // 清除内存缓存（conversationId 映射、模型缓存、prompt cache）
       const { clearAllCaches } = require('./kiroApi')
       const cleared = clearAllCaches()
       const promptCacheCleared = promptCacheTracker.clear()
@@ -1980,10 +1991,12 @@ export class ProxyServer {
       if (k.length <= 8) return '***'
       return `${k.slice(0, 4)}***${k.slice(-4)}`
     }
+    const { adminApiKey: _adminApiKey, ...safeConfig } = config
     return {
-      ...config,
+      ...safeConfig,
       apiKey: maskKey(config.apiKey),
       apiKeys: config.apiKeys?.map(k => ({ ...k, key: maskKey(k.key) || '***' })),
+      adminApiKeyConfigured: !!config.adminApiKey,
       tls: config.tls ? { enabled: config.tls.enabled, hasCert: !!(config.tls.cert || config.tls.certPath), hasKey: !!(config.tls.key || config.tls.keyPath) } : undefined
     }
   }

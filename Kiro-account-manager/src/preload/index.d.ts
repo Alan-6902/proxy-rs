@@ -372,6 +372,10 @@ interface KiroApi {
 
   // 更新反代服务器配置
   proxyUpdateConfig: (config: Record<string, unknown>) => Promise<{ success: boolean; config?: unknown; error?: string }>
+  proxyAdminKeyStatus: () => Promise<{ configured: boolean; success?: boolean; error?: string }>
+  proxyAdminKeyRotate: () => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
+  proxyAdminKeySet: (adminApiKey: string) => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
+  proxyAdminKeyClear: () => Promise<{ success: boolean; error?: string }>
 
   // ============ v1.8 反代安全 / 可观测 IPC ============
   proxySelfSignedCertInfo: () => Promise<{ success: boolean; cert?: string; key?: string; fingerprint?: string; notBefore?: number; notAfter?: number; subject?: string; altNames?: string[]; error?: string }>

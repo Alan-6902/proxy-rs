@@ -11,6 +11,7 @@ import { Select } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { ApiKeyUsageDialog } from './ApiKeyUsageDialog'
+import { AdminApiKeyCard } from './AdminApiKeyCard'
 
 type ApiKeyFormat = 'sk' | 'simple' | 'token'
 
@@ -302,6 +303,8 @@ export function ApiKeyManager() {
           )}
         </CardContent>
       </Card>
+
+      <AdminApiKeyCard isEn={isEn} />
 
       {selectedKeyData && (
         <Card>

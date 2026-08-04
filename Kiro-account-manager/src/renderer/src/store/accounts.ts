@@ -22,7 +22,6 @@ import type {
   ProxyProtocol
 } from '../types/proxy'
 import { DEFAULT_PROXY_POOL_CONFIG } from '../types/proxy'
-import { useWebhookStore, type WebhookEvent, type WebhookMessage } from './webhooks'
 
 // ============================================
 // 账号管理 Store
@@ -36,6 +35,13 @@ let tokenRefreshTimer: ReturnType<typeof setInterval> | null = null
 const TOKEN_REFRESH_MIN_LEAD_MS = 10 * 60 * 1000
 function tokenRefreshLeadMs(intervalMin: number): number {
   return Math.max(intervalMin * 2 * 60 * 1000, TOKEN_REFRESH_MIN_LEAD_MS)
+}
+
+
+type AppLanguage = 'auto' | 'en' | 'zh'
+
+function resolveTrayLanguage(language: AppLanguage): 'en' | 'zh' {
+  return language === 'auto' ? (navigator.language.startsWith('zh') ? 'zh' : 'en') : language
 }
 
 // 持久化防抖：合并连续 mutation 为单次写盘，避免后台刷新风暴时 IPC + IO 风暴
@@ -1030,8 +1036,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 状态管理 ====================
 
   updateAccountStatus: (id, status, error) => {
-    const wasBanned = isBannedAccountError(get().accounts.get(id)?.lastError)
-    const isBanned = isBannedAccountError(error)
     set((state) => {
       const accounts = new Map(state.accounts)
       const account = accounts.get(id)
@@ -1046,16 +1050,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { accounts }
     })
     get().saveToStorage()
-    // 触发 webhook：账号刚被封禁时通知（已封禁的不重复）
-    if (isBanned && !wasBanned) {
-      const acc = get().accounts.get(id)
-      triggerWebhook('account-banned', {
-        title: '账号被封禁',
-        message: `账号 ${acc?.email || id} 状态变为封禁`,
-        level: 'error',
-        fields: { 邮箱: acc?.email || '-', 错误: error || '-' }
-      })
-    }
   },
 
   refreshAccountToken: async (id) => {
@@ -1099,13 +1093,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         return true
       } else {
         updateAccountStatus(id, 'error', result.error?.message)
-        // 触发 webhook：Token 刷新失败
-        triggerWebhook('token-expired', {
-          title: 'Token 刷新失败',
-          message: `账号 ${account.email} Token 刷新失败`,
-          level: 'warn',
-          fields: { 邮箱: account.email, 错误: result.error?.message || '-' }
-        })
         return false
       }
     } catch (error) {
@@ -1404,6 +1391,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       if (data) {
         const accounts = new Map(Object.entries(data.accounts ?? {}) as [string, Account][])
         const activeAccountId = data.activeAccountId ?? null
+        const language: AppLanguage = data.language === 'en' || data.language === 'zh' ? data.language : 'auto'
 
         // 根据 activeAccountId 重新同步所有账号的 isActive 状态，确保只有一个账号为激活状态
         for (const [id, account] of accounts) {
@@ -1432,7 +1420,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchInterval: data.autoSwitchInterval ?? 5,
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
-          language: data.language ?? 'auto',
+          language,
           proxyPool: data.proxyPool
             ? new Map(Object.entries(data.proxyPool as Record<string, ProxyEntry>))
             : new Map<string, ProxyEntry>(),
@@ -1440,6 +1428,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           proxyPoolCursor: typeof data.proxyPoolCursor === 'number' ? data.proxyPoolCursor : 0,
           accountProxyBindings: (data.accountProxyBindings as Record<string, string> | undefined) || {}
         })
+
+        window.api.updateTrayLanguage(resolveTrayLanguage(language))
 
         // 应用主题
         get().applyTheme()
@@ -1677,11 +1667,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   setLanguage: (language) => {
     set({ language })
     get().saveToStorage()
-    // 更新托盘菜单语言
-    const actualLang = language === 'auto' 
-      ? (navigator.language.startsWith('zh') ? 'zh' : 'en')
-      : language
-    window.api.updateTrayLanguage(actualLang)
+    window.api.updateTrayLanguage(resolveTrayLanguage(language))
   },
 
   applyTheme: () => {
@@ -2799,14 +2785,6 @@ function syncAllAccountsBoundToProxy(proxyId: string): void {
   }
 }
 
-/** 触发 Webhook 事件（封装错误处理，不阻塞主业务流程） */
-function triggerWebhook(event: WebhookEvent, payload: WebhookMessage): void {
-  try {
-    void useWebhookStore.getState().triggerEvent(event, payload)
-  } catch (err) {
-    console.warn(`[Webhook] trigger ${event} failed:`, err)
-  }
-}
 
 // ==================== 代理 URL 解析辅助 ====================
 

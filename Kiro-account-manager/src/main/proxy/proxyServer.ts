@@ -46,6 +46,8 @@ export interface ProxyServerEvents {
   // 账号被 Kiro 后端长期封禁（如 TEMPORARILY_SUSPENDED / AccountSuspendedException）
   // 不同于临时 token 失效，需人工解封
   onAccountSuspended?: (info: { accountId: string; email?: string; reason: string; message: string }) => void
+  onAllAccountsExhausted?: () => void
+  onTokenRefreshFailed?: (accountId: string) => void
   onCreditsUpdate?: (totalCredits: number) => void
   onTokensUpdate?: (inputTokens: number, outputTokens: number) => void
   onRequestStatsUpdate?: (totalRequests: number, successRequests: number, failedRequests: number) => void
@@ -272,8 +274,6 @@ export class ProxyServer {
   private sessionAffinity: Map<string, { accountId: string; lastAt: number }> = new Map()
   /** P2-17 审计日志（最近 200 条） */
   private auditLog: Array<{ ts: number; type: string; data: Record<string, unknown> }> = []
-  /** Webhook 触发回调（由外部注入，避免 main → renderer 循环依赖） */
-  private webhookTrigger?: (event: string, payload: Record<string, unknown>) => void
   /** 定期清理 timer */
   private cleanupTimer: NodeJS.Timeout | null = null
 
@@ -1182,12 +1182,14 @@ export class ProxyServer {
       } else {
         console.error(`[ProxyServer] Token refresh failed for ${account.email || account.id}: ${result.error}`)
         this.accountPool.markNeedsRefresh(account.id)
+        this.events.onTokenRefreshFailed?.(account.id)
         return false
       }
     } catch (error) {
       if (this.isAbortError(error, signal)) throw error
       console.error(`[ProxyServer] Token refresh error for ${account.email || account.id}:`, error)
       this.accountPool.markNeedsRefresh(account.id)
+      this.events.onTokenRefreshFailed?.(account.id)
       return false
     }
   }
@@ -1364,22 +1366,10 @@ export class ProxyServer {
               reason: suspendInfo.reason,
               message: suspendInfo.message
             })
-            // P1-6 关键事件 → 触发 webhook
             this.appendAuditLog('account_suspended', {
               accountId: currentAccount.id,
               email: currentAccount.email,
               reason: suspendInfo.reason
-            })
-            this.triggerWebhook('proxy-account-suspended', {
-              title: '反代账号被风控',
-              message: `账号 ${currentAccount.email || currentAccount.id.slice(0, 8)} 被 Kiro 后端标记为 ${suspendInfo.reason}，需要人工解封`,
-              level: 'error',
-              fields: {
-                邮箱: currentAccount.email || '-',
-                账号ID: currentAccount.id.slice(0, 8),
-                封禁原因: suspendInfo.reason,
-                详情: this.sanitizeErrorMessage(suspendInfo.message || '').slice(0, 200)
-              }
             })
           }
           console.warn(`[ProxyServer] Account ${currentAccount.email || currentAccount.id} suspended (${suspendInfo.reason}), switching to next available account`)
@@ -3340,7 +3330,7 @@ export class ProxyServer {
     const safeMessage = status >= 500 && status < 600
       ? this.sanitizeErrorMessage(message) || 'Internal server error'
       : message
-    // P1-6 503 → 触发 webhook（已有 5 分钟去重）
+    // 503 时记录账号池耗尽事件并通知主进程。
     if (status === 503) {
       this.notifyAllAccountsExhausted('unknown')
     }
@@ -3454,35 +3444,12 @@ export class ProxyServer {
     return this.auditLog
   }
 
-  /** 注入 webhook 触发器（由 main/index.ts 注入，调用 renderer 的 webhook store） */
-  setWebhookTrigger(fn: (event: string, payload: Record<string, unknown>) => void): void {
-    this.webhookTrigger = fn
-  }
-
-  /** 关键事件去重时间戳（5 分钟内同事件不重复推） */
-  private lastWebhookByEvent: Map<string, number> = new Map()
-
-  /** P1-6 触发 webhook（封装错误处理 + 5 分钟去重） */
-  private triggerWebhook(event: string, payload: Record<string, unknown>): void {
-    const now = Date.now()
-    const last = this.lastWebhookByEvent.get(event) || 0
-    if (now - last < 5 * 60_000) return  // 同事件 5 分钟内不重复推
-    this.lastWebhookByEvent.set(event, now)
-    try { this.webhookTrigger?.(event, payload) } catch (err) {
-      proxyLogger.warn('ProxyServer', `Webhook trigger failed: ${(err as Error).message}`)
-    }
-  }
-
-  /** 全员配额耗尽 webhook（503 时调用） */
+  /** 全员配额耗尽时保留审计记录并通知主进程。 */
   private notifyAllAccountsExhausted(path: string, model?: string): void {
     const quota = this.accountPool.getQuotaStatus()
+    if (quota.available !== 0) return
     this.appendAuditLog('all_accounts_exhausted', { path, model, ...quota })
-    this.triggerWebhook('proxy-all-exhausted', {
-      title: '反代账号全部不可用',
-      message: `所有账号配额耗尽或冷却中（exhausted=${quota.exhausted}/${quota.total}，cooldown=${quota.cooldown}）`,
-      level: 'error',
-      fields: { 端点: path, 模型: model || '-', 总账号: quota.total, 配额耗尽: quota.exhausted, 冷却中: quota.cooldown, 可用: quota.available }
-    })
+    this.events.onAllAccountsExhausted?.()
   }
 
   /** P2-16 Prometheus metrics 文本 */

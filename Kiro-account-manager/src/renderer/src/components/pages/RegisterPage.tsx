@@ -4,7 +4,6 @@ import { useTranslation } from '@/hooks/useTranslation'
 import { useAccountsStore } from '@/store/accounts'
 import { useTaskStore } from '@/store/tasks'
 import { createRateLimiter, type RateLimiter, type RateLimiterSnapshot } from '@/store/rateLimiter'
-import { useWebhookStore } from '@/store/webhooks'
 import { Card, CardContent, CardHeader, CardTitle, Button, Input, Label, Progress, Badge, Switch } from '../ui'
 import { cn } from '@/lib/utils'
 import { appendSubscriptionLink, updateSubscriptionLink } from './SubscriptionPage'
@@ -1302,7 +1301,7 @@ export function RegisterPage(): React.JSX.Element {
   const rateLimiterRef = useRef<RateLimiter | null>(null)
   // 限速器快照（每秒刷新一次到 React state）
   const [rateSnapshot, setRateSnapshot] = useState<RateLimiterSnapshot | null>(null)
-  // 跟踪上次风控状态，避免持续触发 webhook
+  // 跟踪上次风控状态，避免持续触发暂停通知。
   const lastRiskWarningRef = useRef(false)
   useEffect(() => {
     if (!batchRunning) {
@@ -1314,7 +1313,7 @@ export function RegisterPage(): React.JSX.Element {
       if (rateLimiterRef.current) {
         const snap = rateLimiterRef.current.snapshot()
         setRateSnapshot(snap)
-        // 风控信号上升沿：从未警告 → 警告，触发 webhook + 可能自动暂停
+        // 风控信号上升沿：仅在实际自动暂停时通知。
         if (snap.riskWarning && !lastRiskWarningRef.current) {
           lastRiskWarningRef.current = true
           // 自动暂停
@@ -1325,18 +1324,8 @@ export function RegisterPage(): React.JSX.Element {
               useTaskStore.getState().updateTask(currentTaskCenterId.current, { status: 'paused' })
             }
             addLog(`[RiskControl] 风控触发，自动暂停（成功率 ${Math.round(snap.successRate * 100)}%）`)
+            void window.api.notifyLocal('registration-risk-paused')
           }
-          void useWebhookStore.getState().triggerEvent('risk-warning', {
-            title: '风控信号触发',
-            message: `批量注册成功率降至 ${Math.round(snap.successRate * 100)}%${autoPauseOnRisk ? '，已自动暂停' : '，建议暂停检查'}`,
-            level: 'warn',
-            fields: {
-              成功率: `${Math.round(snap.successRate * 100)}%`,
-              连续失败: snap.consecutiveFailures,
-              吞吐: `${snap.throughputPerMinute}/min`,
-              动作: autoPauseOnRisk ? '已自动暂停' : '请手动检查'
-            }
-          })
         } else if (!snap.riskWarning && lastRiskWarningRef.current) {
           // 风控恢复
           lastRiskWarningRef.current = false
@@ -1535,13 +1524,6 @@ export function RegisterPage(): React.JSX.Element {
     if (res.status === 'success') {
       addLog(`${t('register.logRegSuccess')} ${res.email}`)
       addHistory({ email: res.email, status: 'success', password: res.password, result: res })
-      // 触发 Webhook
-      void useWebhookStore.getState().triggerEvent('register-success', {
-        title: '账号注册成功',
-        message: `新账号 ${res.email} 注册完成`,
-        level: 'success',
-        fields: { 邮箱: res.email, 模式: mode }
-      })
       // 与手动模式 submitOTP 状态机保持一致：后处理期间推进 phase，
       // 避免后处理仍在跑时 phase 提前变 'done' 导致"新注册"按钮提前出现 + reset 竞态
       const needImport = batchAutoImport
@@ -1578,13 +1560,6 @@ export function RegisterPage(): React.JSX.Element {
         saveEmailBlacklist(set)
         addLog(`[Precheck] 邮箱 ${res.email} 已加入占用黑名单`)
       }
-      // 触发 Webhook
-      void useWebhookStore.getState().triggerEvent('register-failed', {
-        title: '账号注册失败',
-        message: `${res.email || '(未知邮箱)'} 注册失败`,
-        level: 'error',
-        fields: { 邮箱: res.email || '-', 错误: res.error || '-', 模式: mode }
-      })
     }
   }, [addLog, addHistory, t, batchAutoImport, autoImportResult, autoFetchProLink, fetchProSubscriptionUrl, mode])
 
@@ -1857,12 +1832,7 @@ export function RegisterPage(): React.JSX.Element {
           useTaskStore.getState().updateTask(currentTaskCenterId.current, { status: 'paused' })
         }
         addLog(`[RiskControl] 检测到 AWS 风控（${errEmail || '账号'}），自动暂停批量注册`)
-        void useWebhookStore.getState().triggerEvent('risk-warning', {
-          title: 'AWS 风控触发，已自动暂停',
-          message: `账号 ${errEmail || '(创建中)'} 触发 AWS 风控限流。建议启用代理池 + 验活，或换 IP 后再恢复。`,
-          level: 'error',
-          fields: { 邮箱: errEmail || '-', 错误: errMsg }
-        })
+        void window.api.notifyLocal('registration-risk-paused')
       }
     }
     setBatchDone((p) => p + 1)
@@ -2064,19 +2034,7 @@ export function RegisterPage(): React.JSX.Element {
     })
     currentTaskCenterId.current = null
 
-    // 触发 Webhook 通知
-    void useWebhookStore.getState().triggerEvent('batch-completed', {
-      title: `批量注册${retryItems ? '重试' : ''}完成`,
-      message: `共 ${totalCount} 个任务，成功 ${_batchSuccess}，失败 ${_batchFail}`,
-      level: _batchFail === 0 ? 'success' : (_batchSuccess === 0 ? 'error' : 'warn'),
-      fields: {
-        模式: mode === 'outlook' ? 'Outlook' : mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : mode === 'gptmail' ? 'GPTmail' : mode === 'mixed' ? 'Mixed' : 'Manual',
-        并发: concurrency,
-        成功: _batchSuccess,
-        失败: _batchFail,
-        总数: totalCount
-      }
-    })
+    void window.api.notifyLocal('registration-batch-completed', { batchId: taskCenterId })
   }
 
   /** 暂停 / 恢复批量注册 */

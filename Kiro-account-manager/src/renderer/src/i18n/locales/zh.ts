@@ -46,7 +46,6 @@ const zh = {
     accounts: '账户管理',
     proxy: 'API 反代',
     proxyPool: '代理池',
-    webhooks: 'Webhook',
     diagnose: '一键诊断',
     configSync: '配置同步',
     register: '注册',

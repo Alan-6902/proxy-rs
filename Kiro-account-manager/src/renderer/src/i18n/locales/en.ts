@@ -46,7 +46,6 @@ const en = {
     accounts: 'Accounts',
     proxy: 'API Proxy',
     proxyPool: 'Proxy Pool',
-    webhooks: 'Webhooks',
     diagnose: 'Diagnostics',
     configSync: 'Config Sync',
     register: 'Register',

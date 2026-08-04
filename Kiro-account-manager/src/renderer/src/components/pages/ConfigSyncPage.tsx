@@ -4,14 +4,13 @@ import {
   Trash2, RefreshCw, AlertTriangle
 } from 'lucide-react'
 import { useAccountsStore } from '@/store/accounts'
-import { useWebhookStore } from '@/store/webhooks'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Card, CardContent, CardHeader, CardTitle, Button, Label, Switch } from '../ui'
 
 /**
  * 配置同步页面
  *
- * 把"非敏感的应用配置"（代理池、Webhook、注册模板、限速/定时/配额、过滤偏好等）
+ * 把"非敏感的应用配置"（代理池、注册模板、限速/定时/配额、过滤偏好等）
  * 导出为单一 JSON 文件，方便在多台电脑之间同步。
  *
  * 敏感数据（账号凭据、refreshToken 等）不会被导出，
@@ -19,13 +18,13 @@ import { Card, CardContent, CardHeader, CardTitle, Button, Label, Switch } from 
  */
 
 interface PortableConfig {
-  version: 1
+  version: 1 | 2
   exportedAt: string
   app: string  // "kiro-account-manager"
   /** 代理池条目（脱敏：密码字段会被打码） */
   proxyPool?: Array<Record<string, unknown>>
   proxyPoolConfig?: Record<string, unknown>
-  /** Webhook 列表 */
+  /** v1 遗留字段：读取时忽略，避免恢复外部通知端点。 */
   webhooks?: Array<Record<string, unknown>>
   /** RegisterPage 配置（kiro-register-config） */
   registerConfig?: Record<string, unknown>
@@ -68,7 +67,6 @@ export function ConfigSyncPage(): React.ReactNode {
   // 导出选项（默认全开）
   const [opts, setOpts] = useState({
     proxyPool: true,
-    webhooks: true,
     registerConfig: true,
     registerTemplates: true,
     registerSettings: true,
@@ -84,12 +82,13 @@ export function ConfigSyncPage(): React.ReactNode {
   const [lastImportResult, setLastImportResult] = useState<{
     success: boolean
     counts?: Record<string, number>
+    ignoredLegacyWebhooks?: number
     error?: string
   } | null>(null)
 
   const handleExport = useCallback(async (): Promise<void> => {
     const payload: PortableConfig = {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       app: 'kiro-account-manager'
     }
@@ -105,11 +104,6 @@ export function ConfigSyncPage(): React.ReactNode {
         return out
       })
       payload.proxyPoolConfig = { ...store.proxyPoolConfig }
-    }
-
-    if (opts.webhooks) {
-      const webhooks = Array.from(useWebhookStore.getState().webhooks.values())
-      payload.webhooks = webhooks.map((w) => ({ ...w }))
     }
 
     if (opts.registerConfig) {
@@ -202,6 +196,7 @@ export function ConfigSyncPage(): React.ReactNode {
       }
 
       const counts: Record<string, number> = {}
+      let ignoredLegacyWebhooks = 0
 
       // 代理池
       if (data.proxyPool && data.proxyPool.length > 0) {
@@ -233,18 +228,9 @@ export function ConfigSyncPage(): React.ReactNode {
         store.setProxyPoolConfig(data.proxyPoolConfig as Partial<typeof store.proxyPoolConfig>)
       }
 
-      // Webhooks
+      // v1 Webhook 配置已退役；不读取、不恢复任何端点或凭据。
       if (data.webhooks && data.webhooks.length > 0) {
-        const ws = useWebhookStore.getState()
-        let added = 0
-        for (const w of data.webhooks) {
-          const input = w as Parameters<typeof ws.addWebhook>[0]
-          if (input.kind && input.url) {
-            ws.addWebhook(input)
-            added++
-          }
-        }
-        counts['Webhook'] = added
+        ignoredLegacyWebhooks = data.webhooks.length
       }
 
       // 注册配置
@@ -289,7 +275,7 @@ export function ConfigSyncPage(): React.ReactNode {
         counts['App 设置'] = 1
       }
 
-      setLastImportResult({ success: true, counts })
+      setLastImportResult({ success: true, counts, ignoredLegacyWebhooks })
     } catch (err) {
       setLastImportResult({ success: false, error: err instanceof Error ? err.message : String(err) })
     }
@@ -311,8 +297,8 @@ export function ConfigSyncPage(): React.ReactNode {
             </h1>
             <p className="text-muted-foreground">
               {isEn
-                ? 'Export & import non-sensitive app config (proxy pool, webhooks, register templates, app preferences) for multi-device sync.'
-                : '导出/导入非敏感配置（代理池、Webhook、注册模板、应用偏好），用于多设备同步'
+                ? 'Export & import non-sensitive app config (proxy pool, register templates, app preferences) for multi-device sync.'
+                : '导出/导入非敏感配置（代理池、注册模板、应用偏好），用于多设备同步'
               }
             </p>
           </div>
@@ -357,11 +343,6 @@ export function ConfigSyncPage(): React.ReactNode {
               label={`${isEn ? 'Proxy Pool' : '代理池'} (${store.proxyPool.size})`}
               checked={opts.proxyPool}
               onChange={(v) => setOpts((p) => ({ ...p, proxyPool: v }))}
-            />
-            <ExportToggle
-              label={`${isEn ? 'Webhooks' : 'Webhook'} (${useWebhookStore.getState().webhooks.size})`}
-              checked={opts.webhooks}
-              onChange={(v) => setOpts((p) => ({ ...p, webhooks: v }))}
             />
             <ExportToggle
               label={isEn ? 'Register Config' : '注册配置'}
@@ -474,8 +455,17 @@ export function ConfigSyncPage(): React.ReactNode {
                 <>
                   <div className="flex items-center gap-2 text-sm font-medium text-green-700 dark:text-green-300">
                     <CheckCircle2 className="h-4 w-4" />
-                    {isEn ? 'Import Successful' : '导入成功'}
+                    {lastImportResult.ignoredLegacyWebhooks
+                      ? (isEn ? 'Import Completed with Legacy Webhooks Ignored' : '导入完成（已忽略旧版 Webhook）')
+                      : (isEn ? 'Import Successful' : '导入成功')}
                   </div>
+                  {lastImportResult.ignoredLegacyWebhooks && (
+                    <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                      {isEn
+                        ? `${lastImportResult.ignoredLegacyWebhooks} legacy webhook configuration(s) were ignored and not imported.`
+                        : `已忽略 ${lastImportResult.ignoredLegacyWebhooks} 条旧版 Webhook 配置，未导入。`}
+                    </p>
+                  )}
                   {lastImportResult.counts && (
                     <div className="mt-2 grid grid-cols-2 gap-1 text-xs">
                       {Object.entries(lastImportResult.counts).map(([k, v]) => (

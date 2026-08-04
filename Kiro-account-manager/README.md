@@ -66,7 +66,7 @@
 - Once an account is bound to a proxy, ALL its requests (token refresh, batch operations, etc.) route through it
 
 ### 🔔 Notifications & Ops
-- Webhook notifications (DingTalk/WeCom/Feishu/Telegram/Discord/custom), 7 event types
+- Local system notifications for critical account, proxy, and registration events
 - Unified task center (global progress panel)
 - One-click diagnostics panel (Network/Kiro/AWS/Email/Proxy connectivity)
 - Config import/export (with optional AES-GCM encryption)
@@ -135,7 +135,7 @@ npm run typecheck
 
 ##### Operations Efficiency
 - **Rate Limiting + Backoff** — Token bucket (max-per-minute starts) + consecutive failure exponential backoff (configurable base/max) + risk-control auto-pause
-- **Risk Signal Detection** — Live panel: throughput, success rate, window failures, consecutive failures, backoff remaining. Webhook + optional auto-pause on trigger
+- **Risk Signal Detection** — Live panel: throughput, success rate, window failures, consecutive failures, backoff remaining, with optional auto-pause on trigger
 - **Subscription Pre-flight Check** — Auto-classify blocked accounts (already subscribed/no token/banned/can't upgrade/unknown status)
 - **Subscription Cancel/Downgrade** — New "Manage" tab: bulk open portals, bulk disable overage, card-view management
 - **Fingerprint Snapshot** — Save chromeVer/UA/GPU/CanvasHash/Screen + masked proxy URL after registration. History shows badges
@@ -144,14 +144,13 @@ npm run typecheck
 - **Mixed Email Source Concurrency** — New Mixed mode with Outlook + TempMail.Plus smooth weighted round-robin (SWRR)
 - **Email Pre-validation** — Empirical blacklist auto-populated from `email_used` failures, visualized management UI
 - **Cron + Daily Quota** — Auto-launch at configurable time + weekday mask (Mon-Sun any combo) + daily quota cap (manual reset)
-- **Webhook Notifications** — Dedicated config page, supports DingTalk/WeCom/Feishu/Telegram/Discord/custom JSON template, 7 event types subscription (batch completed, risk warning, account banned, register success/fail, token expired, etc.), auto-retry + rate limiting
 
 ##### UX Enhancements
 - **Registration Strategy Templates** — Save current full config as named template, one-click load, supports JSON import/export
 - **Registration Analytics Report** — Donut chart (success rate) + 24-hour smooth curves (Catmull-Rom dual-line) + 7-day stacked trend bars + colorful error category cards + auth method comparison + CSV export
 - **Subscription Link Expiry Detection** — 15-minute threshold + HTTP HEAD live probe, one-click regenerate expired links
 - **Diagnostics Panel** — Check public/Kiro/AWS/email service/proxy pool connectivity, with report export
-- **Config Sync** — Multi-device sync of proxy pool/webhooks/register templates/rate limit settings/app preferences, supports AES-GCM + PBKDF2 password encryption
+- **Config Sync** — Multi-device sync of proxy pool/register templates/rate limit settings/app preferences, supports AES-GCM + PBKDF2 password encryption
 
 #### 🌐 Reverse Proxy: Account-to-IP Bucketing (new end-to-end feature)
 
@@ -184,7 +183,6 @@ npm run typecheck
 #### 🔧 Edge Cases (22 fixes)
 - Auto-sync bound accounts to main process pool on proxy URL/status/disable changes
 - Auto-clear bindings on proxy deletion
-- 6 Webhook event types fully wired
 - Task center persistence (200 finished tasks to localStorage)
 - Config export with PBKDF2 + AES-GCM encryption option
 - Cron supports weekday mask (workdays/daily/custom)

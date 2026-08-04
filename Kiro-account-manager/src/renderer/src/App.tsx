@@ -2,16 +2,16 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, type PageType } from './components/layout'
-import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, WebhooksPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
-import { useWebhookStore } from './store/webhooks'
+import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
 import { UpdateDialog } from './components/UpdateDialog'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
-import { useAccountsStore, isBannedAccountError } from './store/accounts'
+import { useAccountsStore } from './store/accounts'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
 const TRAY_UPDATE_DEBOUNCE_MS = 400
 // 后台刷新结果批量化间隔：N 条结果合并到一次 set，避免 N 次 Map 全量复制 + 渲染抖动
 const BACKGROUND_RESULT_FLUSH_MS = 120
+const LEGACY_WEBHOOK_STORAGE_KEY = 'kiro-webhooks'
 
 function App(): React.JSX.Element {
   const [currentPage, setCurrentPage] = useState<PageType>('home')
@@ -91,45 +91,12 @@ function App(): React.JSX.Element {
     loadFromStorage().then(() => {
       startAutoTokenRefresh()
     })
-    // 加载 Webhook 配置
-    useWebhookStore.getState().loadFromStorage()
+    localStorage.removeItem(LEGACY_WEBHOOK_STORAGE_KEY)
 
     return () => {
       stopAutoTokenRefresh()
     }
   }, [loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh])
-
-  // 反代关键事件 → 触发 webhook（v1.8 新增）
-  // 由 main/proxyServer 内置的 webhookTrigger 通过 IPC 推送过来，统一在 renderer 调 useWebhookStore
-  useEffect(() => {
-    const unsubscribe = window.api.onProxyWebhookTrigger?.((event, payload) => {
-      try {
-        const store = useWebhookStore.getState()
-        // 映射反代事件名 → Webhook 事件类型
-        const webhookEventMap: Record<string, 'risk-warning' | 'account-banned'> = {
-          'proxy-account-suspended': 'account-banned',
-          'proxy-all-exhausted': 'risk-warning'
-        }
-        const targetEvent = webhookEventMap[event] || 'risk-warning'
-        // 规范化 level（main 用 'error'/'info' 等字符串字面量，需要映射到 store 接受的类型）
-        const rawLevel = (payload as { level?: string })?.level
-        const level: 'info' | 'warn' | 'error' | 'success' =
-          rawLevel === 'error' ? 'error'
-          : rawLevel === 'info' ? 'info'
-          : rawLevel === 'success' ? 'success'
-          : 'warn'
-        void store.triggerEvent(targetEvent, {
-          title: String((payload as Record<string, unknown>).title ?? '反代告警'),
-          message: String((payload as Record<string, unknown>).message ?? ''),
-          level,
-          fields: (payload as { fields?: Record<string, string | number> })?.fields
-        })
-      } catch (err) {
-        console.error('[App] Proxy webhook trigger failed:', err)
-      }
-    })
-    return () => { unsubscribe?.() }
-  }, [])
 
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
@@ -141,47 +108,11 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener('navigate-page', handler)
   }, [])
 
-  // 新增封禁账号 → 桌面通知（仅"新封禁"弹一次，去重 + 启动宽限期避免初次加载/批量刷新时刷屏）
-  const bannedNotifyStartRef = useRef(Date.now())
+  // 本机通知点击后跳转到对应页面。
   useEffect(() => {
-    if (typeof Notification === 'undefined') return
-    const KEY = 'kiro-notified-banned-ids'
-    let notifiedSet: Set<string>
-    try {
-      notifiedSet = new Set<string>(JSON.parse(localStorage.getItem(KEY) || '[]'))
-    } catch {
-      notifiedSet = new Set<string>()
-    }
-
-    const currentBanned: string[] = []
-    const fresh: { email: string; nickname?: string }[] = []
-    for (const a of accounts.values()) {
-      if (isBannedAccountError(a.lastError)) {
-        currentBanned.push(a.id)
-        if (!notifiedSet.has(a.id)) fresh.push({ email: a.email, nickname: a.nickname })
-      }
-    }
-
-    // 启动后 8s 内只建立基线、不弹通知（覆盖异步加载 + 首次状态检查），之后才对新封禁弹窗
-    const inGracePeriod = Date.now() - bannedNotifyStartRef.current < 8000
-    if (!inGracePeriod && fresh.length > 0 && Notification.permission !== 'denied') {
-      const fire = (): void => {
-        const lang = useAccountsStore.getState().language
-        const isEn = lang === 'en' || (lang === 'auto' && !navigator.language.startsWith('zh'))
-        const title = fresh.length === 1
-          ? (isEn ? 'Account banned' : '账号被封禁')
-          : (isEn ? `${fresh.length} accounts banned` : `${fresh.length} 个账号被封禁`)
-        const names = fresh.slice(0, 3).map((a) => a.nickname || a.email)
-        const body = names.join('\n') + (fresh.length > 3 ? (isEn ? `\n+${fresh.length - 3} more` : `\n等 ${fresh.length} 个`) : '')
-        try { new Notification(title, { body }) } catch { /* ignore */ }
-      }
-      if (Notification.permission === 'granted') fire()
-      else void Notification.requestPermission().then((p) => { if (p === 'granted') fire() })
-    }
-
-    // 持久化当前仍封禁的集合：已解封的移出（将来再次封禁可重新提醒），新封禁的记入避免重复弹
-    try { localStorage.setItem(KEY, JSON.stringify(currentBanned)) } catch { /* ignore */ }
-  }, [accounts])
+    const unsubscribe = window.api.onLocalNotificationNavigate((page) => setCurrentPage(page))
+    return () => unsubscribe()
+  }, [])
 
   // 关闭/刷新前强制 flush 防抖中的待保存数据，防止数据丢失
   useEffect(() => {
@@ -317,8 +248,6 @@ function App(): React.JSX.Element {
         return <RegisterPage />
       case 'subscription':
         return <SubscriptionPage />
-      case 'webhooks':
-        return <WebhooksPage />
       case 'diagnose':
         return <DiagnosePage />
       case 'configSync':

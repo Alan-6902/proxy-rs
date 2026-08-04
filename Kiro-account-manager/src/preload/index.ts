@@ -471,13 +471,14 @@ const api = {
     return ipcRenderer.invoke('proxy-audit-log')
   },
 
-  /** 监听 main 进程推送的 webhook 事件（关键告警） */
-  onProxyWebhookTrigger: (callback: (event: string, payload: Record<string, unknown>) => void): (() => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, data: { event: string; payload: Record<string, unknown> }): void => {
-      callback(data.event, data.payload)
-    }
-    ipcRenderer.on('proxy-webhook-trigger', handler)
-    return () => ipcRenderer.off('proxy-webhook-trigger', handler)
+  notifyLocal: (kind: 'registration-risk-paused' | 'registration-batch-completed', input?: { batchId?: string }): Promise<void> => {
+    return ipcRenderer.invoke('local-notification', kind, input)
+  },
+
+  onLocalNotificationNavigate: (callback: (page: 'accounts' | 'proxy' | 'register') => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, page: 'accounts' | 'proxy' | 'register'): void => callback(page)
+    ipcRenderer.on('local-notification-navigate', handler)
+    return () => ipcRenderer.off('local-notification-navigate', handler)
   },
 
   // 添加账号到反代池

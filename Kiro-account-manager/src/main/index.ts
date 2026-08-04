@@ -13,6 +13,7 @@ import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
 import { registerProxyPoolIpcHandlers } from './ipc/proxyPool'
+import { LocalNotificationService, LocalNoticeKind, type LocalNoticeLanguage } from './localNotifications'
 import {
   createTray,
   destroyTray,
@@ -383,6 +384,13 @@ function initProxyServer(): ProxyServer {
             console.error('[ProxyServer] Failed to update suspended state in memory:', e)
           }
         }
+        localNotifications.notify(LocalNoticeKind.AccountSuspended, { accountId: info.accountId })
+      },
+      onAllAccountsExhausted: () => {
+        localNotifications.notify(LocalNoticeKind.ProxyAllAccountsExhausted)
+      },
+      onTokenRefreshFailed: (accountId) => {
+        localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId })
       },
       // Credits 更新回调 - 使用防抖持久化
       onCreditsUpdate: (totalCredits) => {
@@ -448,12 +456,6 @@ function initProxyServer(): ProxyServer {
       }
     }
   )
-
-  // P1-6 注入 webhook 触发器：让反代关键事件（封号 / 全员配额耗尽 / 限流）能推送通知
-  proxyServer.setWebhookTrigger((event, payload) => {
-    // 通过 IPC 转发到 renderer，由 useWebhookStore.triggerEvent 实际发送
-    mainWindow?.webContents.send('proxy-webhook-trigger', { event, payload })
-  })
 
   // Enterprise profileArn 自愈持久化：运行时首次解析出真实 profileArn 时，
   // 回写到账号池 + 内存快照 + 通知 renderer 落盘，避免每次请求重复获取。
@@ -1672,6 +1674,22 @@ function stopMainPoolTokenRefresh(): void {
 // ============ 托盘相关变量 ============
 let traySettings: TraySettings = { ...defaultTraySettings }
 let isQuitting = false // 标记是否真正退出应用
+let resolvedNotificationLanguage: LocalNoticeLanguage = 'zh'
+const RENDERER_NOTICE_KINDS = new Set<LocalNoticeKind>([
+  LocalNoticeKind.RegistrationRiskPaused,
+  LocalNoticeKind.RegistrationBatchCompleted
+])
+const localNotifications = new LocalNotificationService(
+  () => traySettings,
+  () => resolvedNotificationLanguage,
+  (page) => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.webContents.send('local-notification-navigate', page)
+  }
+)
 
 // ============ 全局快捷键设置 ============
 let showWindowShortcut = process.platform === 'darwin' ? 'Command+Shift+K' : 'Ctrl+Shift+K'
@@ -2116,6 +2134,12 @@ app.whenReady().then(async () => {
     return traySettings
   })
 
+  // 渲染进程只能请求固定类型的本机通知，文案由主进程统一生成。
+  ipcMain.handle('local-notification', (_event, kind: LocalNoticeKind, input?: { batchId?: string }) => {
+    if (!RENDERER_NOTICE_KINDS.has(kind)) return
+    localNotifications.notify(kind, { batchId: typeof input?.batchId === 'string' ? input.batchId : undefined })
+  })
+
   // ============ 自定义 titlebar IPC ============
   ipcMain.on('window-minimize', () => mainWindow?.minimize())
   ipcMain.on('window-maximize-toggle', () => {
@@ -2192,6 +2216,7 @@ app.whenReady().then(async () => {
 
   // IPC: 更新托盘语言
   ipcMain.on('update-tray-language', (_event, language: 'en' | 'zh') => {
+    resolvedNotificationLanguage = language
     updateTrayLanguage(language)
   })
 
@@ -3172,6 +3197,9 @@ app.whenReady().then(async () => {
               if (!refreshToken) {
                 failed++
                 completed++
+                if (account.id) {
+                  localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId: account.id })
+                }
                 return
               }
 
@@ -3188,6 +3216,9 @@ app.whenReady().then(async () => {
               if (!refreshResult.success) {
                 failed++
                 completed++
+                if (account.id) {
+                  localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId: account.id })
+                }
                 // 通知渲染进程刷新失败
                 mainWindow?.webContents.send('background-refresh-result', {
                   id: account.id,
@@ -3432,6 +3463,9 @@ app.whenReady().then(async () => {
           } catch (e) {
             failed++
             completed++
+            if (account.id) {
+              localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId: account.id })
+            }
             mainWindow?.webContents.send('background-refresh-result', {
               id: account.id,
               success: false,

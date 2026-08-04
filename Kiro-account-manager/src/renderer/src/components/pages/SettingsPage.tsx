@@ -1015,7 +1015,7 @@ export function SettingsPage() {
 }
 
 /**
- * 配置同步卡片：把所有"非敏感"配置（代理池、Webhook、模板、限速、定时、各种 localStorage）打包导出/导入。
+ * 配置同步卡片：把所有"非敏感"配置（代理池、模板、限速、定时、各种 localStorage）打包导出/导入。
  * 不包含：账号 token / 私密凭据。
  */
 function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
@@ -1034,7 +1034,6 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
     'kiro-register-schedule-enabled',
     'kiro-register-schedule-time',
     'kiro-register-mixed-sources',
-    'kiro-webhooks',
     'accounts_viewMode',
     'accounts_activeGroupTab',
     'systemLogs_displayLimit',
@@ -1050,7 +1049,7 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
       if (v != null) localData[key] = v
     }
     const payload = {
-      version: 1,
+      version: 2,
       type: 'kiro-account-manager-config',
       exportedAt: Date.now(),
       // 代理池条目（不含敏感账号）
@@ -1080,7 +1079,7 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
         alert(isEn ? 'Not a valid config file' : '不是有效的配置文件')
         return
       }
-      if (!confirm(isEn ? 'This will overwrite proxy pool / webhooks / templates. Continue?' : '这将覆盖代理池 / Webhook / 模板等配置，确定继续？')) {
+      if (!confirm(isEn ? 'This will overwrite proxy pool / templates. Continue?' : '这将覆盖代理池 / 模板等配置，确定继续？')) {
         return
       }
 
@@ -1128,8 +1127,8 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">
           {isEn
-            ? 'Export all non-sensitive settings (proxy pool, webhooks, templates, rate limits, UI preferences) to a file, for backup or multi-device sync. Does NOT include account tokens or credentials.'
-            : '导出所有"非敏感"配置（代理池、Webhook、注册模板、限速、UI 偏好等）到文件，便于备份或多设备同步。不含账号 Token 与凭据。'
+            ? 'Export all non-sensitive settings (proxy pool, templates, rate limits, UI preferences) to a file, for backup or multi-device sync. Does NOT include account tokens or credentials.'
+            : '导出所有"非敏感"配置（代理池、注册模板、限速、UI 偏好等）到文件，便于备份或多设备同步。不含账号 Token 与凭据。'
           }
         </p>
         <div className="flex gap-2">

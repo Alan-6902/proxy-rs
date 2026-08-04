@@ -102,18 +102,23 @@ function guessContextFromCache(modelId: string): number | undefined {
 export function getModelContextLength(modelId: string | undefined | null): number {
   if (!modelId) return 200000
 
-  // 1. 优先用 Kiro 后端真实返回的 maxInputTokens
+  // 1. 优先用 Kiro 后端真实返回的 maxInputTokens。
   const cached = modelContextWindowCache.get(modelId)
   if (cached && cached > 0) return cached
 
-  // 2. 模糊匹配 cache（alias ↔ CW 内部 ID）
+  // 2. 模糊匹配 cache（alias ↔ CW 内部 ID）。
   const guessed = guessContextFromCache(modelId)
   if (guessed && guessed > 0) return guessed
 
-  // 3. 关键词匹配兜底（首次请求 cache 未填充时使用）
+  // 3. 首次请求 cache 未填充时的静态兜底。
   const id = modelId.toLowerCase()
 
-  // Claude 系列（默认 200K）
+  if (/^gpt-5[.-]6(?:[.-](?:sol|terra|luna))?$/.test(id)) return 272000
+
+  // Sonnet/Opus 4.6+ (including 5+) are 1M; 4.5 and all Haiku stay 200K.
+  if (/^claude-(?:sonnet|opus)-(?:4[.-](?:[6-9]|[1-9][0-9]+)|[5-9][0-9]*)(?:$|[.-])/.test(id)) return 1000000
+
+  // Claude 系列（Haiku 和未列出的 Claude 保持 200K）。
   if (id.includes('claude-opus-4') || id.includes('claude-sonnet-4') || id.includes('claude-haiku-4')) return 200000
   if (id.includes('claude-3-7') || id.includes('claude-3.7')) return 200000
   if (id.includes('claude-3-5') || id.includes('claude-3.5')) return 200000
@@ -122,7 +127,7 @@ export function getModelContextLength(modelId: string | undefined | null): numbe
   if (id.includes('claude-2')) return 100000
   if (id.includes('claude-instant')) return 100000
 
-  // GPT 系列
+  // GPT 系列。
   if (id.includes('gpt-4o') || id.includes('gpt-4-turbo')) return 128000
   if (id.includes('gpt-4.1')) return 1000000
   if (id.includes('gpt-4-32k')) return 32768
@@ -131,15 +136,14 @@ export function getModelContextLength(modelId: string | undefined | null): numbe
   if (id.includes('gpt-3.5')) return 4096
   if (id.includes('o1') || id.includes('o3')) return 128000
 
-  // Gemini 系列
+  // Gemini 系列。
   if (id.includes('gemini-2.5') || id.includes('gemini-2.0') || id.includes('gemini-1.5')) return 1000000
   if (id.includes('gemini')) return 32768
 
-  // Amazon Titan / Nova 系列
+  // Amazon Titan / Nova 系列。
   if (id.includes('nova-pro') || id.includes('nova-lite')) return 300000
   if (id.includes('nova-micro')) return 128000
   if (id.includes('titan')) return 8000
 
-  // CodeWhisperer/Q Developer 内部模型一般跟 Claude 看齐
   return 200000
 }

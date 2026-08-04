@@ -19,6 +19,7 @@ import type {
 } from './types'
 import { AccountPool, ErrorType, classifyError } from './accountPool'
 import { assertDistinctAdminApiKey } from './adminApiKey'
+import { ClaudeCodeStreamBuffer } from './claudeCodeStreamBuffer'
 import { callKiroApiStream, callKiroApi, fetchKiroModels, setModelContextWindow, type KiroModel } from './kiroApi'
 import { proxyLogger } from './logger'
 import {
@@ -1851,15 +1852,22 @@ export class ProxyServer {
 
       if (this.config.logRequests) proxyLogger.info('ProxyServer', `${method} ${path}`)
 
+      const isClaudeCodePath = path === '/cc/v1/messages' || path === '/cc/v1/messages/count_tokens'
+      if (isClaudeCodePath && method !== 'POST') {
+        res.setHeader('Allow', 'POST')
+        this.sendError(res, 405, 'Method not allowed', 'anthropic')
+        return
+      }
+
       if (path === '/v1/models' || path === '/models') {
         await this.handleModels(res, controller.signal)
       } else if (path === '/v1/chat/completions' || path === '/chat/completions') {
         await this.handleOpenAIChat(req, res, controller.signal)
       } else if (path === '/v1/responses' || path === '/responses') {
         await this.handleOpenAIResponses(req, res, controller.signal)
-      } else if (path === '/v1/messages' || path === '/messages' || path === '/anthropic/v1/messages') {
-        await this.handleClaudeMessages(req, res, controller.signal)
-      } else if (path === '/v1/messages/count_tokens' || path === '/messages/count_tokens') {
+      } else if (path === '/v1/messages' || path === '/messages' || path === '/anthropic/v1/messages' || path === '/cc/v1/messages') {
+        await this.handleClaudeMessages(req, res, controller.signal, path === '/cc/v1/messages')
+      } else if (path === '/v1/messages/count_tokens' || path === '/messages/count_tokens' || path === '/cc/v1/messages/count_tokens') {
         await this.handleCountTokens(req, res, controller.signal)
       } else if (path === '/api/event_logging/batch') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -2058,10 +2066,12 @@ export class ProxyServer {
       || pathWithoutQuery === '/anthropic/v1/messages'
       || pathWithoutQuery === '/v1/messages/count_tokens'
       || pathWithoutQuery === '/messages/count_tokens'
+      || pathWithoutQuery === '/cc/v1/messages'
+      || pathWithoutQuery === '/cc/v1/messages/count_tokens'
   }
 
   private getAnthropicErrorType(status: number): string {
-    if (status === 400) return 'invalid_request_error'
+    if (status === 400 || status === 405) return 'invalid_request_error'
     if (status === 401) return 'authentication_error'
     if (status === 403) return 'permission_error'
     if (status === 404) return 'not_found_error'
@@ -2129,16 +2139,22 @@ export class ProxyServer {
 
   // Claude Code token 计数（模拟响应）
   private async handleCountTokens(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
+    let body: string
     try {
       this.throwIfAborted(signal)
-      const body = await this.readBody(req, signal)
+      body = await this.readBody(req, signal)
       this.throwIfAborted(signal)
+    } catch (error) {
+      if (this.isAbortError(error, signal)) return
+      if (error instanceof BodyTooLargeError) throw error
+      this.sendError(res, 400, error instanceof Error ? error.message : 'Invalid request body', 'anthropic')
+      return
+    }
+
+    try {
       const request = JSON.parse(body) as Partial<ClaudeRequest>
-      if (!Array.isArray(request.messages)) {
-        throw new Error('count_tokens requires messages')
-      }
+      if (!Array.isArray(request.messages)) throw new Error('count_tokens requires messages')
       const estimatedTokens = Math.max(1, this.estimateTokenCount(request.system) + this.estimateTokenCount(request.messages) + this.estimateTokenCount(request.tools))
-      
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ input_tokens: estimatedTokens }))
     } catch (error) {
@@ -2822,10 +2838,18 @@ export class ProxyServer {
   }
 
   // 处理 Claude Messages 请求
-  private async handleClaudeMessages(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
-    const body = await this.readBody(req, signal)
-    this.throwIfAborted(signal)
-    const request: ClaudeRequest = JSON.parse(body)
+  private async handleClaudeMessages(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal, isClaudeCode: boolean = false): Promise<void> {
+    let request: ClaudeRequest
+    try {
+      const body = await this.readBody(req, signal)
+      this.throwIfAborted(signal)
+      request = JSON.parse(body) as ClaudeRequest
+    } catch (error) {
+      if (this.isAbortError(error, signal)) return
+      if (error instanceof BodyTooLargeError) throw error
+      this.sendError(res, 400, 'Invalid request body', 'anthropic')
+      return
+    }
     const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
 
     // 提取 session hint（用于稳定 conversationId），拼入 API Key hash 隔离不同用户
@@ -2919,7 +2943,7 @@ export class ProxyServer {
       if (request.stream) {
         // 流式响应（流式不使用重试机制，错误由流处理）
         await this.handleClaudeStream(res, account, kiroPayload, request.model, startTime, 0, undefined, false, 0, matchedApiKey, toolNameRegistry, signal,
-          cacheProfile ? { ...cacheUsage, cacheProfile, accountId: account.id } : undefined)
+          cacheProfile ? { ...cacheUsage, cacheProfile, accountId: account.id } : undefined, isClaudeCode)
       } else {
         // 非流式响应（带重试机制）
         const { result, account: usedAccount } = await this.callWithRetry(
@@ -2972,7 +2996,8 @@ export class ProxyServer {
     matchedApiKey?: import('./types').ApiKey,
     toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
     signal?: AbortSignal,
-    simulatedCacheUsage?: { cacheCreationInputTokens: number; cacheReadInputTokens: number; cacheProfile?: unknown; accountId?: string }
+    simulatedCacheUsage?: { cacheCreationInputTokens: number; cacheReadInputTokens: number; cacheProfile?: unknown; accountId?: string },
+    isClaudeCode: boolean = false
   ): Promise<void> {
     if (!headersSent) {
       res.writeHead(200, {
@@ -2982,6 +3007,23 @@ export class ProxyServer {
       })
     }
 
+    const writeSse = async (frame: string): Promise<void> => {
+      if (signal?.aborted || this.isResponseClosed(res)) return
+      res.write(frame)
+      await this.waitForDrain(res)
+    }
+    // 先发送 HTTP headers，Claude Code 的业务 SSE 仍严格缓冲到 contextUsageEvent。
+    if (isClaudeCode) res.flushHeaders()
+    const estimatedInputTokens = Math.max(1, Math.round(JSON.stringify(kiroPayload).length / 3))
+    const claudeCodeBuffer = isClaudeCode
+      ? new ClaudeCodeStreamBuffer(writeSse, () => signal?.aborted === true || this.isResponseClosed(res), estimatedInputTokens)
+      : undefined
+    const emitSse = async (frame: string): Promise<void> => {
+      if (claudeCodeBuffer) await claudeCodeBuffer.write(frame)
+      else await writeSse(frame)
+    }
+    res.once('close', () => claudeCodeBuffer?.discard())
+
     const id = msgId || `msg_${uuidv4()}`
     let currentBlockIndex = contentBlockIndex
     let hasStartedTextBlock = false
@@ -2990,19 +3032,18 @@ export class ProxyServer {
     let collectedContent = ''
     const pendingToolCalls: Map<string, { name: string; input: Record<string, unknown> }> = new Map()
 
-    const flushThinkingSignature = () => {
+    const flushThinkingSignature = async (): Promise<void> => {
       if (!pendingThinkingSignature) return
       const signatureDelta = createClaudeStreamEvent('content_block_delta', {
         index: currentBlockIndex,
         delta: { type: 'signature_delta', signature: pendingThinkingSignature }
       })
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify(signatureDelta)}\n\n`)
+      await emitSse(`event: content_block_delta\ndata: ${JSON.stringify(signatureDelta)}\n\n`)
       pendingThinkingSignature = undefined
     }
 
-    // 估算输入 tokens（基于 payload 大小）
-    const estimatedInputTokens = Math.max(1, Math.round(JSON.stringify(kiroPayload).length / 3))
-    
+    // estimatedInputTokens 同时作为 Claude Code 缓冲超限/超时的安全回退值。
+
     // 发送 message_start（仅首轮）
     if (currentRound === 0) {
       const messageStart = createClaudeStreamEvent('message_start', {
@@ -3017,27 +3058,39 @@ export class ProxyServer {
           usage: { input_tokens: estimatedInputTokens, output_tokens: 0 }
         }
       })
-      res.write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
+      await emitSse(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
     }
 
     return new Promise((resolve) => {
+      let settled = false
+      const settle = () => {
+        if (settled) return
+        settled = true
+        resolve()
+      }
+      const closeFailedStream = (error: unknown): void => {
+        claudeCodeBuffer?.discard()
+        if (!res.writableEnded && !res.destroyed) {
+          res.destroy(error instanceof Error ? error : undefined)
+        }
+      }
       callKiroApiStream(
         account as any,
         kiroPayload,
-        (text, toolUse, isThinking, reasoningSignature, redactedContent) => {
+        async (text, toolUse, isThinking, reasoningSignature, redactedContent) => {
           if (signal?.aborted || this.isResponseClosed(res)) return
           // 优先处理 redacted_thinking（加密的 thinking 块，需单独 content_block）
           if (redactedContent) {
             if (hasStartedTextBlock) {
               const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+              await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedTextBlock = false
             }
             if (hasStartedThinkingBlock) {
-              flushThinkingSignature()
+              await flushThinkingSignature()
               const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+              await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedThinkingBlock = false
             }
@@ -3045,9 +3098,9 @@ export class ProxyServer {
               index: currentBlockIndex,
               content_block: { type: 'redacted_thinking', data: redactedContent }
             })
-            res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
+            await emitSse(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+            await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
             return this.waitForDrain(res)
           }
@@ -3056,7 +3109,7 @@ export class ProxyServer {
               // 原生 thinking 内容 → 输出为 Anthropic thinking block
               if (hasStartedTextBlock) {
                 const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-                res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+                await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
                 currentBlockIndex++
                 hasStartedTextBlock = false
               }
@@ -3065,23 +3118,23 @@ export class ProxyServer {
                   index: currentBlockIndex,
                   content_block: { type: 'thinking', thinking: '' }
                 })
-                res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
+                await emitSse(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
                 hasStartedThinkingBlock = true
               }
               const delta = createClaudeStreamEvent('content_block_delta', {
                 index: currentBlockIndex,
                 delta: { type: 'thinking_delta', thinking: text }
               })
-              res.write(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`)
+              await emitSse(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`)
               if (reasoningSignature) {
                 pendingThinkingSignature = reasoningSignature
               }
             } else {
               // 普通文本内容
               if (hasStartedThinkingBlock) {
-                flushThinkingSignature()
+                await flushThinkingSignature()
                 const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-                res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+                await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
                 currentBlockIndex++
                 hasStartedThinkingBlock = false
               }
@@ -3091,14 +3144,14 @@ export class ProxyServer {
                   index: currentBlockIndex,
                   content_block: { type: 'text', text: '' }
                 })
-                res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
+                await emitSse(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
                 hasStartedTextBlock = true
               }
               const delta = createClaudeStreamEvent('content_block_delta', {
                 index: currentBlockIndex,
                 delta: { type: 'text_delta', text }
               })
-              res.write(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`)
+              await emitSse(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`)
             }
           } else if (isThinking && reasoningSignature) {
             if (!hasStartedThinkingBlock) {
@@ -3106,7 +3159,7 @@ export class ProxyServer {
                 index: currentBlockIndex,
                 content_block: { type: 'thinking', thinking: '' }
               })
-              res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
+              await emitSse(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
               hasStartedThinkingBlock = true
             }
             pendingThinkingSignature = reasoningSignature
@@ -3114,16 +3167,16 @@ export class ProxyServer {
           if (toolUse) {
             const restoredToolUse = toolNameRegistry.restoreToolUse(toolUse)
             if (hasStartedThinkingBlock) {
-              flushThinkingSignature()
+              await flushThinkingSignature()
               const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+              await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedThinkingBlock = false
             }
             // 结束之前的文本块
             if (hasStartedTextBlock) {
               const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+              await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedTextBlock = false
             }
@@ -3134,29 +3187,33 @@ export class ProxyServer {
               index: currentBlockIndex,
               content_block: { type: 'tool_use', id: toolUse.toolUseId, name: restoredToolUse.name, input: {} }
             })
-            res.write(`event: content_block_start\ndata: ${JSON.stringify(toolBlockStart)}\n\n`)
+            await emitSse(`event: content_block_start\ndata: ${JSON.stringify(toolBlockStart)}\n\n`)
             // 发送工具输入
             const toolDelta = createClaudeStreamEvent('content_block_delta', {
               index: currentBlockIndex,
               delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUse.input) } as any
             })
-            res.write(`event: content_block_delta\ndata: ${JSON.stringify(toolDelta)}\n\n`)
+            await emitSse(`event: content_block_delta\ndata: ${JSON.stringify(toolDelta)}\n\n`)
             // 结束工具块
             const toolBlockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify(toolBlockStop)}\n\n`)
+            await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(toolBlockStop)}\n\n`)
             currentBlockIndex++
           }
           return this.waitForDrain(res)
         },
         async (usage) => {
-          if (signal?.aborted || this.isResponseClosed(res)) {
-            resolve()
+          try {
+            if (signal?.aborted || this.isResponseClosed(res)) {
+            claudeCodeBuffer?.discard()
+            settle()
             return
           }
+          // 未收到 contextUsageEvent 时，保留原先 payload 估算作为 Claude Code 首帧 usage。
+          await claudeCodeBuffer?.release(estimatedInputTokens)
           if (hasStartedThinkingBlock) {
-            flushThinkingSignature()
+            await flushThinkingSignature()
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+            await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
             hasStartedThinkingBlock = false
           }
@@ -3164,7 +3221,7 @@ export class ProxyServer {
           // 结束最后的文本块
           if (hasStartedTextBlock) {
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+            await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
           }
 
@@ -3198,23 +3255,31 @@ export class ProxyServer {
             delta: { stop_reason: stopReason, stop_sequence: null } as any,
             usage: this.buildClaudeUsage(usage, simulatedCacheUsage)
           })
-          res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
+          await emitSse(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
           // 发送 message_stop
           const messageStop = createClaudeStreamEvent('message_stop')
-          res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
+          await emitSse(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
           res.end()
-          resolve()
+          } catch (callbackError) {
+            proxyLogger.warn('ProxyServer', 'Claude stream completion callback failed', callbackError)
+            closeFailedStream(callbackError)
+          } finally {
+            settle()
+          }
         },
-        (error) => {
+        async (error) => {
+          try {
           if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
-            resolve()
+            claudeCodeBuffer?.discard()
+            settle()
             return
           }
+          claudeCodeBuffer?.discard()
           console.error('[ProxyServer] Stream error:', error)
           const errorEvent = createClaudeStreamEvent('error', {
             error: { type: 'api_error', message: error.message }
           })
-          res.write(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
+          await writeSse(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
           res.end()
 
           this.recordRequestFailed()
@@ -3222,20 +3287,37 @@ export class ProxyServer {
           this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
           this.events.onResponse?.({ path: '/v1/messages', model, status: 500, error: error.message })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
-          resolve()
+          } catch (callbackError) {
+            proxyLogger.warn('ProxyServer', 'Claude stream error callback failed', callbackError)
+            closeFailedStream(callbackError)
+          } finally {
+            settle()
+          }
         },
         signal,
-        this.config.preferredEndpoint
-      ).catch(error => {
-        if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
-          const errorEvent = createClaudeStreamEvent('error', {
-            error: { type: 'api_error', message: error.message }
-          })
-          res.write(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
-          res.end()
-          this.recordRequestFailed()
+        this.config.preferredEndpoint,
+        async usage => {
+          if (claudeCodeBuffer && !signal?.aborted && !this.isResponseClosed(res)) {
+            await claudeCodeBuffer.release(usage.inputTokens)
+          }
         }
-        resolve()
+      ).catch(async error => {
+        try {
+          claudeCodeBuffer?.discard()
+          if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
+            const errorEvent = createClaudeStreamEvent('error', {
+              error: { type: 'api_error', message: error.message }
+            })
+            await writeSse(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
+            res.end()
+            this.recordRequestFailed()
+          }
+        } catch (callbackError) {
+          proxyLogger.warn('ProxyServer', 'Claude stream fallback error callback failed', callbackError)
+          closeFailedStream(callbackError)
+        } finally {
+          settle()
+        }
       })
     })
   }

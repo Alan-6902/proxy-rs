@@ -255,6 +255,15 @@ const MODEL_ID_MAP: Record<string, string> = {
   'claude-3-opus': 'claude-sonnet-4.5',
   'claude-3-sonnet': 'claude-sonnet-4',
   'claude-3-haiku': 'claude-haiku-4.5',
+  // Kiro 已验证的 GPT-5.6 系列必须原样路由，不能静默降级到 Sonnet。
+  'gpt-5.6': 'gpt-5.6-sol',
+  'gpt-5-6': 'gpt-5.6-sol',
+  'gpt-5.6-sol': 'gpt-5.6-sol',
+  'gpt-5-6-sol': 'gpt-5.6-sol',
+  'gpt-5.6-terra': 'gpt-5.6-terra',
+  'gpt-5-6-terra': 'gpt-5.6-terra',
+  'gpt-5.6-luna': 'gpt-5.6-luna',
+  'gpt-5-6-luna': 'gpt-5.6-luna',
   // GPT 兼容映射 (映射到 Sonnet 4.5)
   'gpt-4': 'claude-sonnet-4.5',
   'gpt-4o': 'claude-sonnet-4.5',
@@ -294,6 +303,7 @@ export function mapModelId(model: string): string {
   //    用于向前兼容尚未加入 MODEL_ID_MAP 的新发布模型
   if (/^claude-(sonnet|haiku|opus)-/.test(lower)) return modelId
   // 3) 完全未知的 model（用户拼错/不存在），兜底到 default 避免直接 400
+  if (lower.startsWith('gpt-')) return modelId
   console.warn(`[Kiro API] Unknown model "${modelId}" → fallback to "${MODEL_ID_MAP.default}"`)
   return MODEL_ID_MAP.default
 }
@@ -354,7 +364,13 @@ async function resolveCodeWhispererModelId(account: ProxyAccount, requestedModel
   if (!modelId) return CODEWHISPERER_DEFAULT_MODEL_ID
   if (isCodeWhispererModelId(modelId)) return modelId
   const models = await getCachedCodeWhispererModels(account, signal)
-  return models.find(model => matchesRequestedModel(model, modelId))?.modelId || CODEWHISPERER_DEFAULT_MODEL_ID
+  const matched = models.find(model => matchesRequestedModel(model, modelId))
+  if (matched) return matched.modelId
+  // GPT 模型不得被 CodeWhisperer 静默降级为 Sonnet；抛出后由调用方尝试下一个端点。
+  if (modelId.toLowerCase().startsWith('gpt-')) {
+    throw new Error(`Requested GPT model is not supported by CodeWhisperer: ${modelId}`)
+  }
+  return CODEWHISPERER_DEFAULT_MODEL_ID
 }
 
 function getPayloadModelId(payload: KiroPayload): string | undefined {
@@ -1181,10 +1197,11 @@ export async function callKiroApiStream(
   payload: KiroPayload,
   // onChunk 可返回 Promise：下游 SSE 写缓冲打满时返回 drain promise，流解析 await 实现背压
   onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void | Promise<void>,
-  onComplete: (usage: KiroUsage) => void,
-  onError: (error: Error) => void,
+  onComplete: (usage: KiroUsage) => void | Promise<void>,
+  onError: (error: Error) => void | Promise<void>,
   signal?: AbortSignal,
-  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli',
+  onContextUsage?: (usage: KiroUsage) => void | Promise<void>
 ): Promise<void> {
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
   // 所有账号类型均走正常端点优先级（含 fallback），不再强制 Enterprise 走 CodeWhisperer
@@ -1200,6 +1217,16 @@ export async function callKiroApiStream(
   }
 
   let lastError: Error | null = null
+  let errorDelivered = false
+  const reportError = async (error: Error): Promise<void> => {
+    if (errorDelivered) return
+    errorDelivered = true
+    try {
+      await onError(error)
+    } catch (callbackError) {
+      proxyLogger.warn('KiroAPI', 'Stream error callback failed', callbackError)
+    }
+  }
 
   for (const endpoint of endpoints) {
     try {
@@ -1270,11 +1297,11 @@ export async function callKiroApiStream(
       // 解析 Event Stream
       // 传入 modelId + payloadStr 用于精确 token 计算（contextUsage 反推 + tiktoken）
       const inputChars = payloadStr.length
-      await parseEventStream(response.body!, onChunk, onComplete, onError, inputChars, signal, requestedModelId, payloadStr)
+      await parseEventStream(response.body!, onChunk, onComplete, onError, onContextUsage, inputChars, signal, requestedModelId, payloadStr)
       return
     } catch (error) {
       if (signal?.aborted) {
-        onError(getAbortError(signal))
+        await reportError(getAbortError(signal))
         return
       }
       lastError = error as Error
@@ -1282,7 +1309,7 @@ export async function callKiroApiStream(
       
       // 如果是认证错误，不继续尝试其他端点
       if ((error as Error).message.includes('Auth error')) {
-        onError(error as Error)
+        await reportError(error as Error)
         return
       }
 
@@ -1319,13 +1346,13 @@ export async function callKiroApiStream(
             ? await undiciFetch(endpoint.url, { method: 'POST', headers: retryHeaders, body: retryStr, signal, dispatcher: retryAgent } as UndiciRequestInit) as unknown as Response
             : await fetch(endpoint.url, { method: 'POST', headers: retryHeaders, body: retryStr, signal })
           if (retryResponse.ok) {
-            await parseEventStream(retryResponse.body!, onChunk, onComplete, onError, retryStr.length, signal, getPayloadModelId(retryPayload), retryStr)
+            await parseEventStream(retryResponse.body!, onChunk, onComplete, onError, onContextUsage, retryStr.length, signal, getPayloadModelId(retryPayload), retryStr)
             return
           }
           const retryBody = await retryResponse.text()
           console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry also failed: ${retryResponse.status} ${retryBody.slice(0, 200)}`)
         } catch (retryErr) {
-          if (signal?.aborted) { onError(getAbortError(signal)); return }
+          if (signal?.aborted) { await reportError(getAbortError(signal)); return }
           console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry error:`, retryErr)
         }
       }
@@ -1333,7 +1360,7 @@ export async function callKiroApiStream(
   }
 
   if (lastError) {
-    onError(lastError)
+    await reportError(lastError)
   }
 }
 
@@ -1396,8 +1423,9 @@ export function estimateTokens(text: string): number {
 async function parseEventStream(
   body: ReadableStream<Uint8Array>,
   onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void | Promise<void>,
-  onComplete: (usage: KiroUsage) => void,
-  onError: (error: Error) => void,
+  onComplete: (usage: KiroUsage) => void | Promise<void>,
+  onError: (error: Error) => void | Promise<void>,
+  onContextUsage?: (usage: KiroUsage) => void | Promise<void>,
   inputChars: number = 0,  // 输入字符长度（兜底估算用）
   signal?: AbortSignal,
   modelId?: string,        // 模型 ID，用于 contextUsagePercentage 反推 inputTokens
@@ -1415,6 +1443,25 @@ async function parseEventStream(
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     reasoningTokens: 0
+  }
+  let terminalNotified = false
+  const notifyComplete = async (): Promise<void> => {
+    if (terminalNotified) return
+    terminalNotified = true
+    try {
+      await onComplete(usage)
+    } catch (error) {
+      proxyLogger.warn('Kiro', 'Stream completion callback failed', error)
+    }
+  }
+  const notifyError = async (error: Error): Promise<void> => {
+    if (terminalNotified) return
+    terminalNotified = true
+    try {
+      await onError(error)
+    } catch (callbackError) {
+      proxyLogger.warn('Kiro', 'Stream error callback failed', callbackError)
+    }
   }
   
   // 累积输出文本长度，用于估算 tokens
@@ -1898,6 +1945,7 @@ async function parseEventStream(
                     proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}%`)
                   }
                 }
+                await onContextUsage?.(usage)
                 if (usage.contextUsage.breakdown) {
                   proxyLogger.info('Kiro', `contextUsage breakdown: conversation=${usage.contextUsage.breakdown.conversation || 0}% mcpTools=${usage.contextUsage.breakdown.mcpTools || 0}% steering=${usage.contextUsage.breakdown.steeringFiles || 0}%`)
                 }
@@ -2095,9 +2143,9 @@ async function parseEventStream(
     
     throwIfAborted(signal)
     proxyLogger.info('Kiro', 'Stream complete, final usage', usage)
-    onComplete(usage)
+    await notifyComplete()
   } catch (error) {
-    onError(signal?.aborted ? getAbortError(signal) : error as Error)
+    await notifyError(signal?.aborted ? getAbortError(signal) : error as Error)
   } finally {
     signal?.removeEventListener('abort', abort)
     reader.releaseLock()

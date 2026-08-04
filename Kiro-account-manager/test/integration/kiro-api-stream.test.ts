@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { callKiroApiStream } from '../../src/main/proxy/kiroApi'
+import { callKiroApiStream, callKiroMcpWebSearch } from '../../src/main/proxy/kiroApi'
 
 function eventStreamFrame(eventType: string, payload: unknown): Uint8Array {
   const encoder = new TextEncoder()
@@ -164,5 +164,165 @@ describe('callKiroApiStream 真实 EventStream 解析', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(errors).toHaveLength(1)
     expect(errors[0].message).toContain('bad event')
+  })
+})
+
+describe('Kiro MCP WebSearch', () => {
+  it('使用受限区域、无 Machine ID 的认证头和 JSON-RPC 请求，并映射搜索结果', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({
+        id: request.id,
+        jsonrpc: '2.0',
+        result: {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ results: [{
+              title: 'Result title',
+              url: 'https://example.test/result',
+              snippet: 'Result snippet',
+              publishedDate: 1704067200000
+            }] })
+          }]
+        }
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const results = await callKiroMcpWebSearch({
+      id: 'web-search',
+      accessToken: 'access-token',
+      region: 'not a region',
+      profileArn: ' arn:aws:codewhisperer:us-east-1:123:profile/example ',
+      authMethod: 'external_idp'
+    }, 'safe query')
+
+    expect(results).toEqual([{
+      type: 'web_search_result',
+      title: 'Result title',
+      url: 'https://example.test/result',
+      encrypted_content: 'Result snippet',
+      page_age: 'January 1, 2024'
+    }])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://q.us-east-1.amazonaws.com/mcp')
+    const headers = init.headers as Record<string, string>
+    expect(headers).toMatchObject({
+      Authorization: 'Bearer access-token',
+      TokenType: 'EXTERNAL_IDP',
+      'x-amzn-kiro-profile-arn': 'arn:aws:codewhisperer:us-east-1:123:profile/example'
+    })
+    expect(headers).not.toHaveProperty('x-amzn-kiro-agent-mode')
+    expect(Object.keys(headers).some(name => name.toLowerCase().includes('machine'))).toBe(false)
+    const request = JSON.parse(String(init.body))
+    expect(request).toMatchObject({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'web_search', arguments: { query: 'safe query' } } })
+    expect(request.id).toMatch(/^web_search_tooluse_[a-f0-9]{22}_\d+_[a-f0-9]{8}$/)
+  })
+
+  it('拒绝 JSON-RPC 错误和不匹配的响应，且错误不包含查询内容', async () => {
+    const secretQuery = 'do-not-leak-query'
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'wrong', jsonrpc: '2.0', result: { isError: true } }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(callKiroMcpWebSearch(account, secretQuery)).rejects.toThrow('Web search MCP request failed')
+    await expect(callKiroMcpWebSearch(account, secretQuery)).rejects.not.toThrow(secretQuery)
+  })
+
+  it('网络、408、429 和 5xx 可重试，400 立即永久失败', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network failure')))
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toMatchObject({ retryable: true })
+
+    for (const status of [408, 429, 500]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status })))
+      await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toMatchObject({ statusCode: status, retryable: true })
+    }
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 400 })))
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toMatchObject({ statusCode: 400, retryable: false })
+  })
+
+  it('拒绝 JSON-RPC error 与错误版本', async () => {
+    const malformedResponses = [
+      (id: string) => ({ id, jsonrpc: '2.0', error: { code: -32000, message: 'upstream error' } }),
+      (id: string) => ({ id, jsonrpc: '1.0', result: { content: [] } })
+    ]
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      return new Response(JSON.stringify(malformedResponses.shift()!(request.id)), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toThrow('Web search MCP request failed')
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toThrow('Web search MCP request failed')
+  })
+
+  it('仅接受首个 text 内容、严格校验结果项，并安全处理空结果和越界日期', async () => {
+    const responses = [
+      { result: { content: [{ type: 'image' }, { type: 'text', text: JSON.stringify({ results: [] }) }] } },
+      { result: { content: [{ type: 'text', text: JSON.stringify({ results: [{}] }) }] } },
+      { result: { content: [{ type: 'text', text: JSON.stringify({ results: [] }) }] } },
+      {
+        result: {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              results: [{
+                title: 'Out of range',
+                url: 'https://example.test/out-of-range',
+                publishedDate: 9e15
+              }]
+            })
+          }]
+        }
+      }
+    ]
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({ id: request.id, jsonrpc: '2.0', ...responses.shift() }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toThrow('Web search MCP request failed')
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).rejects.toThrow('Web search MCP request failed')
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).resolves.toEqual([])
+    await expect(callKiroMcpWebSearch(account, 'safe-query')).resolves.toEqual([{
+      type: 'web_search_result',
+      title: 'Out of range',
+      url: 'https://example.test/out-of-range',
+      encrypted_content: '',
+      page_age: null
+    }])
+  })
+
+  it('拒绝 result.isError 与 HTTP 错误，且不会泄露上游响应体', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({
+        id: request.id,
+        jsonrpc: '2.0',
+        result: { isError: true, content: [] }
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(callKiroMcpWebSearch(account, 'safe')).rejects.toThrow('Web search MCP request failed')
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('upstream-body-must-not-leak', { status: 502 })))
+    await expect(callKiroMcpWebSearch(account, 'safe')).rejects.toThrow('HTTP 502')
+    await expect(callKiroMcpWebSearch(account, 'safe')).rejects.not.toThrow('upstream-body-must-not-leak')
+  })
+
+  it('客户端 abort 原样收敛，不继续发起请求', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const pending = callKiroMcpWebSearch(account, 'abort query', controller.signal)
+    await Promise.resolve()
+    controller.abort(new Error('client disconnected'))
+
+    await expect(pending).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

@@ -20,7 +20,7 @@ import type {
 import { AccountPool, ErrorType, classifyError } from './accountPool'
 import { assertDistinctAdminApiKey } from './adminApiKey'
 import { ClaudeCodeStreamBuffer } from './claudeCodeStreamBuffer'
-import { callKiroApiStream, callKiroApi, fetchKiroModels, setModelContextWindow, type KiroModel } from './kiroApi'
+import { callKiroApiStream, callKiroApi, callKiroMcpWebSearch, KiroMcpWebSearchError, fetchKiroModels, setModelContextWindow, type KiroModel, type KiroWebSearchResult } from './kiroApi'
 import { proxyLogger } from './logger'
 import {
   openaiToKiro,
@@ -260,6 +260,22 @@ class BodyTooLargeError extends Error {
 const ADMIN_RATE_LIMIT_BUCKET = 'admin:control'
 const API_KEY_RATE_LIMIT_PREFIX = 'api-key:'
 const IP_RATE_LIMIT_PREFIX = 'ip:'
+const WEB_SEARCH_TOOL_NAME = 'web_search'
+const WEB_SEARCH_QUERY_PREFIX = 'Perform a web search for the query: '
+const WEB_SEARCH_ATTEMPTS_PER_ACCOUNT = 3
+const WEB_SEARCH_MAX_ATTEMPTS = 9
+const WEB_SEARCH_RETRY_BASE_MS = 200
+const WEB_SEARCH_RETRY_MAX_MS = 2000
+const WEB_SEARCH_SNIPPET_LIMIT = 200
+const WEB_SEARCH_SUMMARY_CHUNK_SIZE = 100
+const WEB_SEARCH_MESSAGE_ID_LENGTH = 24
+
+function* chunkCodePoints(text: string, size: number): Generator<string> {
+  const characters = Array.from(text)
+  for (let index = 0; index < characters.length; index += size) {
+    yield characters.slice(index, index + size).join('')
+  }
+}
 
 export class ProxyServer {
   private server: http.Server | https.Server | null = null
@@ -907,11 +923,19 @@ export class ProxyServer {
 
   // 通知请求统计更新
   private notifyRequestStatsUpdate(): void {
-    this.events.onRequestStatsUpdate?.(
+    this.notifyEventSafely(() => this.events.onRequestStatsUpdate?.(
       this.stats.totalRequests,
       this.stats.successRequests,
       this.stats.failedRequests
-    )
+    ))
+  }
+
+  private notifyEventSafely(callback: () => void): void {
+    try {
+      callback()
+    } catch {
+      proxyLogger.warn('ProxyServer', 'Proxy event hook failed')
+    }
   }
 
   // 记录请求成功
@@ -1665,15 +1689,13 @@ export class ProxyServer {
 
     const today = new Date().toISOString().split('T')[0]
     const now = Date.now()
-    
-    // 更新总计
+
     apiKey.usage.totalRequests++
     apiKey.usage.totalCredits += credits
     apiKey.usage.totalInputTokens += inputTokens
     apiKey.usage.totalOutputTokens += outputTokens
     apiKey.lastUsedAt = now
 
-    // 更新日统计
     if (!apiKey.usage.daily[today]) {
       apiKey.usage.daily[today] = { requests: 0, credits: 0, inputTokens: 0, outputTokens: 0 }
     }
@@ -1682,7 +1704,6 @@ export class ProxyServer {
     apiKey.usage.daily[today].inputTokens += inputTokens
     apiKey.usage.daily[today].outputTokens += outputTokens
 
-    // 更新模型统计
     if (model) {
       if (!apiKey.usage.byModel) {
         apiKey.usage.byModel = {}
@@ -1696,7 +1717,6 @@ export class ProxyServer {
       apiKey.usage.byModel[model].outputTokens += outputTokens
     }
 
-    // 添加用量历史记录（保留最近 100 条）
     if (!apiKey.usageHistory) {
       apiKey.usageHistory = []
     }
@@ -1712,8 +1732,7 @@ export class ProxyServer {
       apiKey.usageHistory = apiKey.usageHistory.slice(0, 100)
     }
 
-    // 触发配置保存事件
-    this.events.onConfigChanged?.(this.config)
+    this.notifyEventSafely(() => this.events.onConfigChanged?.(this.config))
   }
 
   // 应用模型映射
@@ -2838,6 +2857,234 @@ export class ProxyServer {
   }
 
   // 处理 Claude Messages 请求
+  private isWebSearchRequest(originalRequest: ClaudeRequest, processedRequest: ClaudeRequest): boolean {
+    const hasOnlyWebSearchTool = (tools?: ClaudeRequest['tools']): boolean =>
+      tools?.length === 1 && tools[0]?.name === WEB_SEARCH_TOOL_NAME
+    return hasOnlyWebSearchTool(originalRequest.tools) && hasOnlyWebSearchTool(processedRequest.tools)
+  }
+
+  private extractWebSearchQuery(request: ClaudeRequest): string | null {
+    const content = request.messages[0]?.content
+    const rawQuery = typeof content === 'string'
+      ? content
+      : content?.find(block => block.type === 'text')?.text
+    if (typeof rawQuery !== 'string') return null
+    const query = rawQuery.startsWith(WEB_SEARCH_QUERY_PREFIX)
+      ? rawQuery.slice(WEB_SEARCH_QUERY_PREFIX.length)
+      : rawQuery
+    return query.trim() || null
+  }
+
+  private buildWebSearchSummary(query: string, results: KiroWebSearchResult[]): string {
+    const resultLines = results.map((result, index) => {
+      const characters = Array.from(result.encrypted_content)
+      const snippet = characters.length > WEB_SEARCH_SNIPPET_LIMIT
+        ? `${characters.slice(0, WEB_SEARCH_SNIPPET_LIMIT).join('')}...`
+        : result.encrypted_content
+      return `${index + 1}. **${result.title}**\n   ${snippet}\n   Source: ${result.url}\n\n`
+    }).join('')
+    return `Here are the search results for "${query}":\n\n${resultLines}Please note that these are web search results and may not be fully accurate or up-to-date.`
+  }
+
+  private async callWebSearchWithRetry(
+    initialAccount: ProxyAccount,
+    query: string,
+    matchedApiKey: import('./types').ApiKey | undefined,
+    signal?: AbortSignal
+  ): Promise<{ results: KiroWebSearchResult[]; account: ProxyAccount }> {
+    const allowedAccountIds = this.getAllowedAccountIds(matchedApiKey?.id)
+    const groupMode = this.config.multiAccountSelectionMode === 'groups'
+    const allowedGroupIds = groupMode ? new Set(this.config.multiAccountGroupIds || []) : null
+    const isConfiguredCandidate = (account: ProxyAccount): boolean => {
+      if (allowedAccountIds && !allowedAccountIds.has(account.id)) return false
+      if (allowedGroupIds) {
+        const groupId = account.groupId || '__ungrouped__'
+        if (!allowedGroupIds.has(groupId)) return false
+      }
+      return true
+    }
+    const isLiveCandidate = (account: ProxyAccount): boolean => {
+      if (!isConfiguredCandidate(account)) return false
+      if (account.isAvailable === false || account.suspendedAt || this.accountPool.isQuotaExhausted(account)) return false
+      if (account.cooldownUntil && account.cooldownUntil > Date.now()) return false
+      return true
+    }
+    const allowAccountSwitch = this.config.enableMultiAccount || this.config.autoSwitchOnQuotaExhausted
+    const initialLiveAccount = this.accountPool.getAccount(initialAccount.id)
+    const candidateIds = (allowAccountSwitch
+      ? this.accountPool.getAllAccounts()
+      : initialLiveAccount ? [initialLiveAccount] : []
+    ).filter(isLiveCandidate).map(account => account.id)
+    const permanentlyExcluded = new Set<string>()
+    const refreshedAccountIds = new Set<string>()
+    const attemptsByAccount = new Map<string, number>()
+    const maxAttempts = Math.min(candidateIds.length * WEB_SEARCH_ATTEMPTS_PER_ACCOUNT, WEB_SEARCH_MAX_ATTEMPTS)
+    let attempts = 0
+    let currentAccountId = initialAccount.id
+    let lastError: Error = new KiroMcpWebSearchError()
+
+    const getCurrentCandidate = (accountId: string): ProxyAccount | null => {
+      if (permanentlyExcluded.has(accountId) || !candidateIds.includes(accountId)) return null
+      const account = this.accountPool.getAccount(accountId)
+      return account && isLiveCandidate(account) ? account : null
+    }
+
+    const pickNextCandidate = (afterAccountId?: string): ProxyAccount | null => {
+      if (!candidateIds.length) return null
+      const afterIndex = afterAccountId ? candidateIds.indexOf(afterAccountId) : -1
+      for (let offset = 1; offset <= candidateIds.length; offset++) {
+        const accountId = candidateIds[(Math.max(afterIndex, -1) + offset) % candidateIds.length]
+        if ((attemptsByAccount.get(accountId) || 0) >= WEB_SEARCH_ATTEMPTS_PER_ACCOUNT) continue
+        const account = getCurrentCandidate(accountId)
+        if (account) return account
+      }
+      return null
+    }
+
+    while (attempts < maxAttempts) {
+      this.throwIfAborted(signal)
+      let currentAccount = getCurrentCandidate(currentAccountId)
+      if (!currentAccount || (attemptsByAccount.get(currentAccount.id) || 0) >= WEB_SEARCH_ATTEMPTS_PER_ACCOUNT) {
+        currentAccount = pickNextCandidate(currentAccountId)
+        if (!currentAccount) break
+        currentAccountId = currentAccount.id
+      }
+
+      attempts += 1
+      attemptsByAccount.set(currentAccount.id, (attemptsByAccount.get(currentAccount.id) || 0) + 1)
+      try {
+        const results = await callKiroMcpWebSearch(currentAccount, query, signal)
+        return { results, account: currentAccount }
+      } catch (error) {
+        if (this.isAbortError(error, signal)) throw error
+        lastError = error instanceof Error ? error : new KiroMcpWebSearchError()
+        const statusCode = error instanceof KiroMcpWebSearchError ? error.statusCode : undefined
+
+        if (statusCode === 401 || statusCode === 403) {
+          if (!refreshedAccountIds.has(currentAccount.id)) {
+            refreshedAccountIds.add(currentAccount.id)
+            if (await this.refreshToken(currentAccount, signal)) {
+              currentAccountId = currentAccount.id
+              continue
+            }
+          }
+          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
+          permanentlyExcluded.add(currentAccount.id)
+          const nextAccount = pickNextCandidate(currentAccount.id)
+          if (!nextAccount) break
+          currentAccountId = nextAccount.id
+          continue
+        }
+
+        if (statusCode === 402) {
+          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
+          permanentlyExcluded.add(currentAccount.id)
+          const nextAccount = pickNextCandidate(currentAccount.id)
+          if (!nextAccount) break
+          currentAccountId = nextAccount.id
+          continue
+        }
+
+        const retryable = error instanceof KiroMcpWebSearchError ? error.retryable : true
+        if (!retryable || attempts >= maxAttempts) break
+        this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, statusCode)
+
+        const backoff = Math.min(WEB_SEARCH_RETRY_BASE_MS * (2 ** (attempts - 1)), WEB_SEARCH_RETRY_MAX_MS)
+        const retryDelay = backoff + Math.floor(Math.random() * (Math.floor(backoff / 4) + 1))
+        await this.waitForRetry(retryDelay, signal)
+
+        const nextAccount = pickNextCandidate(currentAccount.id)
+        if (!nextAccount) break
+        currentAccountId = nextAccount.id
+      }
+    }
+
+    throw lastError
+  }
+
+  private async sendWebSearchSse(
+    res: http.ServerResponse,
+    request: ClaudeRequest,
+    query: string,
+    results: KiroWebSearchResult[]
+  ): Promise<number> {
+    const messageId = `msg_${uuidv4().replace(/-/g, '').slice(0, WEB_SEARCH_MESSAGE_ID_LENGTH)}`
+    const serverToolUseId = `srvtoolu_${uuidv4().replace(/-/g, '')}`
+    const inputTokens = Math.max(1, Math.round(JSON.stringify({
+      messages: request.messages,
+      system: request.system,
+      tools: request.tools
+    }).length / 3))
+    const summary = this.buildWebSearchSummary(query, results)
+    const outputTokens = Math.ceil(Buffer.byteLength(summary, 'utf-8') / 4)
+    const write = async (type: Parameters<typeof createClaudeStreamEvent>[0], data?: Record<string, unknown>): Promise<void> => {
+      this.throwIfResponseClosed(res)
+      const event = createClaudeStreamEvent(type, data)
+      res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`)
+      await this.waitForDrain(res)
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    })
+    await write('message_start', {
+      message: {
+        id: messageId,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: request.model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        }
+      }
+    })
+    await write('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+    await write('content_block_delta', { index: 0, delta: { type: 'text_delta', text: `I'll search for "${query}".` } })
+    await write('content_block_stop', { index: 0 })
+    await write('content_block_start', {
+      index: 1,
+      content_block: {
+        type: 'server_tool_use',
+        id: serverToolUseId,
+        name: WEB_SEARCH_TOOL_NAME,
+        input: { query }
+      }
+    })
+    await write('content_block_stop', { index: 1 })
+    await write('content_block_start', {
+      index: 2,
+      content_block: {
+        type: 'web_search_tool_result',
+        tool_use_id: serverToolUseId,
+        content: results
+      }
+    })
+    await write('content_block_stop', { index: 2 })
+    await write('content_block_start', { index: 3, content_block: { type: 'text', text: '' } })
+    for (const characters of chunkCodePoints(summary, WEB_SEARCH_SUMMARY_CHUNK_SIZE)) {
+      await write('content_block_delta', { index: 3, delta: { type: 'text_delta', text: characters } })
+    }
+    await write('content_block_stop', { index: 3 })
+    await write('message_delta', {
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: {
+        output_tokens: outputTokens,
+        server_tool_use: { web_search_requests: 1 }
+      }
+    })
+    await write('message_stop')
+    res.end()
+    return outputTokens
+  }
+
   private async handleClaudeMessages(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal, isClaudeCode: boolean = false): Promise<void> {
     let request: ClaudeRequest
     try {
@@ -2867,7 +3114,7 @@ export class ProxyServer {
     const startTime = Date.now()
 
     this.recordNewRequest()
-    this.events.onRequest?.({ path: '/v1/messages', method: 'POST' })
+    this.notifyEventSafely(() => this.events.onRequest?.({ path: '/v1/messages', method: 'POST' }))
 
     let processedRequest: ClaudeRequest
     try {
@@ -2876,6 +3123,17 @@ export class ProxyServer {
       if (this.isAbortError(error, signal)) return
       this.recordRequestFailed()
       const message = error instanceof Error ? error.message : 'Invalid request'
+      this.sendError(res, 400, message, 'anthropic')
+      this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 400, error: message })
+      this.recordRequest({ path: '/v1/messages', model: request.model, responseTime: Date.now() - startTime, success: false, error: message })
+      return
+    }
+
+    const isWebSearch = this.isWebSearchRequest(request, processedRequest)
+    const webSearchQuery = isWebSearch ? this.extractWebSearchQuery(request) : null
+    if (isWebSearch && !webSearchQuery) {
+      this.recordRequestFailed()
+      const message = 'A non-empty web search query is required'
       this.sendError(res, 400, message, 'anthropic')
       this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 400, error: message })
       this.recordRequest({ path: '/v1/messages', model: request.model, responseTime: Date.now() - startTime, success: false, error: message })
@@ -2898,7 +3156,79 @@ export class ProxyServer {
       return
     }
 
-    this.events.onRequest?.({ path: '/v1/messages', method: 'POST', accountId: account.id })
+    this.notifyEventSafely(() => this.events.onRequest?.({ path: '/v1/messages', method: 'POST', accountId: account.id }))
+
+    if (isWebSearch && webSearchQuery) {
+      let settled = false
+      const settle = (success: boolean, settledAccount: ProxyAccount, error?: string): void => {
+        if (settled) return
+        settled = true
+        const responseTime = Date.now() - startTime
+        if (success) {
+          this.recordRequestSuccess()
+          this.accountPool.recordSuccess(settledAccount.id, 0)
+          this.recordRequest({
+            path: '/v1/messages',
+            model: request.model,
+            accountId: settledAccount.id,
+            inputTokens: 0,
+            outputTokens: 0,
+            responseTime,
+            success: true
+          })
+          return
+        }
+
+        this.recordRequestFailed()
+        this.recordRequest({
+          path: '/v1/messages',
+          model: request.model,
+          accountId: settledAccount.id,
+          responseTime,
+          success: false,
+          error
+        })
+      }
+
+      try {
+        const { results, account: usedAccount } = await this.callWebSearchWithRetry(account, webSearchQuery, matchedApiKey, signal)
+        this.throwIfResponseClosed(res, signal)
+        await this.sendWebSearchSse(res, processedRequest, webSearchQuery, results)
+        settle(true, usedAccount)
+        if (matchedApiKey) {
+          this.recordApiKeyUsage(matchedApiKey.id, 0, 0, 0, request.model, '/v1/messages')
+        }
+        this.notifyEventSafely(() => this.events.onResponse?.({
+          path: '/v1/messages',
+          model: request.model,
+          status: 200,
+          tokens: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          responseTime: Date.now() - startTime
+        }))
+      } catch (error) {
+        if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
+          settle(false, account, 'Web search request aborted')
+          return
+        }
+        if (res.headersSent) {
+          settle(false, account, 'Web search response interrupted')
+          res.destroy(error instanceof Error ? error : undefined)
+          return
+        }
+        const safeMessage = 'Web search is unavailable'
+        settle(false, account, safeMessage)
+        this.sendError(res, 502, safeMessage, 'anthropic')
+        this.notifyEventSafely(() => this.events.onResponse?.({
+          path: '/v1/messages',
+          model: request.model,
+          status: 502,
+          error: safeMessage
+        }))
+      }
+      return
+    }
 
     try {
       const toolNameRegistry = new ToolNameRegistry()

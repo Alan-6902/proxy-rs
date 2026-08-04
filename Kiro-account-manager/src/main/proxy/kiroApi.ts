@@ -2233,6 +2233,144 @@ function getQServiceEndpoint(region?: string): string {
   return 'https://q.us-east-1.amazonaws.com'
 }
 
+const AWS_REGION_PATTERN = /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d+$/
+const WEB_SEARCH_MCP_PATH = '/mcp'
+
+export class KiroMcpWebSearchError extends Error {
+  constructor(
+    readonly statusCode?: number,
+    readonly retryable: boolean = false
+  ) {
+    super(statusCode ? `Web search MCP request failed (HTTP ${statusCode})` : 'Web search MCP request failed')
+    this.name = 'KiroMcpWebSearchError'
+  }
+}
+
+export interface KiroWebSearchResult {
+  type: 'web_search_result'
+  title: string
+  url: string
+  encrypted_content: string
+  page_age: string | null
+}
+
+function getValidatedAwsRegion(region?: string): string {
+  const normalized = region?.trim().toLowerCase()
+  return normalized && AWS_REGION_PATTERN.test(normalized) ? normalized : 'us-east-1'
+}
+
+function formatWebSearchPageAge(publishedDate: unknown): string | null {
+  const timestamp = typeof publishedDate === 'number'
+    ? publishedDate
+    : typeof publishedDate === 'string' && /^\d+$/.test(publishedDate) ? Number(publishedDate) : NaN
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null
+
+  const date = new Date(timestamp)
+  if (!Number.isFinite(date.getTime())) return null
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'UTC',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric'
+    }).format(date)
+  } catch {
+    return null
+  }
+}
+
+function createWebSearchRequestId(): string {
+  const compact = uuidv4().replace(/-/g, '')
+  return `web_search_tooluse_${compact.slice(0, 22)}_${Date.now()}_${compact.slice(22, 30)}`
+}
+
+export async function callKiroMcpWebSearch(
+  account: ProxyAccount,
+  query: string,
+  signal?: AbortSignal
+): Promise<KiroWebSearchResult[]> {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-amz-user-agent': getKiroAmzUserAgent(),
+    'user-agent': getKiroUserAgent(),
+    'amz-sdk-invocation-id': uuidv4(),
+    'amz-sdk-request': 'attempt=1; max=3',
+    'Authorization': `Bearer ${account.accessToken}`
+  }
+  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
+    headers.TokenType = 'EXTERNAL_IDP'
+  }
+  const profileArn = account.profileArn?.trim()
+  if (profileArn && !isPlaceholderProfileArn(profileArn)) headers['x-amzn-kiro-profile-arn'] = profileArn
+
+  const endpoint = `https://q.${getValidatedAwsRegion(account.region)}.amazonaws.com${WEB_SEARCH_MCP_PATH}`
+  const requestId = createWebSearchRequestId()
+  const body = {
+    id: requestId,
+    jsonrpc: '2.0',
+    method: 'tools/call',
+    params: { name: 'web_search', arguments: { query } }
+  }
+
+  let response: Response
+  try {
+    response = await fetchWithProxy(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal }, account)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    throw new KiroMcpWebSearchError(undefined, true)
+  }
+  if (!response.ok) throw new KiroMcpWebSearchError(response.status, response.status === 408 || response.status === 429 || response.status >= 500)
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new KiroMcpWebSearchError()
+  }
+  if (!payload || typeof payload !== 'object') throw new KiroMcpWebSearchError()
+
+  const responsePayload = payload as {
+    id?: unknown
+    jsonrpc?: unknown
+    result?: unknown
+    error?: unknown
+  }
+  if (responsePayload.jsonrpc !== '2.0' || responsePayload.id !== requestId || responsePayload.error !== undefined) {
+    throw new KiroMcpWebSearchError()
+  }
+
+  const result = responsePayload.result
+  if (!result || typeof result !== 'object') throw new KiroMcpWebSearchError()
+  const resultPayload = result as { isError?: unknown; content?: unknown }
+  if (resultPayload.isError || !Array.isArray(resultPayload.content)) throw new KiroMcpWebSearchError()
+
+  const firstContent = resultPayload.content[0]
+  if (!firstContent || typeof firstContent !== 'object') throw new KiroMcpWebSearchError()
+  const firstText = firstContent as { type?: unknown; text?: unknown }
+  if (firstText.type !== 'text' || typeof firstText.text !== 'string') throw new KiroMcpWebSearchError()
+
+  let searchPayload: { results?: unknown }
+  try {
+    searchPayload = JSON.parse(firstText.text) as { results?: unknown }
+  } catch {
+    throw new KiroMcpWebSearchError()
+  }
+  if (!Array.isArray(searchPayload.results)) throw new KiroMcpWebSearchError()
+
+  return searchPayload.results.map(item => {
+    if (!item || typeof item !== 'object') throw new KiroMcpWebSearchError()
+    const source = item as Record<string, unknown>
+    if (typeof source.title !== 'string' || typeof source.url !== 'string') throw new KiroMcpWebSearchError()
+    return {
+      type: 'web_search_result',
+      title: source.title,
+      url: source.url,
+      encrypted_content: typeof source.snippet === 'string' ? source.snippet : '',
+      page_age: formatWebSearchPageAge(source.publishedDate)
+    }
+  })
+}
+
 // 根据账号区域获取 CodeWhisperer Runtime 端点
 function getCodeWhispererEndpoint(region?: string): string {
   if (region?.startsWith('eu-')) return 'https://codewhisperer.eu-central-1.amazonaws.com'

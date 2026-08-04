@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeCodeStreamBuffer } from '../../src/main/proxy/claudeCodeStreamBuffer'
 
-const { streamMock, requestMock } = vi.hoisted(() => ({ streamMock: vi.fn(), requestMock: vi.fn() }))
+const { streamMock, requestMock, webSearchMock } = vi.hoisted(() => ({ streamMock: vi.fn(), requestMock: vi.fn(), webSearchMock: vi.fn() }))
 
 vi.mock('../../src/main/proxy/kiroApi', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/main/proxy/kiroApi')>(),
   callKiroApi: requestMock,
-  callKiroApiStream: streamMock
+  callKiroApiStream: streamMock,
+  callKiroMcpWebSearch: webSearchMock
 }))
 
 import { ProxyServer } from '../../src/main/proxy/proxyServer'
-import { mapModelId } from '../../src/main/proxy/kiroApi'
+import { KiroMcpWebSearchError, mapModelId } from '../../src/main/proxy/kiroApi'
 import { getModelContextLength, setModelContextWindow } from '../../src/main/proxy/tokenCounter'
 import { makeApiKey } from '../helpers/proxyFixtures'
 
@@ -24,6 +25,7 @@ describe('ProxyServer Claude Code 兼容', () => {
   beforeEach(async () => {
     streamMock.mockReset()
     requestMock.mockReset()
+    webSearchMock.mockReset()
     server = new ProxyServer({
       host: LOOPBACK_HOST,
       port: 0,
@@ -255,6 +257,393 @@ describe('ProxyServer Claude Code 兼容', () => {
     expect(output).toContain('event: message_start')
     expect(output).toContain('fallback')
     expect(output.split('\n\n')[0]).not.toContain('"input_tokens":999')
+  })
+
+  it('WebSearch 在 MCP 成功后合成精确 Anthropic SSE，stream:false 仍保持流式', async () => {
+    webSearchMock.mockResolvedValue([{
+      type: 'web_search_result',
+      title: '搜索标题',
+      url: 'https://example.test/result',
+      encrypted_content: '这是一段搜索摘要',
+      page_age: 'January 1, 2024'
+    }])
+
+    const response = await request('/cc/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: false,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: 中文 query' }]
+    })
+    const output = await response.text()
+    const events = output.trim().split('\n\n').map(frame => JSON.parse(frame.split('\n').find(line => line.startsWith('data: '))!.slice(6)))
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(webSearchMock).toHaveBeenCalledTimes(1)
+    expect(events.map(event => event.type)).toEqual([
+      'message_start', 'content_block_start', 'content_block_delta', 'content_block_stop',
+      'content_block_start', 'content_block_stop', 'content_block_start', 'content_block_stop',
+      'content_block_start', ...events.slice(9, -3).map(() => 'content_block_delta'),
+      'content_block_stop', 'message_delta', 'message_stop'
+    ])
+    expect(events[0].message.id).toMatch(/^msg_[a-f0-9]{24}$/)
+    expect(events[2].delta.text).toBe(`I'll search for "中文 query".`)
+    expect(events[4].content_block).toMatchObject({ type: 'server_tool_use', name: 'web_search', input: { query: '中文 query' } })
+    expect(events[4].content_block.id).toMatch(/^srvtoolu_[a-f0-9]{32}$/)
+    expect(events[6].content_block).toMatchObject({
+      type: 'web_search_tool_result',
+      tool_use_id: events[4].content_block.id,
+      content: [{ type: 'web_search_result', title: '搜索标题', url: 'https://example.test/result', encrypted_content: '这是一段搜索摘要', page_age: 'January 1, 2024' }]
+    })
+    const summaryDeltas = events.filter(event => event.type === 'content_block_delta' && event.index === 3)
+    expect(summaryDeltas.map(event => event.delta.text).join('')).toBe('Here are the search results for "中文 query":\n\n1. **搜索标题**\n   这是一段搜索摘要\n   Source: https://example.test/result\n\nPlease note that these are web search results and may not be fully accurate or up-to-date.')
+    expect(summaryDeltas.every(event => Array.from(event.delta.text).length <= 100)).toBe(true)
+    expect(events[events.length - 2].usage).toMatchObject({ server_tool_use: { web_search_requests: 1 } })
+    expect(requestMock).not.toHaveBeenCalled()
+    expect(streamMock).not.toHaveBeenCalled()
+  })
+
+  it('WebSearch 对 Unicode 摘要按 200 个 codepoint 截断并精确计数 SSE token', async () => {
+    const query = 'unicode-summary'
+    const longSnippet = '😀'.repeat(201)
+    const tools = [{ name: 'web_search', input_schema: { type: 'object' } }]
+    const messages = [{ role: 'user', content: `Perform a web search for the query: ${query}` }]
+    webSearchMock.mockResolvedValue([{
+      type: 'web_search_result',
+      title: 'Unicode result',
+      url: 'https://example.test/unicode',
+      encrypted_content: longSnippet,
+      page_age: null
+    }])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: false,
+      tools,
+      messages
+    })
+    const events = (await response.text()).trim().split('\n\n')
+      .map(frame => JSON.parse(frame.split('\n').find(line => line.startsWith('data: '))!.slice(6)))
+    const summary = events.filter(event => event.type === 'content_block_delta' && event.index === 3)
+      .map(event => event.delta.text).join('')
+    const toolUse = events.find(event => event.type === 'content_block_start' && event.index === 1).content_block
+    const toolResult = events.find(event => event.type === 'content_block_start' && event.index === 2).content_block
+    const expectedSnippet = `${'😀'.repeat(200)}...`
+    const expectedSummary = `Here are the search results for "${query}":\n\n1. **Unicode result**\n   ${expectedSnippet}\n   Source: https://example.test/unicode\n\nPlease note that these are web search results and may not be fully accurate or up-to-date.`
+
+    expect(response.status).toBe(200)
+    expect(summary).toBe(expectedSummary)
+    expect(Array.from(expectedSnippet).length).toBe(203)
+    expect(events[0].message.usage.input_tokens).toBe(Math.max(1, Math.round(JSON.stringify({ messages, tools }).length / 3)))
+    expect(events[events.length - 2].usage.output_tokens).toBe(Math.ceil(Buffer.byteLength(expectedSummary, 'utf-8') / 4))
+    expect(toolUse).toMatchObject({ type: 'server_tool_use', name: 'web_search', input: { query } })
+    expect(toolResult).toMatchObject({ type: 'web_search_tool_result', tool_use_id: toolUse.id })
+  })
+
+  it('WebSearch 空结果仍返回确定 SSE，且仅精确的原始和处理后工具集合触发', async () => {
+    webSearchMock.mockResolvedValue([])
+    const empty = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: false,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: empty' }]
+    })
+    const emptyOutput = await empty.text()
+    const emptyEvents = emptyOutput.trim().split('\n\n').map(frame => JSON.parse(frame.split('\n').find(line => line.startsWith('data: '))!.slice(6)))
+    const emptySummary = emptyEvents
+      .filter(event => event.type === 'content_block_delta' && event.index === 3)
+      .map(event => event.delta.text)
+      .join('')
+    expect(empty.status).toBe(200)
+    expect(emptySummary).toBe('Here are the search results for "empty":\n\nPlease note that these are web search results and may not be fully accurate or up-to-date.')
+
+    requestMock.mockResolvedValue({ content: 'ordinary', toolUses: [], usage: USAGE })
+    const multiTool = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: false,
+      tool_choice: { type: 'tool', name: 'web_search' },
+      tools: [
+        { name: 'web_search', input_schema: { type: 'object' } },
+        { name: 'other_tool', input_schema: { type: 'object' } }
+      ],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: should not trigger' }]
+    })
+    expect(multiTool.status).toBe(200)
+    expect(webSearchMock).toHaveBeenCalledTimes(1)
+    expect(requestMock).toHaveBeenCalledTimes(1)
+
+    const disabled = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      stream: false,
+      tool_choice: { type: 'none' },
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: disabled' }]
+    })
+    expect(disabled.status).toBe(200)
+    expect(webSearchMock).toHaveBeenCalledTimes(1)
+    expect(requestMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('WebSearch 拒绝空 query，并在 MCP 失败时在写响应头前返回安全 502', async () => {
+    const empty = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query:    ' }]
+    })
+    expect(empty.status).toBe(400)
+    expect(webSearchMock).not.toHaveBeenCalled()
+
+    webSearchMock.mockRejectedValue(new KiroMcpWebSearchError())
+    const failed = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: do-not-leak' }]
+    })
+    expect(failed.status).toBe(502)
+    expect(failed.headers.get('content-type')).toContain('application/json')
+    const payload = await failed.json()
+    expect(payload.error.message).toBe('Web search is unavailable')
+    expect(JSON.stringify(payload)).not.toContain('do-not-leak')
+  })
+
+  it('WebSearch 重试后以实际成功账号计数，API Key 用量保持零 token', async () => {
+    server.getAccountPool().addAccount({ id: 'account-2', accessToken: 'second-token' })
+    webSearchMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(429, true))
+      .mockResolvedValueOnce([])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: retry' }]
+    })
+    expect(response.status).toBe(200)
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-2'])
+    const apiKey = server.getConfig().apiKeys![0]
+    expect(apiKey.usage.totalInputTokens).toBe(0)
+    expect(apiKey.usage.totalOutputTokens).toBe(0)
+    expect(server.getAccountPool().getStats().accounts.get('account-2')).toMatchObject({ requests: 1, tokens: 0 })
+  })
+
+  it('WebSearch 不越过分组、禁用或封禁账号', async () => {
+    server.updateConfig({ enableMultiAccount: true, multiAccountSelectionMode: 'groups', multiAccountGroupIds: ['group-a'] })
+    server.getAccountPool().addAccount({ id: 'disabled', accessToken: 'disabled-token', groupId: 'group-a' })
+    server.getAccountPool().updateAccount('disabled', { isAvailable: false })
+    server.getAccountPool().addAccount({ id: 'suspended', accessToken: 'suspended-token', groupId: 'group-a', suspendedAt: Date.now() })
+    server.getAccountPool().addAccount({ id: 'other-group', accessToken: 'other-token', groupId: 'group-b' })
+    server.getAccountPool().addAccount({ id: 'allowed', accessToken: 'allowed-token', groupId: 'group-a' })
+    webSearchMock.mockResolvedValue([])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: scoped' }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['allowed'])
+  })
+
+  it('WebSearch 对 402 实时排除账号，并对认证错误每账号只刷新一次', async () => {
+    server.updateConfig({ enableMultiAccount: true })
+    server.getAccountPool().addAccount({ id: 'account-2', accessToken: 'second-token' })
+    server.getAccountPool().addAccount({ id: 'account-3', accessToken: 'third-token' })
+    const refreshToken = vi.spyOn(server as unknown as {
+      refreshToken: (account: unknown, signal?: AbortSignal) => Promise<boolean>
+    }, 'refreshToken').mockResolvedValue(true)
+    webSearchMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(402, false))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(401, false))
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(403, false))
+      .mockResolvedValueOnce([])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: retry-auth' }]
+    })
+
+    expect(response.status).toBe(200)
+    expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-2', 'account-2', 'account-3'])
+    expect(refreshToken).toHaveBeenCalledTimes(1)
+    refreshToken.mockRestore()
+  })
+
+  it('WebSearch 对瞬态错误执行可控退避并在单账号上封顶', async () => {
+    const waitForRetry = vi.spyOn(server as unknown as {
+      waitForRetry: (ms: number, signal?: AbortSignal) => Promise<void>
+    }, 'waitForRetry').mockResolvedValue()
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.99)
+    webSearchMock.mockRejectedValue(new KiroMcpWebSearchError(500, true))
+
+    try {
+      const response = await request('/v1/messages', {
+        model: 'claude-sonnet-4',
+        max_tokens: 16,
+        tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: 'Perform a web search for the query: retry-cap' }]
+      })
+
+      expect(response.status).toBe(502)
+      expect(webSearchMock).toHaveBeenCalledTimes(3)
+      expect(waitForRetry.mock.calls.map(call => call[0])).toEqual([250, 499])
+    } finally {
+      random.mockRestore()
+      waitForRetry.mockRestore()
+    }
+  })
+
+  it('WebSearch 在非多账号模式也会按 API Key 绑定执行自动切号', async () => {
+    const apiKeyId = server.getConfig().apiKeys![0].id
+    server.getAccountPool().addAccount({ id: 'bound', accessToken: 'bound-token' })
+    server.getAccountPool().addAccount({ id: 'unbound', accessToken: 'unbound-token' })
+    server.updateConfig({
+      enableMultiAccount: false,
+      autoSwitchOnQuotaExhausted: true,
+      apiKeyAccountBindings: { [apiKeyId]: ['account-1', 'bound'] }
+    })
+    const waitForRetry = vi.spyOn(server as unknown as {
+      waitForRetry: (ms: number, signal?: AbortSignal) => Promise<void>
+    }, 'waitForRetry').mockResolvedValue()
+    webSearchMock
+      .mockRejectedValueOnce(new KiroMcpWebSearchError(500, true))
+      .mockResolvedValueOnce([])
+
+    try {
+      const response = await request('/v1/messages', {
+        model: 'claude-sonnet-4',
+        max_tokens: 16,
+        tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: 'Perform a web search for the query: bound-auto-switch' }]
+      })
+
+      expect(response.status).toBe(200)
+      expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'bound'])
+    } finally {
+      waitForRetry.mockRestore()
+    }
+  })
+
+  it('WebSearch 的不可用账号不会扩大重试上限', async () => {
+    const apiKeyId = server.getConfig().apiKeys![0].id
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'disabled', accessToken: 'disabled-token' })
+    pool.updateAccount('disabled', { isAvailable: false })
+    pool.addAccount({ id: 'suspended', accessToken: 'suspended-token', suspendedAt: Date.now() })
+    pool.addAccount({ id: 'quota', accessToken: 'quota-token', quotaExhaustedAt: Date.now() })
+    pool.addAccount({ id: 'cooldown', accessToken: 'cooldown-token', cooldownUntil: Date.now() + 60_000 })
+    server.updateConfig({
+      enableMultiAccount: false,
+      autoSwitchOnQuotaExhausted: true,
+      apiKeyAccountBindings: { [apiKeyId]: ['account-1', 'disabled', 'suspended', 'quota', 'cooldown'] }
+    })
+    const waitForRetry = vi.spyOn(server as unknown as {
+      waitForRetry: (ms: number, signal?: AbortSignal) => Promise<void>
+    }, 'waitForRetry').mockResolvedValue()
+    webSearchMock.mockRejectedValue(new KiroMcpWebSearchError(500, true))
+
+    try {
+      const response = await request('/v1/messages', {
+        model: 'claude-sonnet-4',
+        max_tokens: 16,
+        tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: 'Perform a web search for the query: live-only' }]
+      })
+
+      expect(response.status).toBe(502)
+      expect(webSearchMock.mock.calls.map(call => call[0].id)).toEqual(['account-1', 'account-1', 'account-1'])
+      expect(waitForRetry).toHaveBeenCalledTimes(2)
+    } finally {
+      waitForRetry.mockRestore()
+    }
+  })
+
+  it('WebSearch 的多账号瞬态重试全局与单账号次数均有上限', async () => {
+    const pool = server.getAccountPool()
+    pool.addAccount({ id: 'account-2', accessToken: 'second-token' })
+    pool.addAccount({ id: 'account-3', accessToken: 'third-token' })
+    pool.addAccount({ id: 'account-4', accessToken: 'fourth-token' })
+    server.updateConfig({ enableMultiAccount: true })
+    const waitForRetry = vi.spyOn(server as unknown as {
+      waitForRetry: (ms: number, signal?: AbortSignal) => Promise<void>
+    }, 'waitForRetry').mockResolvedValue()
+    webSearchMock.mockRejectedValue(new KiroMcpWebSearchError(500, true))
+
+    try {
+      const response = await request('/v1/messages', {
+        model: 'claude-sonnet-4',
+        max_tokens: 16,
+        tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: 'Perform a web search for the query: bounded-round-robin' }]
+      })
+      const callsByAccount = webSearchMock.mock.calls.reduce<Record<string, number>>((counts, [account]) => {
+        counts[account.id] = (counts[account.id] || 0) + 1
+        return counts
+      }, {})
+
+      expect(response.status).toBe(502)
+      expect(webSearchMock).toHaveBeenCalledTimes(9)
+      expect(Object.values(callsByAccount).every(count => count <= 3)).toBe(true)
+      expect(waitForRetry).toHaveBeenCalledTimes(8)
+    } finally {
+      waitForRetry.mockRestore()
+    }
+  })
+
+  it('WebSearch 对 400 立即失败且不等待重试', async () => {
+    const waitForRetry = vi.spyOn(server as unknown as {
+      waitForRetry: (ms: number, signal?: AbortSignal) => Promise<void>
+    }, 'waitForRetry').mockResolvedValue()
+    webSearchMock.mockRejectedValue(new KiroMcpWebSearchError(400, false))
+
+    try {
+      const response = await request('/v1/messages', {
+        model: 'claude-sonnet-4',
+        max_tokens: 16,
+        tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: 'Perform a web search for the query: no-retry' }]
+      })
+
+      expect(response.status).toBe(502)
+      expect(webSearchMock).toHaveBeenCalledTimes(1)
+      expect(waitForRetry).not.toHaveBeenCalled()
+    } finally {
+      waitForRetry.mockRestore()
+    }
+  })
+
+  it('WebSearch 隔离统计和配置事件 hook 异常并只结算一次', async () => {
+    const events = (server as unknown as {
+      events: { onRequestStatsUpdate?: () => void; onConfigChanged?: () => void }
+    }).events
+    events.onRequestStatsUpdate = () => { throw new Error('stats hook failed') }
+    events.onConfigChanged = () => { throw new Error('config hook failed') }
+    webSearchMock.mockResolvedValue([])
+
+    const response = await request('/v1/messages', {
+      model: 'claude-sonnet-4',
+      max_tokens: 16,
+      tools: [{ name: 'web_search', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'Perform a web search for the query: hooks' }]
+    })
+
+    expect(response.status).toBe(200)
+    const stats = server.getStats()
+    expect(stats.totalRequests).toBe(1)
+    expect(stats.successRequests).toBe(1)
+    expect(stats.failedRequests).toBe(0)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect((server as unknown as { activeRequests: Set<unknown> }).activeRequests.size).toBe(0)
   })
 })
 

@@ -1,7 +1,6 @@
 export { HomePage } from './HomePage'
 export { AboutPage } from './AboutPage'
 export { SettingsPage } from './SettingsPage'
-export { KiroSettingsPage } from './KiroSettingsPage'
 export { ProxyPage } from './ProxyPage'
 export { ProxyPoolPage } from './ProxyPoolPage'
 export { WebhooksPage } from './WebhooksPage'

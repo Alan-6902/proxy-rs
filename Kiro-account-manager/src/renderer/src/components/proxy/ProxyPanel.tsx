@@ -84,9 +84,8 @@ interface ProxyConfig {
   multiAccountSelectionMode?: 'all' | 'groups'
   multiAccountGroupIds?: string[]
   modelMappings?: ModelMappingRule[]
-  // Agent 模式 + Steering
+  // Agent 模式
   agentMode?: 'vibe' | 'spec'
-  workspacePath?: string
   // v1.8 安全 / 限流 / 可观测
   maxRequestBodyBytes?: number
   allowedIPs?: string[]
@@ -1068,7 +1067,7 @@ export function ProxyPanel() {
                   />
                 </div>
               </div>
-              {/* Agent Mode + Workspace Path（Steering 文件注入） */}
+              {/* Agent Mode */}
               <div className="col-span-3 grid grid-cols-3 gap-x-3 items-end">
                 <div className="space-y-1.5">
                   <Label className="text-xs" title={isEn ? 'Agent mode sent to Kiro backend. Vibe=chat-first, Spec=plan-first.' : 'Kiro 后端 Agent 模式。Vibe=对话优先，Spec=计划优先。'}>{isEn ? 'Agent Mode' : 'Agent 模式'}</Label>
@@ -1084,21 +1083,6 @@ export function ProxyPanel() {
                       window.api.proxyUpdateConfig({ agentMode: mode })
                     }}
                     placeholder={isEn ? 'Select mode' : '选择模式'}
-                  />
-                </div>
-                <div className="col-span-2 space-y-1.5">
-                  <Label className="text-xs" title={isEn ? 'Workspace path for loading .kiro/steering/*.md rules into system prompt' : '工作区路径，用于加载 .kiro/steering/*.md 规则注入到 system prompt'}>{isEn ? 'Workspace Path (Steering)' : '工作区路径 (Steering)'}</Label>
-                  <Input
-                    value={config.workspacePath || ''}
-                    onChange={(e) => {
-                      const p = e.target.value
-                      setConfig(prev => ({ ...prev, workspacePath: p || undefined }))
-                    }}
-                    onBlur={() => {
-                      window.api.proxyUpdateConfig({ workspacePath: config.workspacePath || undefined })
-                    }}
-                    placeholder={isEn ? 'e.g. C:/Projects/my-app (optional)' : '如 C:/Projects/my-app（可选）'}
-                    className="h-9"
                   />
                 </div>
               </div>

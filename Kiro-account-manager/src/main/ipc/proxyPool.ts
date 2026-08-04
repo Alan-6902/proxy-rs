@@ -1,7 +1,7 @@
 // 代理池相关 IPC：验活 + 代理链分阶段诊断
 //
 // 这两个 handler 完全独立、没有外部状态依赖，从 main/index.ts 拆出来作为模块化拆分的"种子"。
-// 后续可按相同模式继续拆分（proxy / register / kiro-settings 等）。
+// 后续可按相同模式继续拆分（proxy / register 等）。
 
 import { ipcMain } from 'electron'
 import { fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'

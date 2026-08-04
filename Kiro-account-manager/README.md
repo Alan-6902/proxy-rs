@@ -39,11 +39,6 @@
 - Auto switch to available account when balance is low
 - Configurable balance threshold and check interval
 
-### ⚙️ Kiro IDE Settings Sync
-- Sync Kiro IDE settings (Agent mode, Model, MCP servers, etc.)
-- Edit MCP server configurations
-- Manage user rules (Steering files)
-
 ### 🌐 Multi-Language Support
 - Full English/Chinese bilingual interface
 - Auto-detect system language or manual selection
@@ -88,9 +83,6 @@
 
 ### Settings
 ![Settings](resources/设置.png)
-
-### Kiro IDE Settings
-![Kiro Settings](resources/Kiro%20设置.png)
 
 ### Theme Colors
 ![Theme Colors](resources/主题色.png)

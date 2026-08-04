@@ -44,7 +44,6 @@ const en = {
   nav: {
     home: 'Home',
     accounts: 'Accounts',
-    kiroSettings: 'Kiro Settings',
     proxy: 'API Proxy',
     proxyPool: 'Proxy Pool',
     webhooks: 'Webhooks',

@@ -485,56 +485,8 @@ interface KiroApi {
   onUpdateDownloaded: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => () => void
   onUpdateError: (callback: (error: string) => void) => () => void
 
-  // ============ Kiro 设置管理 API ============
-
-  // 获取 Kiro 设置
-  getKiroSettings: () => Promise<{
-    settings?: Record<string, unknown>
-    mcpConfig?: { mcpServers: Record<string, unknown> }
-    steeringFiles?: string[]
-    error?: string
-  }>
-
-  // 获取 Kiro 可用模型列表
-  getKiroAvailableModels: () => Promise<{
-    models: Array<{ id: string; name: string; description: string }>
-    error?: string
-  }>
-
-  // 保存 Kiro 设置
-  saveKiroSettings: (settings: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>
-
-  // 打开 Kiro MCP 配置文件
-  openKiroMcpConfig: (type: 'user' | 'workspace') => Promise<{ success: boolean; error?: string }>
-
-  // 打开 Kiro Steering 目录
-  openKiroSteeringFolder: () => Promise<{ success: boolean; error?: string }>
-
-  // 打开 Kiro settings.json 文件
-  openKiroSettingsFile: () => Promise<{ success: boolean; error?: string }>
-
-  // 打开指定的 Steering 文件
-  openKiroSteeringFile: (filename: string) => Promise<{ success: boolean; error?: string }>
-
-  // 创建默认的 rules.md 文件
-  createKiroDefaultRules: () => Promise<{ success: boolean; error?: string }>
-
-  // 读取 Steering 文件内容
-  readKiroSteeringFile: (filename: string) => Promise<{ success: boolean; content?: string; error?: string }>
-
-  // 保存 Steering 文件内容
-  saveKiroSteeringFile: (filename: string, content: string) => Promise<{ success: boolean; error?: string }>
-
-  // 删除 Steering 文件
-  deleteKiroSteeringFile: (filename: string) => Promise<{ success: boolean; error?: string }>
-
-  // ============ MCP 服务器管理 ============
-
-  // 保存 MCP 服务器配置
-  saveMcpServer: (name: string, config: { command: string; args?: string[]; env?: Record<string, string> }, oldName?: string) => Promise<{ success: boolean; error?: string }>
-
-  // 删除 MCP 服务器
-  deleteMcpServer: (name: string) => Promise<{ success: boolean; error?: string }>
+  // 获取当前账号可用模型（诊断功能使用）
+  getKiroAvailableModels: () => Promise<{ models: Array<{ id: string; name: string; description: string }>; error?: string }>
 
   // ============ Kiro API 反代服务器 ============
 

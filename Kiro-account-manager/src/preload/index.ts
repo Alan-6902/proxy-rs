@@ -476,81 +476,9 @@ const api = {
     return () => ipcRenderer.removeListener('update-error', handler)
   },
 
-  // ============ Kiro 设置管理 ============
-
-  // 获取 Kiro 设置
-  getKiroSettings: (): Promise<{
-    settings?: Record<string, unknown>
-    mcpConfig?: { mcpServers: Record<string, unknown> }
-    steeringFiles?: string[]
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('get-kiro-settings')
-  },
-
-  // 获取 Kiro 可用模型列表
-  getKiroAvailableModels: (): Promise<{
-    models: Array<{ id: string; name: string; description: string }>
-    error?: string
-  }> => {
+  // 获取当前账号可用模型（诊断功能使用）
+  getKiroAvailableModels: (): Promise<{ models: Array<{ id: string; name: string; description: string }>; error?: string }> => {
     return ipcRenderer.invoke('get-kiro-available-models')
-  },
-
-  // 保存 Kiro 设置
-  saveKiroSettings: (settings: Record<string, unknown>): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('save-kiro-settings', settings)
-  },
-
-  // 打开 Kiro MCP 配置文件
-  openKiroMcpConfig: (type: 'user' | 'workspace'): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('open-kiro-mcp-config', type)
-  },
-
-  // 打开 Kiro Steering 目录
-  openKiroSteeringFolder: (): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('open-kiro-steering-folder')
-  },
-
-  // 打开 Kiro settings.json 文件
-  openKiroSettingsFile: (): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('open-kiro-settings-file')
-  },
-
-  // 打开指定的 Steering 文件
-  openKiroSteeringFile: (filename: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('open-kiro-steering-file', filename)
-  },
-
-  // 创建默认的 rules.md 文件
-  createKiroDefaultRules: (): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('create-kiro-default-rules')
-  },
-
-  // 读取 Steering 文件内容
-  readKiroSteeringFile: (filename: string): Promise<{ success: boolean; content?: string; error?: string }> => {
-    return ipcRenderer.invoke('read-kiro-steering-file', filename)
-  },
-
-  // 保存 Steering 文件内容
-  saveKiroSteeringFile: (filename: string, content: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('save-kiro-steering-file', filename, content)
-  },
-
-  // 删除 Steering 文件
-  deleteKiroSteeringFile: (filename: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('delete-kiro-steering-file', filename)
-  },
-
-  // ============ MCP 服务器管理 ============
-
-  // 保存 MCP 服务器配置
-  saveMcpServer: (name: string, config: { command: string; args?: string[]; env?: Record<string, string> }, oldName?: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('save-mcp-server', name, config, oldName)
-  },
-
-  // 删除 MCP 服务器
-  deleteMcpServer: (name: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('delete-mcp-server', name)
   },
 
   // ============ Kiro API 反代服务器 ============

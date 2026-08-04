@@ -44,7 +44,6 @@ const zh = {
   nav: {
     home: '主页',
     accounts: '账户管理',
-    kiroSettings: 'Kiro 设置',
     proxy: 'API 反代',
     proxyPool: '代理池',
     webhooks: 'Webhook',

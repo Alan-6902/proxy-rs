@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, type PageType } from './components/layout'
 import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
-import { UpdateDialog } from './components/UpdateDialog'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { useAccountsStore } from './store/accounts'
 
@@ -288,7 +287,6 @@ function App(): React.JSX.Element {
           </AnimatePresence>
         </main>
       </div>
-      <UpdateDialog />
       <CloseConfirmDialog />
     </div>
   )

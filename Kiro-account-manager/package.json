@@ -32,7 +32,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "electron-store": "^11.0.2",
-    "electron-updater": "^6.3.9",
     "framer-motion": "^12.40.0",
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.555.0",

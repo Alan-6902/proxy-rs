@@ -1,5 +1,4 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
-import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
@@ -27,60 +26,6 @@ import {
 } from './tray'
 
 // ============ 自动更新配置 ============
-autoUpdater.autoDownload = false
-autoUpdater.autoInstallOnAppQuit = true
-
-function setupAutoUpdater(): void {
-  // 检查更新出错
-  autoUpdater.on('error', (error) => {
-    console.error('[AutoUpdater] Error:', error)
-    mainWindow?.webContents.send('update-error', error.message)
-  })
-
-  // 检查更新中
-  autoUpdater.on('checking-for-update', () => {
-    console.log('[AutoUpdater] Checking for update...')
-    mainWindow?.webContents.send('update-checking')
-  })
-
-  // 有可用更新
-  autoUpdater.on('update-available', (info) => {
-    console.log('[AutoUpdater] Update available:', info.version)
-    mainWindow?.webContents.send('update-available', {
-      version: info.version,
-      releaseDate: info.releaseDate,
-      releaseNotes: info.releaseNotes
-    })
-  })
-
-  // 没有可用更新
-  autoUpdater.on('update-not-available', (info) => {
-    console.log('[AutoUpdater] No update available, current:', info.version)
-    mainWindow?.webContents.send('update-not-available', { version: info.version })
-  })
-
-  // 下载进度
-  autoUpdater.on('download-progress', (progress) => {
-    console.log(`[AutoUpdater] Download progress: ${progress.percent.toFixed(1)}%`)
-    mainWindow?.webContents.send('update-download-progress', {
-      percent: progress.percent,
-      bytesPerSecond: progress.bytesPerSecond,
-      transferred: progress.transferred,
-      total: progress.total
-    })
-  })
-
-  // 下载完成
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('[AutoUpdater] Update downloaded:', info.version)
-    mainWindow?.webContents.send('update-downloaded', {
-      version: info.version,
-      releaseDate: info.releaseDate,
-      releaseNotes: info.releaseNotes
-    })
-  })
-}
-
 // ============ Kiro API 调用 ============
 const KIRO_API_BASE = 'https://app.kiro.dev/service/KiroWebPortalService/operation'
 // REST API 端点配置 - 官方 Kiro 插件仅支持 us-east-1 和 eu-central-1
@@ -2094,15 +2039,6 @@ app.whenReady().then(async () => {
   await loadTraySettings()
   initTray()
 
-  // 初始化自动更新（仅生产环境）
-  if (!is.dev) {
-    setupAutoUpdater()
-    // 启动后延迟检查更新
-    setTimeout(() => {
-      autoUpdater.checkForUpdates().catch(console.error)
-    }, 3000)
-  }
-
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.kiro.account-manager')
 
@@ -2249,123 +2185,6 @@ app.whenReady().then(async () => {
   // IPC: 获取应用版本
   ipcMain.handle('get-app-version', () => {
     return app.getVersion()
-  })
-
-  // IPC: 检查更新
-  ipcMain.handle('check-for-updates', async () => {
-    if (is.dev) {
-      return { hasUpdate: false, message: '开发环境不支持更新检查' }
-    }
-    try {
-      const result = await autoUpdater.checkForUpdates()
-      return {
-        hasUpdate: !!result?.updateInfo,
-        version: result?.updateInfo?.version,
-        releaseDate: result?.updateInfo?.releaseDate
-      }
-    } catch (error) {
-      console.error('[AutoUpdater] Check failed:', error)
-      return { hasUpdate: false, error: error instanceof Error ? error.message : 'Unknown error' }
-    }
-  })
-
-  // IPC: 下载更新
-  ipcMain.handle('download-update', async () => {
-    if (is.dev) {
-      return { success: false, message: '开发环境不支持更新' }
-    }
-    try {
-      await autoUpdater.downloadUpdate()
-      return { success: true }
-    } catch (error) {
-      console.error('[AutoUpdater] Download failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
-    }
-  })
-
-  // IPC: 安装更新并重启
-  ipcMain.handle('install-update', () => {
-    autoUpdater.quitAndInstall(false, true)
-  })
-
-  // IPC: 手动检查更新（使用 GitHub API，用于 AboutPage）
-  const GITHUB_REPO = 'chaogei/Kiro-account-manager'
-  const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
-  
-  ipcMain.handle('check-for-updates-manual', async () => {
-    try {
-      console.log('[Update] Manual check via GitHub API...')
-      const currentVersion = app.getVersion()
-      
-      const response = await fetchWithAppProxy(GITHUB_API_URL, {
-        headers: {
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'Kiro-Account-Manager'
-        }
-      })
-      
-      if (!response.ok) {
-        if (response.status === 403) {
-          throw new Error('GitHub API 请求次数超限，请稍后再试')
-        } else if (response.status === 404) {
-          throw new Error('未找到发布版本')
-        }
-        throw new Error(`GitHub API 错误: ${response.status}`)
-      }
-      
-      const release = await response.json() as {
-        tag_name: string
-        name: string
-        body: string
-        html_url: string
-        published_at: string
-        assets: Array<{
-          name: string
-          browser_download_url: string
-          size: number
-        }>
-      }
-      
-      const latestVersion = release.tag_name.replace(/^v/, '')
-      
-      // 比较版本号
-      const compareVersions = (v1: string, v2: string): number => {
-        const parts1 = v1.split('.').map(Number)
-        const parts2 = v2.split('.').map(Number)
-        for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-          const p1 = parts1[i] || 0
-          const p2 = parts2[i] || 0
-          if (p1 > p2) return 1
-          if (p1 < p2) return -1
-        }
-        return 0
-      }
-      
-      const hasUpdate = compareVersions(latestVersion, currentVersion) > 0
-      
-      console.log(`[Update] Current: ${currentVersion}, Latest: ${latestVersion}, HasUpdate: ${hasUpdate}`)
-      
-      return {
-        hasUpdate,
-        currentVersion,
-        latestVersion,
-        releaseNotes: release.body || '',
-        releaseName: release.name || `v${latestVersion}`,
-        releaseUrl: release.html_url,
-        publishedAt: release.published_at,
-        assets: release.assets.map(a => ({
-          name: a.name,
-          downloadUrl: a.browser_download_url,
-          size: a.size
-        }))
-      }
-    } catch (error) {
-      console.error('[Update] Manual check failed:', error)
-      return {
-        hasUpdate: false,
-        error: error instanceof Error ? error.message : '检查更新失败'
-      }
-    }
   })
 
   // ============ 一键诊断 ============

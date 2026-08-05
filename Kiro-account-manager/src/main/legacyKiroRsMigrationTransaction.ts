@@ -11,6 +11,8 @@ import {
   type LegacyKiroRsMigrationSelection
 } from '../shared/legacyKiroRsMigrationTransaction'
 
+import { legacyKiroRsMigrationErrorBlocksAutoStart } from '../shared/legacyKiroRsMigrationTransaction'
+
 type AccountData = Record<string, unknown> & {
   accounts: Record<string, Record<string, unknown>>
   activeAccountId: string | null
@@ -60,6 +62,7 @@ export interface LegacyKiroRsMigrationTransactionDependencies {
   }
   coordinator: LegacyKiroRsMigrationCoordinator
   proxyIsRunning: () => boolean
+  setAutoStartBlocked: (blocked: boolean) => void
   clock?: () => number
   randomUUID?: () => string
 }
@@ -187,7 +190,7 @@ export class LegacyKiroRsMigrationTransaction {
     selection: LegacyKiroRsMigrationSelection
   ): Promise<LegacyKiroRsMigrationApplyResult> {
     return this.boundary(() =>
-      this.dependencies.coordinator.runExclusive(async () => {
+      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationApplyResult>(async () => {
         if (!selection.accounts && !selection.inboundApiKey && !selection.adminApiKey) {
           return {
             status: 'noop',
@@ -244,13 +247,13 @@ export class LegacyKiroRsMigrationTransaction {
               : LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
           )
         }
-      })
+      }, result => result.status === 'applied' ? false : undefined)
     )
   }
 
   async recover(): Promise<LegacyKiroRsMigrationRecoveryResult> {
     return this.boundary(() =>
-      this.dependencies.coordinator.runExclusive(async () => {
+      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationRecoveryResult>(async () => {
         const journal = await this.readValidJournal()
         if (!journal) return { status: 'none', migratedAccountIds: [] }
         if (journal.operation === 'apply' && journal.state === 'completed') {
@@ -367,13 +370,13 @@ export class LegacyKiroRsMigrationTransaction {
             LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.WRITE_FAILED
           )
         }
-      })
+      }, result => result.status === 'manual_intervention' || result.status === 'cleanup_pending')
     )
   }
 
   async rollback(): Promise<LegacyKiroRsMigrationRollbackResult> {
     return this.boundary(() =>
-      this.dependencies.coordinator.runExclusive(async () => {
+      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationRollbackResult>(async () => {
         this.assertProxyStopped()
         const applied = await this.readValidJournal()
         if (!applied || applied.operation !== 'apply' || applied.state !== 'completed') {
@@ -468,8 +471,31 @@ export class LegacyKiroRsMigrationTransaction {
             LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
           )
         }
-      })
+      }, result => result.status === 'cleanup_pending')
     )
+  }
+
+private async runExclusiveWithAutoStartGate<T>(
+    operation: () => Promise<T>,
+    blockForResult: (result: T) => boolean | undefined
+  ): Promise<T> {
+    return this.dependencies.coordinator.runExclusive(async () => {
+      try {
+        const result = await operation()
+        const blocked = blockForResult(result)
+        if (blocked !== undefined) this.dependencies.setAutoStartBlocked(blocked)
+        return result
+      } catch (error) {
+        const code =
+          error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : undefined
+        if (code && legacyKiroRsMigrationErrorBlocksAutoStart(code)) {
+          this.dependencies.setAutoStartBlocked(true)
+        }
+        throw error
+      }
+    })
   }
 
   private async boundary<T>(operation: () => Promise<T>): Promise<T> {

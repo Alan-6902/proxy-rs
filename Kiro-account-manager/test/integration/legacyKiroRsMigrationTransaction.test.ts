@@ -10,6 +10,8 @@ import { LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES } from '../../src/shar
 
 const inboundSecret = 'fixture-inbound-secret'
 const adminSecret = 'fixture-admin-secret'
+import { LegacyKiroRsMigrationExclusiveCoordinator } from '../../src/main/legacyKiroRsMigrationMainAdapters'
+
 const upstreamSecret = 'fixture-upstream-secret'
 
 function clone<T>(value: T): T {
@@ -69,10 +71,13 @@ function makeTransaction(
     journal?: LegacyKiroRsMigrationJournal
     running?: boolean
     fail?: (operation: string, count: number, phase: 'before' | 'after') => boolean
+    beforeOperation?: (operation: string) => Promise<void>
     readSnapshots?: LegacyKiroRsMigrationSnapshot[]
     coordinator?: { runExclusive<T>(operation: () => Promise<T>): Promise<T> }
     dependencyFailure?: string
     sentinel?: string
+    initialAutoStartBlocked?: boolean
+    setAutoStartBlocked?: (blocked: boolean) => void
     clock?: () => number
     randomUUID?: () => string
   } = {}
@@ -81,6 +86,7 @@ function makeTransaction(
   let persistedJournal = options.journal && clone(options.journal)
   let readIndex = 0
   let consumes = 0
+  let autoStartBlocked = options.initialAutoStartBlocked ?? false
   let tail: Promise<void> = Promise.resolve()
   const calls: string[] = []
   const count = new Map<string, number>()
@@ -138,6 +144,7 @@ function makeTransaction(
         afterWrite('account', write)
       },
       writeProxyConfig: async (proxyConfig) => {
+        await options.beforeOperation?.('proxy')
         failDependency('snapshot.writeProxyConfig')
         const write = invoke('proxy')
         current = { ...current, proxyConfig: clone(proxyConfig) }
@@ -170,6 +177,10 @@ function makeTransaction(
     },
     coordinator,
     proxyIsRunning: () => options.running ?? false,
+    setAutoStartBlocked: (blocked) => {
+      autoStartBlocked = blocked
+      options.setAutoStartBlocked?.(blocked)
+    },
     clock: options.clock ?? (() => 100),
     randomUUID:
       options.randomUUID ??
@@ -184,6 +195,7 @@ function makeTransaction(
     current: () => clone(current),
     journal: () => clone(persistedJournal),
     consumes: () => consumes,
+    autoStartBlocked: () => autoStartBlocked,
     coordinator
   }
 }
@@ -482,12 +494,13 @@ describe('LegacyKiroRsMigrationTransaction', () => {
 
 describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () => {
   it('does not replace an owned journal and leaves completed journal intact for empty selections', async () => {
-    const fake = makeTransaction()
+    const fake = makeTransaction({ initialAutoStartBlocked: true })
     await fake.transaction.apply('scan-1', {
       accounts: true,
       inboundApiKey: true,
       adminApiKey: true
     })
+    expect(fake.autoStartBlocked()).toBe(false)
     const completed = fake.journal()
     const beforeCalls = [...fake.calls]
 
@@ -511,6 +524,16 @@ describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () 
     expect(fake.journal()).toEqual(completed)
     expect(fake.calls).toEqual(beforeCalls)
     expect(fake.consumes()).toBe(1)
+
+    const blockedNoop = makeTransaction({ initialAutoStartBlocked: true })
+    await expect(
+      blockedNoop.transaction.apply('scan-1', {
+        accounts: false,
+        inboundApiKey: false,
+        adminApiKey: false
+      })
+    ).resolves.toMatchObject({ status: 'noop' })
+    expect(blockedNoop.autoStartBlocked()).toBe(true)
   })
 
   it('performs the pre-journal snapshot CAS inside the shared exclusive coordinator', async () => {
@@ -579,6 +602,46 @@ describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () 
       status: 'rollback_available'
     })
     expect(readOnly.calls).toEqual([])
+  })
+
+  it('updates the startup gate before releasing a queued proxy start', async () => {
+    const coordinator = new LegacyKiroRsMigrationExclusiveCoordinator()
+    let releaseProxyWrite!: () => void
+    let reachProxyWrite!: () => void
+    let paused = false
+    const proxyWriteReached = new Promise<void>((resolve) => {
+      reachProxyWrite = resolve
+    })
+    const proxyWriteRelease = new Promise<void>((resolve) => {
+      releaseProxyWrite = resolve
+    })
+    const fake = makeTransaction({
+      coordinator,
+      beforeOperation: async (operation) => {
+        if (operation === 'proxy' && !paused) {
+          paused = true
+          reachProxyWrite()
+          await proxyWriteRelease
+        }
+      },
+      fail: (operation, count, phase) =>
+        (operation === 'proxy' && count === 1 && phase === 'after') ||
+        (operation === 'account' && count === 2 && phase === 'before')
+    })
+
+    const migration = fake.transaction.apply('scan-1', {
+      accounts: true,
+      inboundApiKey: true,
+      adminApiKey: true
+    })
+    await proxyWriteReached
+    const queuedStart = coordinator.runExclusive(async () => fake.autoStartBlocked())
+    releaseProxyWrite()
+
+    await expect(migration).rejects.toMatchObject({
+      code: LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
+    })
+    await expect(queuedStart).resolves.toBe(true)
   })
 
   it('serializes external writers with apply through the injected coordinator', async () => {
@@ -719,6 +782,7 @@ describe('LegacyKiroRsMigrationTransaction fault compensation', () => {
     ).rejects.toMatchObject({
       code: LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
     })
+    expect(fake.autoStartBlocked()).toBe(true)
     expect(fake.journal()).toBeDefined()
   })
 })

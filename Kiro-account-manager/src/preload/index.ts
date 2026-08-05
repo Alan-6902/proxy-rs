@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import { LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS } from '../shared/legacyKiroRsMigrationIpc'
+import type { LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -147,6 +149,17 @@ const api = {
   // 文件操作 - 从文件导入
   importFromFile: (): Promise<string | null> => {
     return ipcRenderer.invoke('import-from-file')
+  },
+
+  legacyKiroRsMigration: {
+    scan: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcScanPreview>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.scan),
+    apply: (scanId: string, selection: LegacyKiroRsMigrationIpcSelection): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcApplyResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.apply, scanId, selection),
+    rollback: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.rollback),
+    recover: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRecoverResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.recover)
   },
 
   // 验证凭证并获取账号信息

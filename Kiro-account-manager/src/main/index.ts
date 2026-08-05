@@ -1,6 +1,8 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut, safeStorage } from 'electron'
 import { LegacyKiroRsMigrationService } from './legacyKiroRsMigration'
 import { LegacyKiroRsMigrationTransaction } from './legacyKiroRsMigrationTransaction'
+import { LegacyKiroRsMigrationIpc } from './legacyKiroRsMigrationIpc'
+import { LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS } from '../shared/legacyKiroRsMigrationIpc'
 import {
   LegacyKiroRsMigrationElectronStoreSnapshot,
   LegacyKiroRsMigrationEncryptedJournal,
@@ -1358,13 +1360,17 @@ async function updateAdminApiKeyAtomically(adminApiKey: string | undefined): Pro
 }
 
 let initStorePromise: Promise<void> | null = null
+let legacyKiroRsMigrationService: LegacyKiroRsMigrationService | null = null
+let legacyKiroRsMigrationIpc: LegacyKiroRsMigrationIpc | null = null
 
 async function initStore(): Promise<void> {
-  if (store && legacyKiroRsMigrationTransaction) return
+  if (store && legacyKiroRsMigrationService && legacyKiroRsMigrationTransaction && legacyKiroRsMigrationIpc) return
   if (!initStorePromise) {
     initStorePromise = initStoreInternal().catch(error => {
       store = null
+      legacyKiroRsMigrationService = null
       legacyKiroRsMigrationTransaction = null
+      legacyKiroRsMigrationIpc = null
       initStorePromise = null
       throw error
     })
@@ -1402,6 +1408,16 @@ async function initStoreInternal(): Promise<void> {
     snapshotStore,
     journal: new LegacyKiroRsMigrationEncryptedJournal(storeInstance.path, safeStorage),
     coordinator: legacyKiroRsMigrationCoordinator,
+    proxyIsRunning: () => proxyServer?.isRunning() ?? false,
+    setAutoStartBlocked: blocked => {
+      legacyKiroRsMigrationAutoStartBlocked = blocked
+    }
+  })
+  legacyKiroRsMigrationService = scanner
+  legacyKiroRsMigrationIpc = new LegacyKiroRsMigrationIpc({
+    scanner,
+    transaction: legacyKiroRsMigrationTransaction,
+    ensureReady: initStore,
     proxyIsRunning: () => proxyServer?.isRunning() ?? false
   })
 
@@ -1469,8 +1485,7 @@ async function recoverLegacyKiroRsMigrationBeforeStartup(): Promise<void> {
       return
     }
     const recovery = await legacyKiroRsMigrationTransaction.recover()
-    legacyKiroRsMigrationAutoStartBlocked = shouldBlockLegacyKiroRsMigrationAutoStart(recovery.status)
-    if (legacyKiroRsMigrationAutoStartBlocked) {
+    if (shouldBlockLegacyKiroRsMigrationAutoStart(recovery.status)) {
       console.error('[LegacyKiroRsMigration] startup recovery blocked:', recovery.status)
     }
   } catch (error) {
@@ -2187,6 +2202,20 @@ app.whenReady().then(async () => {
       }
     }
   })
+
+  // 旧版 kiro-rs 迁移：仅暴露严格、脱敏的 IPC DTO。
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.scan, () =>
+    legacyKiroRsMigrationIpc?.scan() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.apply, (_event, scanId: unknown, selection: unknown) =>
+    legacyKiroRsMigrationIpc?.apply(scanId, selection) ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.rollback, () =>
+    legacyKiroRsMigrationIpc?.rollback() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.recover, () =>
+    legacyKiroRsMigrationIpc?.recover() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
 
   // ============ 注册功能 IPC ============
   registerRegistrationHandlers(() => mainWindow)

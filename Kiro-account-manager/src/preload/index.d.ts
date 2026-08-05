@@ -1,4 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type { LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -113,6 +114,12 @@ type UpstreamKiroCredentialInput =
     }
 
 interface KiroApi {
+  legacyKiroRsMigration: {
+    scan: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcScanPreview>>
+    apply: (scanId: string, selection: LegacyKiroRsMigrationIpcSelection) => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcApplyResult>>
+    rollback: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackResult>>
+    recover: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRecoverResult>>
+  }
   openExternal: (url: string, usePrivateMode?: boolean) => void
   getAppVersion: () => Promise<string>
   onAuthCallback: (callback: (data: { code: string; state: string }) => void) => () => void

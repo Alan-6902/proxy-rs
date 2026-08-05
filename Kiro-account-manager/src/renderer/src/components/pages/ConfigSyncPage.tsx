@@ -6,6 +6,7 @@ import {
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Card, CardContent, CardHeader, CardTitle, Button, Label, Switch } from '../ui'
+import { LegacyKiroRsMigrationCard } from './LegacyKiroRsMigrationCard'
 
 /**
  * 配置同步页面
@@ -328,6 +329,8 @@ export function ConfigSyncPage(): React.ReactNode {
           </div>
         </CardContent>
       </Card>
+
+      <LegacyKiroRsMigrationCard isEn={isEn} />
 
       {/* 导出 */}
       <Card className="hover-lift">

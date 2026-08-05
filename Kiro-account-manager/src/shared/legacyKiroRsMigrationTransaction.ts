@@ -28,6 +28,21 @@ export class LegacyKiroRsMigrationTransactionError extends Error {
   }
 }
 
+export const LEGACY_KIRO_RS_MIGRATION_AUTO_START_BLOCKING_ERROR_CODES: readonly LegacyKiroRsMigrationTransactionErrorCode[] =
+  [
+    LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.CLEANUP_PENDING,
+    LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.JOURNAL_INVALID,
+    LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION,
+    LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MIGRATION_START_BLOCKED,
+    LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.RECOVERY_REQUIRED
+  ]
+
+export function legacyKiroRsMigrationErrorBlocksAutoStart(errorCode: string): boolean {
+  return (LEGACY_KIRO_RS_MIGRATION_AUTO_START_BLOCKING_ERROR_CODES as readonly string[]).includes(
+    errorCode
+  )
+}
+
 export interface LegacyKiroRsMigrationSelection {
   accounts: boolean
   inboundApiKey: boolean

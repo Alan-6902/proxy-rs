@@ -2,7 +2,17 @@ import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut, safeStorage
 import { LegacyKiroRsMigrationService } from './legacyKiroRsMigration'
 import { LegacyKiroRsMigrationTransaction } from './legacyKiroRsMigrationTransaction'
 import { LegacyKiroRsMigrationIpc } from './legacyKiroRsMigrationIpc'
+import {
+  buildKiroCredentialRefreshSingleflightKey,
+  KiroCredentialRefreshSingleflight,
+  LegacyKiroRsMigrationCredentialRefreshGate,
+  mergeAccountDataPreservingRotatedKiroCredentials,
+  mergeRotatedKiroCredentials,
+  shouldReuseCanonicalKiroCredentials,
+  type RotatedKiroCredentialUpdate
+} from './legacyKiroRsMigrationCredentialRefreshGate'
 import { LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS } from '../shared/legacyKiroRsMigrationIpc'
+import { LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES } from '../shared/legacyKiroRsMigrationTransaction'
 import {
   LegacyKiroRsMigrationElectronStoreSnapshot,
   LegacyKiroRsMigrationEncryptedJournal,
@@ -10,7 +20,7 @@ import {
   shouldBlockLegacyKiroRsMigrationAutoStart
 } from './legacyKiroRsMigrationMainAdapters'
 import { join } from 'path'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
@@ -285,42 +295,55 @@ function initProxyServer(): ProxyServer {
         if (account.credentialKind === 'kiro_api_key') {
           return { success: false, error: 'Kiro API key accounts cannot refresh' }
         }
-        try {
-          console.log(`[ProxyServer] Refreshing token for ${account.email || account.id}${account.proxyUrl ? ' [via bound proxy]' : ''}`)
-          const refreshResult = await refreshTokenByMethod(
-            account.refreshToken || '',
-            account.clientId || '',
-            account.clientSecret || '',
-            account.region || 'us-east-1',
-            account.authMethod,
-            account.proxyUrl  // 账号绑定的代理（如有）
-          )
+        return runCredentialRefreshOperation(
+          { success: false as const, error: MIGRATION_CONFIRMATION_REQUIRED },
+          async () => {
+            try {
+              console.log(`[ProxyServer] Refreshing token for ${account.email || account.id}${account.proxyUrl ? ' [via bound proxy]' : ''}`)
+              const refreshResult = await refreshStoredKiroCredentials({
+                accountId: account.id,
+                expectedRefreshToken: account.refreshToken || '',
+                expectedCredentialRevision: account.credentialRevision,
+                clientId: account.clientId,
+                clientSecret: account.clientSecret,
+                region: account.region,
+                authMethod: account.authMethod,
+                proxyUrl: account.proxyUrl
+              })
 
-          if (refreshResult.success && refreshResult.accessToken) {
-            return {
-              success: true,
-              accessToken: refreshResult.accessToken,
-              refreshToken: refreshResult.refreshToken,
-              expiresAt: Date.now() + (refreshResult.expiresIn || 3600) * 1000
+              if (refreshResult.success && refreshResult.accessToken) {
+                const expiresAt = refreshResult.expiresAt
+                  ?? Date.now() + (refreshResult.expiresIn || 3600) * 1000
+                return {
+                  success: true as const,
+                  accessToken: refreshResult.accessToken,
+                  refreshToken: refreshResult.refreshToken,
+                  expiresAt,
+                  credentialRevision: refreshResult.credentialRevision
+                }
+              }
+              return { success: false as const, error: refreshResult.error || 'Token 刷新失败' }
+            } catch (error) {
+              return { success: false as const, error: error instanceof Error ? error.message : 'Unknown error' }
             }
           }
-          return { success: false, error: refreshResult.error || 'Token 刷新失败' }
-        } catch (error) {
-          return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
-        }
+        )
       },
       // 账号更新回调 - 通知渲染进程更新账号数据
       onAccountUpdate: (account) => {
+        if (legacyKiroRsMigrationWritesBlocked()) return
         mainWindow?.webContents.send('proxy-account-update', {
           id: account.id,
           accessToken: account.accessToken,
           refreshToken: account.refreshToken,
-          expiresAt: account.expiresAt
+          expiresAt: account.expiresAt,
+          credentialRevision: account.credentialRevision
         })
       },
       // 账号被 Kiro 后端长期封禁 - 通知渲染进程标记 lastError + 持久化到 store
       // 不同于 token 失效，需要人工解封；账号池已自动跳过该账号
       onAccountSuspended: (info) => {
+        if (legacyKiroRsMigrationWritesBlocked()) return
         console.warn(`[ProxyServer] Account suspended: ${info.email || info.accountId} (${info.reason})`)
         // 推送 IPC 事件给前端 store
         mainWindow?.webContents.send('proxy-account-suspended', {
@@ -409,6 +432,7 @@ function initProxyServer(): ProxyServer {
   // Enterprise profileArn 自愈持久化：运行时首次解析出真实 profileArn 时，
   // 回写到账号池 + 内存快照 + 通知 renderer 落盘，避免每次请求重复获取。
   setProfileArnPersistCallback((accountId, profileArn) => {
+    if (legacyKiroRsMigrationWritesBlocked()) return
     try {
       proxyServer?.getAccountPool().updateAccount(accountId, { profileArn })
       // 推送 IPC，让 renderer store 把 profileArn 写入账号数据
@@ -1306,8 +1330,290 @@ let store: {
 let lastSavedData: unknown = null
 
 const legacyKiroRsMigrationCoordinator = new LegacyKiroRsMigrationExclusiveCoordinator()
+const legacyKiroRsMigrationCredentialRefreshGate =
+  new LegacyKiroRsMigrationCredentialRefreshGate()
+type CanonicalKiroCredentialRefreshResult = OidcRefreshResult & {
+  expiresAt?: number
+  credentialRevision?: string
+  reusedCanonical?: boolean
+}
+const kiroCredentialRefreshSingleflight =
+  new KiroCredentialRefreshSingleflight<OidcRefreshResult>()
 let legacyKiroRsMigrationTransaction: LegacyKiroRsMigrationTransaction | null = null
-let legacyKiroRsMigrationAutoStartBlocked = true
+let legacyKiroRsMigrationCheckpointBlocked = true
+const MIGRATION_CONFIRMATION_REQUIRED =
+  LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MIGRATION_CONFIRMATION_REQUIRED
+const EMPTY_ACCOUNT_DATA = {
+  accounts: {},
+  groups: {},
+  tags: {},
+  activeAccountId: null
+} as const
+
+function legacyKiroRsMigrationWritesBlocked(): boolean {
+  return (
+    legacyKiroRsMigrationCheckpointBlocked ||
+    legacyKiroRsMigrationCredentialRefreshGate.isAdmissionClosed()
+  )
+}
+
+function assertLegacyKiroRsMigrationWritesAllowed(): void {
+  if (legacyKiroRsMigrationWritesBlocked()) {
+    throw new Error(MIGRATION_CONFIRMATION_REQUIRED)
+  }
+}
+
+function legacyKiroRsMigrationWriteBlockedResult(): { success: false; error: string } {
+  return { success: false, error: MIGRATION_CONFIRMATION_REQUIRED }
+}
+
+async function runCredentialRefreshOperation<T>(
+  blockedResult: T,
+  operation: () => Promise<T>
+): Promise<T> {
+  const lease = legacyKiroRsMigrationCredentialRefreshGate.acquire()
+  if (!lease) return blockedResult
+  try {
+    return await operation()
+  } finally {
+    lease.release()
+  }
+}
+
+async function persistRotatedKiroCredentials(
+  accountId: string,
+  expectedRefreshToken: string | undefined,
+  expectedCredentialRevision: string | undefined,
+  update: Omit<RotatedKiroCredentialUpdate, 'credentialRevision'>
+): Promise<string | null> {
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    await initStore()
+    if (!store) return null
+    const current = store.get('accountData', null)
+    const credentialRevision = randomUUID()
+    const next = mergeRotatedKiroCredentials(
+      current,
+      accountId,
+      expectedRefreshToken,
+      expectedCredentialRevision,
+      { ...update, credentialRevision }
+    )
+    if (!next) return null
+    store.set('accountData', next)
+    lastSavedData = next
+    await createBackup(next)
+    return credentialRevision
+  })
+}
+
+type CanonicalKiroCredentials = {
+  accessToken?: string
+  refreshToken?: string
+  expiresAt?: number
+  credentialRevision?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authMethod?: string
+}
+
+async function readCanonicalKiroCredentials(
+  accountId: string
+): Promise<CanonicalKiroCredentials | null> {
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    await initStore()
+    if (!store) return null
+    const accountData = store.get('accountData', null) as {
+      accounts?: Record<string, { credentials?: CanonicalKiroCredentials }>
+    } | null
+    return accountData?.accounts?.[accountId]?.credentials ?? null
+  })
+}
+
+type KiroRefreshTransportCandidate = {
+  accountId: string
+  clientId: string
+  clientSecret: string
+  region: string
+  authMethod?: string
+  proxyUrl?: string
+}
+
+async function readCanonicalKiroRefreshTransportCandidates(
+  refreshToken: string
+): Promise<KiroRefreshTransportCandidate[]> {
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    await initStore()
+    if (!store) return []
+    const accountData = store.get('accountData', EMPTY_ACCOUNT_DATA) as {
+      accounts?: Record<string, { credentials?: CanonicalKiroCredentials }>
+      accountProxyBindings?: Record<string, string>
+      proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
+    }
+    const bindings = accountData.accountProxyBindings ?? {}
+    const proxyPool = accountData.proxyPool ?? {}
+    return Object.entries(accountData.accounts ?? {})
+      .flatMap(([accountId, account]) => {
+        const credentials = account.credentials
+        if (credentials?.refreshToken !== refreshToken) return []
+        const proxyId = bindings[accountId]
+        const proxy = proxyId ? proxyPool[proxyId] : undefined
+        return [{
+          accountId,
+          clientId: credentials.clientId || '',
+          clientSecret: credentials.clientSecret || '',
+          region: credentials.region || 'us-east-1',
+          authMethod: credentials.authMethod,
+          proxyUrl: proxy?.enabled && proxy.status !== 'dead' ? proxy.url : undefined
+        }]
+      })
+      .sort((left, right) => left.accountId < right.accountId ? -1 : left.accountId > right.accountId ? 1 : 0)
+  })
+}
+
+function canonicalCredentialResult(
+  credentials: CanonicalKiroCredentials
+): CanonicalKiroCredentialRefreshResult {
+  if (!credentials.accessToken || !credentials.refreshToken) {
+    return { success: false, error: 'Canonical credential is incomplete' }
+  }
+  return {
+    success: true,
+    accessToken: credentials.accessToken,
+    refreshToken: credentials.refreshToken,
+    expiresAt: credentials.expiresAt,
+    expiresIn: credentials.expiresAt
+      ? Math.max(0, Math.ceil((credentials.expiresAt - Date.now()) / 1000))
+      : undefined,
+    credentialRevision: credentials.credentialRevision,
+    reusedCanonical: true
+  }
+}
+
+function refreshKiroCredentialsSingleflight(params: {
+  refreshToken: string
+  clientId: string
+  clientSecret: string
+  region: string
+  authMethod?: string
+  proxyUrl?: string
+}): Promise<OidcRefreshResult> {
+  const key = buildKiroCredentialRefreshSingleflightKey(params)
+  return kiroCredentialRefreshSingleflight.run(key, async () => {
+    const storedCandidates = await readCanonicalKiroRefreshTransportCandidates(
+      params.refreshToken
+    )
+    const candidates = storedCandidates.length > 0
+      ? storedCandidates
+      : [{
+          accountId: 'unmanaged',
+          clientId: params.clientId,
+          clientSecret: params.clientSecret,
+          region: params.region,
+          authMethod: params.authMethod,
+          proxyUrl: params.proxyUrl
+        }]
+    let lastResult: OidcRefreshResult = {
+      success: false,
+      error: 'No credential refresh transport available'
+    }
+    for (const candidate of candidates) {
+      lastResult = await refreshTokenByMethod(
+        params.refreshToken,
+        candidate.clientId,
+        candidate.clientSecret,
+        candidate.region,
+        candidate.authMethod,
+        candidate.proxyUrl
+      )
+      if (lastResult.success) return lastResult
+    }
+    return lastResult
+  })
+}
+
+async function refreshStoredKiroCredentials(params: {
+  accountId: string
+  expectedRefreshToken: string
+  expectedCredentialRevision?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authMethod?: string
+  proxyUrl?: string
+}): Promise<CanonicalKiroCredentialRefreshResult> {
+  const canonical = await readCanonicalKiroCredentials(params.accountId)
+  if (!canonical?.refreshToken) {
+    return { success: false, error: 'Canonical credential not found' }
+  }
+  if (
+    shouldReuseCanonicalKiroCredentials(
+      canonical,
+      params.expectedRefreshToken,
+      params.expectedCredentialRevision
+    )
+  ) {
+    return canonicalCredentialResult(canonical)
+  }
+
+  const refreshResult = await refreshKiroCredentialsSingleflight({
+    refreshToken: canonical.refreshToken,
+    clientId: canonical.clientId || params.clientId || '',
+    clientSecret: canonical.clientSecret || params.clientSecret || '',
+    region: canonical.region || params.region || 'us-east-1',
+    authMethod: canonical.authMethod || params.authMethod,
+    proxyUrl: params.proxyUrl
+  })
+  if (!refreshResult.success || !refreshResult.accessToken) return refreshResult
+
+  const expiresAt = Date.now() + (refreshResult.expiresIn ?? 3600) * 1000
+  const credentialRevision = await persistRotatedKiroCredentials(
+    params.accountId,
+    canonical.refreshToken,
+    canonical.credentialRevision,
+    {
+      accessToken: refreshResult.accessToken,
+      refreshToken: refreshResult.refreshToken || canonical.refreshToken,
+      expiresAt
+    }
+  )
+  if (!credentialRevision) {
+    const latest = await readCanonicalKiroCredentials(params.accountId)
+    return latest
+      ? canonicalCredentialResult(latest)
+      : { success: false, error: 'Credential changed during refresh' }
+  }
+  return {
+    ...refreshResult,
+    refreshToken: refreshResult.refreshToken || canonical.refreshToken,
+    expiresAt,
+    credentialRevision
+  }
+}
+
+function refreshUnmanagedKiroCredentials(
+  refreshToken: string,
+  clientId: string,
+  clientSecret: string,
+  region: string,
+  authMethod?: string,
+  proxyUrl?: string
+): Promise<CanonicalKiroCredentialRefreshResult> {
+  return refreshKiroCredentialsSingleflight({
+    refreshToken,
+    clientId,
+    clientSecret,
+    region,
+    authMethod,
+    proxyUrl
+  })
+}
+
+function sendMigrationMutableRendererEvent(channel: string, value: unknown): void {
+  if (!legacyKiroRsMigrationWritesBlocked()) {
+    mainWindow?.webContents.send(channel, value)
+  }
+}
 
 const LEGACY_PROXY_CONFIG_KEYS = ['agentMode', 'workspacePath'] as const
 const LEGACY_ACCOUNT_DATA_KEYS = ['switchTarget'] as const
@@ -1340,6 +1646,9 @@ function sanitizeProxyConfig(
 /** 先持久化再更新运行时，避免高权限密钥只存在于内存或磁盘。 */
 async function updateAdminApiKeyAtomically(adminApiKey: string | undefined): Promise<{ success: boolean; error?: string }> {
   return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       const server = initProxyServer()
       const currentStore = store
@@ -1391,6 +1700,16 @@ async function initStoreInternal(): Promise<void> {
   const snapshotStore = new LegacyKiroRsMigrationElectronStoreSnapshot(storeInstance, accountData => {
     lastSavedData = accountData
   })
+  const encryptedMigrationJournal = new LegacyKiroRsMigrationEncryptedJournal(
+    storeInstance.path,
+    safeStorage
+  )
+  let migrationJournalPresent = true
+  try {
+    migrationJournalPresent = (await encryptedMigrationJournal.read()) !== undefined
+  } catch {
+    // Fail closed: recovery will surface the sanitized journal/encryption error.
+  }
   const scanner = new LegacyKiroRsMigrationService({
     readTargetSnapshot: async () => {
       const snapshot = await snapshotStore.read()
@@ -1406,11 +1725,17 @@ async function initStoreInternal(): Promise<void> {
   legacyKiroRsMigrationTransaction = new LegacyKiroRsMigrationTransaction({
     scanner,
     snapshotStore,
-    journal: new LegacyKiroRsMigrationEncryptedJournal(storeInstance.path, safeStorage),
+    journal: encryptedMigrationJournal,
     coordinator: legacyKiroRsMigrationCoordinator,
     proxyIsRunning: () => proxyServer?.isRunning() ?? false,
-    setAutoStartBlocked: blocked => {
-      legacyKiroRsMigrationAutoStartBlocked = blocked
+    setCheckpointBlocked: blocked => {
+      legacyKiroRsMigrationCheckpointBlocked = blocked
+      if (blocked) {
+        legacyKiroRsMigrationCredentialRefreshGate.closeAdmission()
+        discardPendingBackupForMigration()
+      } else if (lastSavedData) {
+        void createBackup(lastSavedData)
+      }
     }
   })
   legacyKiroRsMigrationService = scanner
@@ -1418,66 +1743,76 @@ async function initStoreInternal(): Promise<void> {
     scanner,
     transaction: legacyKiroRsMigrationTransaction,
     ensureReady: initStore,
-    proxyIsRunning: () => proxyServer?.isRunning() ?? false
+    proxyIsRunning: () => proxyServer?.isRunning() ?? false,
+    quiesceCredentialRefreshes: () =>
+      legacyKiroRsMigrationCredentialRefreshGate.closeAdmissionAndDrain(),
+    resumeCredentialRefreshes: () => {
+      if (legacyKiroRsMigrationCheckpointBlocked) return false
+      legacyKiroRsMigrationCredentialRefreshGate.openAdmission()
+      void attemptConfiguredProxyAutoStart()
+      return true
+    }
   })
 
-  // 尝试从备份恢复数据（如果主数据损坏）。备份优先读加密 .enc，兼容旧明文 .json
-  try {
-    const mainData = storeInstance.get('accountData')
+  if (!migrationJournalPresent) {
+    // 尝试从备份恢复数据（如果主数据损坏）。备份优先读加密 .enc，兼容旧明文 .json
+    try {
+      const mainData = storeInstance.get('accountData')
 
-    if (!mainData) {
-      try {
-        const { readSecureBackup } = await import('./secureBackup')
-        const backupData = await readSecureBackup(path.dirname(storeInstance.path)) as { accounts?: unknown } | null
-        if (backupData && backupData.accounts) {
-          console.log('[Store] Restoring data from backup...')
-          storeInstance.set('accountData', backupData)
-          console.log('[Store] Data restored from backup successfully')
+      if (!mainData) {
+        try {
+          const { readSecureBackup } = await import('./secureBackup')
+          const backupData = await readSecureBackup(path.dirname(storeInstance.path)) as { accounts?: unknown } | null
+          if (backupData && backupData.accounts) {
+            console.log('[Store] Restoring data from backup...')
+            storeInstance.set('accountData', backupData)
+            console.log('[Store] Data restored from backup successfully')
+          }
+        } catch {
+          // 备份也不存在，忽略
         }
-      } catch {
-        // 备份也不存在，忽略
       }
-    }
-  } catch (error) {
-    console.error('[Store] Error checking backup:', error)
-  }
-
-  // 一次性兼容清洗：只删除已移除功能的顶层键，其他数据（含凭据）原样保留。
-  try {
-    if (storeInstance.has(LEGACY_PROACTIVE_RENEWAL_KEY)) {
-      storeInstance.delete(LEGACY_PROACTIVE_RENEWAL_KEY)
+    } catch (error) {
+      console.error('[Store] Error checking backup:', error)
     }
 
-    const savedProxyConfig = storeInstance.get('proxyConfig')
-    if (savedProxyConfig && typeof savedProxyConfig === 'object' && !Array.isArray(savedProxyConfig)) {
-      const cleaned = removeLegacyStorageKeys(savedProxyConfig, LEGACY_PROXY_CONFIG_KEYS)
-      if (cleaned.changed) {
-        storeInstance.set('proxyConfig', cleaned.value)
+    // 一次性兼容清洗：只删除已移除功能的顶层键，其他数据（含凭据）原样保留。
+    try {
+      if (storeInstance.has(LEGACY_PROACTIVE_RENEWAL_KEY)) {
+        storeInstance.delete(LEGACY_PROACTIVE_RENEWAL_KEY)
       }
-    }
 
-    const accountData = storeInstance.get('accountData')
-    if (accountData && typeof accountData === 'object' && !Array.isArray(accountData)) {
-      const cleaned = removeLegacyStorageKeys(accountData, LEGACY_ACCOUNT_DATA_KEYS)
-      if (cleaned.changed) {
-        storeInstance.set('accountData', cleaned.value)
+      const savedProxyConfig = storeInstance.get('proxyConfig')
+      if (savedProxyConfig && typeof savedProxyConfig === 'object' && !Array.isArray(savedProxyConfig)) {
+        const cleaned = removeLegacyStorageKeys(savedProxyConfig, LEGACY_PROXY_CONFIG_KEYS)
+        if (cleaned.changed) {
+          storeInstance.set('proxyConfig', cleaned.value)
+        }
       }
-    }
-  } catch (error) {
-    console.error('[Store] Legacy settings cleanup failed:', error)
-  }
 
-  // 一次性迁移：清理 BuilderId 占位符 profileArn 等脏数据
-  // 详见 migrateAccountDataIfNeeded 注释
-  try {
-    migrateAccountDataIfNeeded()
-  } catch (error) {
-    console.error('[Store] Account data migration failed:', error)
+      const accountData = storeInstance.get('accountData')
+      if (accountData && typeof accountData === 'object' && !Array.isArray(accountData)) {
+        const cleaned = removeLegacyStorageKeys(accountData, LEGACY_ACCOUNT_DATA_KEYS)
+        if (cleaned.changed) {
+          storeInstance.set('accountData', cleaned.value)
+        }
+      }
+    } catch (error) {
+      console.error('[Store] Legacy settings cleanup failed:', error)
+    }
+
+    // 一次性迁移：清理 BuilderId 占位符 profileArn 等脏数据
+    // 详见 migrateAccountDataIfNeeded 注释
+    try {
+      migrateAccountDataIfNeeded()
+    } catch (error) {
+      console.error('[Store] Account data migration failed:', error)
+    }
   }
 }
 
 async function recoverLegacyKiroRsMigrationBeforeStartup(): Promise<void> {
-  legacyKiroRsMigrationAutoStartBlocked = true
+  legacyKiroRsMigrationCheckpointBlocked = true
   try {
     await initStore()
     if (!legacyKiroRsMigrationTransaction) {
@@ -1506,7 +1841,7 @@ async function startProxyWithMigrationGate(config?: Partial<ProxyConfig>): Promi
 }
 
 async function startProxyWithMigrationGateUnlocked(config?: Partial<ProxyConfig>): Promise<ProxyLifecycleResult> {
-  if (legacyKiroRsMigrationAutoStartBlocked) {
+  if (legacyKiroRsMigrationWritesBlocked()) {
     return { success: false, error: MIGRATION_START_BLOCKED }
   }
   try {
@@ -1524,7 +1859,7 @@ async function startProxyWithMigrationGateUnlocked(config?: Partial<ProxyConfig>
 async function restartProxyWithMigrationGate(): Promise<ProxyLifecycleResult> {
   await initStore()
   return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
-    if (legacyKiroRsMigrationAutoStartBlocked) return { success: false, error: MIGRATION_START_BLOCKED }
+    if (legacyKiroRsMigrationWritesBlocked()) return { success: false, error: MIGRATION_START_BLOCKED }
     if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
     try {
       await proxyServer.restartServer()
@@ -1595,6 +1930,14 @@ let lastBackupTime = 0
 let pendingBackupData: unknown = null
 let pendingBackupTimer: ReturnType<typeof setTimeout> | null = null
 
+function discardPendingBackupForMigration(): void {
+  if (pendingBackupTimer) {
+    clearTimeout(pendingBackupTimer)
+    pendingBackupTimer = null
+  }
+  pendingBackupData = null
+}
+
 /**
  * 创建数据备份（节流）
  * - 距上次备份不足 BACKUP_THROTTLE_MS 时，仅记录数据指针，不立即写盘
@@ -1626,7 +1969,7 @@ async function createBackup(data: unknown): Promise<void> {
  * 真正执行备份写盘。仅当 pendingBackupData 非空时写入。
  */
 async function writeBackupNow(): Promise<void> {
-  if (!store || pendingBackupData == null) return
+  if (!store || pendingBackupData == null || legacyKiroRsMigrationCheckpointBlocked) return
   const data = pendingBackupData
   pendingBackupData = null
   lastBackupTime = Date.now()
@@ -1672,6 +2015,7 @@ type BackgroundRefreshAccount = {
     credentialKind?: 'oauth' | 'kiro_api_key'
     kiroApiKey?: string
     refreshToken?: string
+    credentialRevision?: string
     clientId?: string
     clientSecret?: string
     region?: string
@@ -1683,7 +2027,7 @@ type BackgroundRefreshAccount = {
 }
 /** background-batch-refresh 的核心实现（由 IPC 与主进程调度器共用）。在 whenReady 中赋值。 */
 let backgroundBatchRefreshImpl:
-  | ((accounts: BackgroundRefreshAccount[], concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>)
+  | ((accounts: BackgroundRefreshAccount[], concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number; error?: string }>)
   | null = null
 /** 正在刷新中的账号 ID 去重集合，渲染进程与主进程调度器共享，防止同一 refreshToken 被并发刷新。 */
 const poolRefreshInFlightIds = new Set<string>()
@@ -1708,7 +2052,7 @@ function mainTokenRefreshLeadMs(intervalMin: number): number {
 
 /** 读取 store 里的账号，刷新即将过期的池内 token（仅刷 token，信息同步仍由渲染进程负责）。 */
 async function runMainPoolTokenRefreshTick(): Promise<void> {
-  if (!backgroundBatchRefreshImpl) return
+  if (!backgroundBatchRefreshImpl || legacyKiroRsMigrationWritesBlocked()) return
   try {
     if (!store) { await initStore() }
     if (!store) return
@@ -1721,6 +2065,7 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
         lastError?: string
         credentials?: {
           refreshToken?: string
+          credentialRevision?: string
           clientId?: string
           clientSecret?: string
           region?: string
@@ -1762,6 +2107,7 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
           credentialKind: refreshPlan.credentialKind,
           kiroApiKey: refreshPlan.kiroApiKey,
           refreshToken: creds.refreshToken,
+          credentialRevision: creds.credentialRevision,
           clientId: creds.clientId,
           clientSecret: creds.clientSecret,
           region: creds.region,
@@ -1941,6 +2287,92 @@ function initTray(): void {
   setTrayTooltip(`Kiro 账号管理器 v${app.getVersion()}`)
 }
 
+let configuredProxyAutoStartAttempt: Promise<void> | null = null
+
+function attemptConfiguredProxyAutoStart(): Promise<void> {
+  if (configuredProxyAutoStartAttempt) return configuredProxyAutoStartAttempt
+  const attempt = legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    try {
+      await initStore()
+      if (!store || legacyKiroRsMigrationWritesBlocked()) {
+        if (legacyKiroRsMigrationWritesBlocked()) {
+          console.error('[LegacyKiroRsMigration] proxy auto-start waiting for recovery')
+        }
+        return
+      }
+
+      const savedProxyConfig = store.get('proxyConfig') as ProxyConfig | undefined
+      if (!savedProxyConfig?.autoStart || proxyServer?.isRunning()) return
+
+      console.log('[ProxyServer] Auto-starting proxy server...')
+      const server = initProxyServer()
+      server.updateConfig(savedProxyConfig)
+
+      const syncAccountsToPool = (): number => {
+        const accountData = store!.get('accountData') as {
+          accounts?: Record<string, any>
+          accountProxyBindings?: Record<string, string>
+          proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
+        } | undefined
+        if (!accountData?.accounts) return 0
+
+        const bindings = accountData.accountProxyBindings || {}
+        const proxyPool = accountData.proxyPool || {}
+        const buildProxyUrl = (accountId: string): string | undefined => {
+          const proxyId = bindings[accountId]
+          if (!proxyId) return undefined
+          const proxy = proxyPool[proxyId]
+          if (!proxy || !proxy.enabled || proxy.status === 'dead') return undefined
+          return proxy.url
+        }
+
+        const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
+        if (proxyAccounts.length > 0) {
+          const pool = server.getAccountPool()
+          pool.clear()
+          proxyAccounts.forEach(account => pool.addAccount(account))
+        }
+        return proxyAccounts.length
+      }
+
+      const syncedCount = syncAccountsToPool()
+      if (syncedCount > 0) {
+        console.log('[ProxyServer] Auto-synced', syncedCount, 'accounts')
+      } else {
+        console.log('[ProxyServer] No accounts found on initial sync, will retry...')
+        const retrySync = (attemptNumber: number): void => {
+          setTimeout(() => {
+            const count = syncAccountsToPool()
+            if (count > 0) {
+              console.log(`[ProxyServer] Retry #${attemptNumber}: synced ${count} accounts`)
+            } else if (attemptNumber < 5) {
+              retrySync(attemptNumber + 1)
+            } else {
+              console.log('[ProxyServer] All retry attempts exhausted, no accounts available. Accounts will sync when UI loads.')
+            }
+          }, attemptNumber * 2000)
+        }
+        retrySync(1)
+      }
+
+      const startResult = await startProxyWithMigrationGateUnlocked()
+      if (!startResult.success) {
+        console.error('[ProxyServer] Auto-start blocked:', startResult.error)
+        return
+      }
+      console.log('[ProxyServer] Auto-started successfully on port', savedProxyConfig.port || 5580)
+    } catch (error) {
+      console.error('[ProxyServer] Auto-start failed:', error)
+    }
+  })
+  configuredProxyAutoStartAttempt = attempt
+  const clearAttempt = (): void => {
+    if (configuredProxyAutoStartAttempt === attempt) configuredProxyAutoStartAttempt = null
+  }
+  void attempt.then(clearAttempt, clearAttempt)
+  return attempt
+}
+
 function createWindow(): void {
   // Create the browser window.
   const isMac = process.platform === 'darwin'
@@ -1979,82 +2411,10 @@ function createWindow(): void {
     mainWindow?.setTitle(`Kiro 账号管理器 v${app.getVersion()}`)
     mainWindow?.show()
     
-    // 检查代理服务自启动配置
-    setTimeout(() => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
-      try {
-        await initStore()
-        if (!store || legacyKiroRsMigrationAutoStartBlocked) {
-          if (legacyKiroRsMigrationAutoStartBlocked) console.error('[LegacyKiroRsMigration] proxy auto-start blocked by recovery')
-          return
-        }
-        
-        const savedProxyConfig = store.get('proxyConfig') as ProxyConfig | undefined
-        if (!savedProxyConfig?.autoStart) return
-        
-        console.log('[ProxyServer] Auto-starting proxy server...')
-        const server = initProxyServer()
-        server.updateConfig(savedProxyConfig)
-        
-        // 自启动时同步账号到代理池（含重试机制应对冷启动数据延迟）
-        const syncAccountsToPool = (): number => {
-          const accountData = store!.get('accountData') as {
-            accounts?: Record<string, any>
-            accountProxyBindings?: Record<string, string>
-            proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-          } | undefined
-          if (!accountData?.accounts) return 0
-
-          const bindings = accountData.accountProxyBindings || {}
-          const proxyPool = accountData.proxyPool || {}
-          const buildProxyUrl = (accountId: string): string | undefined => {
-            const proxyId = bindings[accountId]
-            if (!proxyId) return undefined
-            const p = proxyPool[proxyId]
-            if (!p || !p.enabled || p.status === 'dead') return undefined
-            return p.url
-          }
-
-          const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
-          if (proxyAccounts.length > 0) {
-            const pool = server.getAccountPool()
-            pool.clear()
-            proxyAccounts.forEach(acc => pool.addAccount(acc))
-          }
-          return proxyAccounts.length
-        }
-
-        let syncedCount = syncAccountsToPool()
-        if (syncedCount > 0) {
-          console.log('[ProxyServer] Auto-synced', syncedCount, 'accounts')
-        } else {
-          // 冷启动时 store 可能还没有数据（渲染进程尚未初始化完成），延迟重试
-          console.log('[ProxyServer] No accounts found on initial sync, will retry...')
-          const retrySync = (attempt: number) => {
-            setTimeout(() => {
-              const count = syncAccountsToPool()
-              if (count > 0) {
-                console.log(`[ProxyServer] Retry #${attempt}: synced ${count} accounts`)
-              } else if (attempt < 5) {
-                retrySync(attempt + 1)
-              } else {
-                console.log('[ProxyServer] All retry attempts exhausted, no accounts available. Accounts will sync when UI loads.')
-              }
-            }, attempt * 2000) // 2s, 4s, 6s, 8s, 10s
-          }
-          retrySync(1)
-        }
-        
-        const startResult = await startProxyWithMigrationGateUnlocked()
-        if (!startResult.success) {
-          console.error('[ProxyServer] Auto-start blocked:', startResult.error)
-          return
-        }
-        console.log('[ProxyServer] Auto-started successfully on port', savedProxyConfig.port || 5580)
-      } catch (error) {
-        console.error('[ProxyServer] Auto-start failed:', error)
-      }
-
-    }), 1000)
+    // 首次尝试若迁移恢复尚未完成，resume 成功后会再次幂等触发。
+    setTimeout(() => {
+      void attemptConfiguredProxyAutoStart()
+    }, 1000)
   })
 
   mainWindow.on('close', (event) => {
@@ -2083,6 +2443,7 @@ function createWindow(): void {
     if (lastSavedData && store) {
       void legacyKiroRsMigrationCoordinator.runExclusive(async () => {
         try {
+          if (legacyKiroRsMigrationWritesBlocked()) return
           console.log('[Window] Saving data before close...')
           store!.set('accountData', lastSavedData)
           await createBackup(lastSavedData)
@@ -2212,6 +2573,15 @@ app.whenReady().then(async () => {
   )
   ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.rollback, () =>
     legacyKiroRsMigrationIpc?.rollback() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.finalize, () =>
+    legacyKiroRsMigrationIpc?.finalize() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.acknowledgeRollback, () =>
+    legacyKiroRsMigrationIpc?.acknowledgeRollback() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
+  )
+  ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.resumeCredentialRefreshes, () =>
+    legacyKiroRsMigrationIpc?.resumeCredentialRefreshes() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
   )
   ipcMain.handle(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.recover, () =>
     legacyKiroRsMigrationIpc?.recover() ?? { ok: false as const, errorCode: 'DEPENDENCY_FAILED' as const }
@@ -2480,12 +2850,15 @@ app.whenReady().then(async () => {
       provider?: string
       profileArn?: string
       expiresAt?: number
+      credentialRevision?: string
       proxyUrl?: string
     }
     model?: string
     message?: string
     timeoutMs?: number
-  }) => {
+  }) => runCredentialRefreshOperation(
+    { success: false as const, error: MIGRATION_CONFIRMATION_REQUIRED, latencyMs: 0 },
+    async () => {
     const acc = params?.account
     const model = (params?.model || 'claude-sonnet-4.5').trim()
     const message = (params?.message || 'Hi, reply with "pong" only.').trim()
@@ -2501,18 +2874,43 @@ app.whenReady().then(async () => {
     try {
       // 1) Token 即将过期/已过期 → 先刷新（走账号绑定代理）
       let accessToken = acc.accessToken
+      let refreshedCredentials: {
+        accessToken: string
+        refreshToken?: string
+        expiresAt?: number
+        credentialRevision?: string
+      } | undefined
       const needsRefresh = acc.expiresAt ? (acc.expiresAt - Date.now() < 60_000) : false
       if (needsRefresh && acc.refreshToken) {
         try {
-          const r = await refreshTokenByMethod(
-            acc.refreshToken,
-            acc.clientId || '',
-            acc.clientSecret || '',
-            acc.region || 'us-east-1',
-            acc.authMethod,
-            acc.proxyUrl
-          )
-          if (r.success && r.accessToken) accessToken = r.accessToken
+          const r = acc.id
+            ? await refreshStoredKiroCredentials({
+                accountId: acc.id,
+                expectedRefreshToken: acc.refreshToken,
+                expectedCredentialRevision: acc.credentialRevision,
+                clientId: acc.clientId,
+                clientSecret: acc.clientSecret,
+                region: acc.region,
+                authMethod: acc.authMethod,
+                proxyUrl: acc.proxyUrl
+              })
+            : await refreshUnmanagedKiroCredentials(
+                acc.refreshToken,
+                acc.clientId || '',
+                acc.clientSecret || '',
+                acc.region || 'us-east-1',
+                acc.authMethod,
+                acc.proxyUrl
+              )
+          if (r.success && r.accessToken) {
+            accessToken = r.accessToken
+            refreshedCredentials = {
+              accessToken: r.accessToken,
+              refreshToken: r.refreshToken || acc.refreshToken,
+              expiresAt: r.expiresAt ?? Date.now() + (r.expiresIn ?? 3600) * 1000,
+              credentialRevision: r.credentialRevision
+            }
+          }
         } catch { /* 刷新失败则用原 token 尝试，让真实错误暴露出来 */ }
       }
 
@@ -2553,7 +2951,8 @@ app.whenReady().then(async () => {
           inputTokens: result.usage?.inputTokens || 0,
           outputTokens: result.usage?.outputTokens || 0,
           credits: result.usage?.credits || 0
-        }
+        },
+        credentials: refreshedCredentials
       }
     } catch (err) {
       const isAbort = controller.signal.aborted
@@ -2567,13 +2966,13 @@ app.whenReady().then(async () => {
     } finally {
       clearTimeout(timer)
     }
-  })
+  }))
 
   // IPC: 加载账号数据
   ipcMain.handle('load-accounts', async () => {
     try {
       await initStore()
-      return store!.get('accountData', null)
+      return store!.get('accountData', EMPTY_ACCOUNT_DATA)
     } catch (error) {
       console.error('Failed to load accounts:', error)
       return null
@@ -2584,13 +2983,16 @@ app.whenReady().then(async () => {
   ipcMain.handle('save-accounts', async (_event, data) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       await initStore()
-      store!.set('accountData', data)
+      assertLegacyKiroRsMigrationWritesAllowed()
+      const current = store!.get('accountData', EMPTY_ACCOUNT_DATA)
+      const merged = mergeAccountDataPreservingRotatedKiroCredentials(current, data)
+      store!.set('accountData', merged)
       
       // 保存最后的数据（用于崩溃恢复）
-      lastSavedData = data
+      lastSavedData = merged
       
       // 每次保存时也创建备份
-      await createBackup(data)
+      await createBackup(merged)
     } catch (error) {
       console.error('Failed to save accounts:', error)
       throw error
@@ -2598,9 +3000,11 @@ app.whenReady().then(async () => {
   }))
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
-  ipcMain.handle('refresh-account-token', async (_event, account) => {
+  ipcMain.handle('refresh-account-token', async (_event, account) => runCredentialRefreshOperation(
+    { success: false as const, error: { message: MIGRATION_CONFIRMATION_REQUIRED } },
+    async () => {
     try {
-      const { credentialKind, kiroApiKey, refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials || {}
+      const { credentialKind, kiroApiKey, refreshToken, credentialRevision, clientId, clientSecret, region, authMethod, provider } = account.credentials || {}
       if (credentialKind === 'kiro_api_key' || kiroApiKey) {
         return { success: false, error: { message: 'Kiro API key accounts cannot refresh' } }
       }
@@ -2622,14 +3026,16 @@ app.whenReady().then(async () => {
       console.log(`[IPC] Refreshing token (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`)
 
       // 根据 authMethod 选择刷新方式（透传账号绑定代理）
-      const refreshResult = await refreshTokenByMethod(
-        refreshToken,
-        clientId || '',
-        clientSecret || '',
-        region || 'us-east-1',
+      const refreshResult = await refreshStoredKiroCredentials({
+        accountId: account.id || '',
+        expectedRefreshToken: refreshToken,
+        expectedCredentialRevision: credentialRevision,
+        clientId,
+        clientSecret,
+        region,
         authMethod,
-        boundProxyUrl
-      )
+        proxyUrl: boundProxyUrl
+      })
 
       if (!refreshResult.success || !refreshResult.accessToken) {
         return { success: false, error: { message: refreshResult.error || 'Token 刷新失败' } }
@@ -2669,6 +3075,8 @@ app.whenReady().then(async () => {
           accessToken: newAccess,
           refreshToken: newRefresh,
           expiresIn,
+          expiresAt: refreshResult.expiresAt,
+          credentialRevision: refreshResult.credentialRevision,
           // Enterprise 自动获取的 profileArn（renderer 需要存储到账号数据）
           profileArn: resolvedEnterpriseArn || undefined
         }
@@ -2679,7 +3087,7 @@ app.whenReady().then(async () => {
         error: { message: error instanceof Error ? error.message : 'Unknown error' }
       }
     }
-  })
+  }))
 
   // IPC: 从 SSO Token 导入账号 (x-amz-sso_authn)
   ipcMain.handle('import-from-sso-token', async (_event, bearerToken: string, region: string = 'us-east-1') => {
@@ -2902,6 +3310,8 @@ app.whenReady().then(async () => {
       accessToken: string
       refreshToken?: string
       expiresIn?: number
+      expiresAt?: number
+      credentialRevision?: string
     }, userInfo?: UserInfoResponse) => {
       console.log(`[Kiro API] Usage [${account?.email || userInfo?.email || 'unknown'}]`, result)
 
@@ -3016,16 +3426,17 @@ app.whenReady().then(async () => {
           newCredentials: newCredentials ? {
             accessToken: newCredentials.accessToken,
             refreshToken: newCredentials.refreshToken,
-            expiresAt: newCredentials.expiresIn 
-              ? Date.now() + newCredentials.expiresIn * 1000 
-              : undefined
+            expiresAt: newCredentials.expiresAt ?? (newCredentials.expiresIn
+              ? Date.now() + newCredentials.expiresIn * 1000
+              : undefined),
+            credentialRevision: newCredentials.credentialRevision
           } : undefined
         }
       }
     }
 
     try {
-      const { accessToken, refreshToken, clientId, clientSecret, region, authMethod, provider, profileArn, kiroApiKey, credentialKind } = account.credentials || {}
+      const { accessToken, refreshToken, credentialRevision, clientId, clientSecret, region, authMethod, provider, profileArn, kiroApiKey, credentialKind } = account.credentials || {}
       const upstreamCredential = resolveUpstreamKiroCredential({
         credentialKind,
         accessToken,
@@ -3081,45 +3492,54 @@ app.whenReady().then(async () => {
         // 社交登录只需要 refreshToken，IdC 登录需要 clientId 和 clientSecret
         const canRefresh = refreshToken && (authMethod === 'social' || (clientId && clientSecret))
         if (errorMsg.includes('401') && canRefresh) {
-          console.log(`[IPC] Token expired, attempting to refresh (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`)
+          return runCredentialRefreshOperation(
+            { success: false as const, error: { message: MIGRATION_CONFIRMATION_REQUIRED } },
+            async () => {
+              console.log(`[IPC] Token expired, attempting to refresh (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`)
 
-          // 尝试刷新 token - 根据 authMethod 选择刷新方式（透传账号代理）
-          const refreshResult = await refreshTokenByMethod(
-            refreshToken,
-            clientId || '',
-            clientSecret || '',
-            region || 'us-east-1',
-            authMethod,
-            boundProxyUrl
-          )
+              // 尝试刷新 token - 根据 authMethod 选择刷新方式（透传账号代理）
+              const refreshResult = await refreshStoredKiroCredentials({
+                accountId: account.id || '',
+                expectedRefreshToken: refreshToken,
+                expectedCredentialRevision: credentialRevision,
+                clientId,
+                clientSecret,
+                region,
+                authMethod,
+                proxyUrl: boundProxyUrl
+              })
           
-          if (refreshResult.success && refreshResult.accessToken) {
-            console.log('[IPC] Token refreshed, retrying API call...')
+              if (refreshResult.success && refreshResult.accessToken) {
+                console.log('[IPC] Token refreshed, retrying API call...')
             
-            // 用新 token 并行调用 GetUserInfo 和 getUsageAndLimits
-            const [userInfoResult, usageResult] = await Promise.all([
-              getUserInfo(refreshResult.accessToken, idp).catch((err: Error) => {
-                if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
-                  throw err
+                // 用新 token 并行调用 GetUserInfo 和 getUsageAndLimits
+                const [userInfoResult, usageResult] = await Promise.all([
+                  getUserInfo(refreshResult.accessToken, idp).catch((err: Error) => {
+                    if (err.message.includes('423') || err.message.includes('AccountSuspended')) {
+                      throw err
+                    }
+                    return undefined
+                  }),
+                  getUsageAndLimits(refreshResult.accessToken, idp, undefined, region)
+                ])
+
+                // 返回结果并包含新凭证
+                return parseUsageResponse(usageResult, {
+                  accessToken: refreshResult.accessToken,
+                  refreshToken: refreshResult.refreshToken,
+                  expiresIn: refreshResult.expiresIn,
+                  expiresAt: refreshResult.expiresAt,
+                  credentialRevision: refreshResult.credentialRevision
+                }, userInfoResult)
+              } else {
+                console.error('[IPC] Token refresh failed:', refreshResult.error)
+                return {
+                  success: false as const,
+                  error: { message: `Token 过期且刷新失败: ${refreshResult.error}` }
                 }
-                return undefined
-              }),
-              getUsageAndLimits(refreshResult.accessToken, idp, undefined, region)
-            ])
-            
-            // 返回结果并包含新凭证
-            return parseUsageResponse(usageResult, {
-              accessToken: refreshResult.accessToken,
-              refreshToken: refreshResult.refreshToken,
-              expiresIn: refreshResult.expiresIn
-            }, userInfoResult)
-          } else {
-            console.error('[IPC] Token refresh failed:', refreshResult.error)
-            return {
-              success: false,
-              error: { message: `Token 过期且刷新失败: ${refreshResult.error}` }
+              }
             }
-          }
+          )
         }
         
         // 不是 401 或没有刷新凭证，抛出原错误
@@ -3135,7 +3555,16 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 后台批量刷新账号（在主进程执行，不阻塞 UI）
-  const backgroundBatchRefresh = async (accounts: BackgroundRefreshAccount[], concurrency: number = 10, syncInfo: boolean = true): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
+  const backgroundBatchRefresh = async (accounts: BackgroundRefreshAccount[], concurrency: number = 10, syncInfo: boolean = true): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number; error?: string }> => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return {
+        success: false,
+        completed: 0,
+        successCount: 0,
+        failedCount: 0,
+        error: MIGRATION_CONFIRMATION_REQUIRED
+      }
+    }
     console.log(`[BackgroundRefresh] Starting batch refresh for ${accounts.length} accounts, concurrency: ${concurrency}, syncInfo: ${syncInfo}`)
     
     let completed = 0
@@ -3154,12 +3583,16 @@ app.whenReady().then(async () => {
           if (account.id && poolRefreshInFlightIds.has(account.id)) {
             return
           }
+          const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
+          const refreshPlan = buildBackgroundRefreshPlan(account.credentials, needsTokenRefresh)
+          const refreshLease = refreshPlan.shouldRefreshToken
+            ? legacyKiroRsMigrationCredentialRefreshGate.acquire()
+            : null
+          if (refreshPlan.shouldRefreshToken && !refreshLease) return
           if (account.id) poolRefreshInFlightIds.add(account.id)
           const isApiKey = buildBackgroundRefreshPlan(account.credentials, false).credentialKind === 'kiro_api_key'
           try {
-            const { refreshToken, clientId, clientSecret, region, authMethod, provider } = account.credentials
-            const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
-            const refreshPlan = buildBackgroundRefreshPlan(account.credentials, needsTokenRefresh)
+            const { refreshToken, credentialRevision, clientId, clientSecret, region, authMethod, provider } = account.credentials
 
             // 查询账号绑定的代理（从主进程账号池）
             const boundProxyUrl = proxyServer
@@ -3177,6 +3610,8 @@ app.whenReady().then(async () => {
             let newAccessToken = refreshPlan.accessToken
             let newRefreshToken = refreshToken
             let newExpiresIn: number | undefined
+            let newExpiresAt: number | undefined
+            let newCredentialRevision = credentialRevision
 
             // API key 从不执行 OAuth 刷新；OAuth 保持原有刷新路径。
             if (refreshPlan.shouldRefreshToken) {
@@ -3190,14 +3625,16 @@ app.whenReady().then(async () => {
               }
 
               // 刷新 Token（透传账号绑定代理）
-              const refreshResult = await refreshTokenByMethod(
-                refreshToken,
-                clientId || '',
-                clientSecret || '',
-                region || 'us-east-1',
+              const refreshResult = await refreshStoredKiroCredentials({
+                accountId: account.id,
+                expectedRefreshToken: refreshToken,
+                expectedCredentialRevision: credentialRevision,
+                clientId,
+                clientSecret,
+                region,
                 authMethod,
-                boundProxyUrl
-              )
+                proxyUrl: boundProxyUrl
+              })
 
               if (!refreshResult.success) {
                 failed++
@@ -3206,7 +3643,7 @@ app.whenReady().then(async () => {
                   localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId: account.id })
                 }
                 // 通知渲染进程刷新失败
-                mainWindow?.webContents.send('background-refresh-result', {
+                sendMigrationMutableRendererEvent('background-refresh-result', {
                   id: account.id,
                   success: false,
                   error: refreshResult.error
@@ -3216,8 +3653,14 @@ app.whenReady().then(async () => {
 
               newAccessToken = refreshResult.accessToken || refreshPlan.accessToken
               newRefreshToken = refreshResult.refreshToken || refreshToken
-              newExpiresIn = refreshResult.expiresIn
-
+              newExpiresIn = refreshResult.expiresIn ?? 3600
+              newExpiresAt = refreshResult.expiresAt
+              newCredentialRevision = refreshResult.credentialRevision
+              if (!newAccessToken) {
+                failed++
+                completed++
+                return
+              }
             }
 
             // Enterprise 账号：后台刷新后自动获取 profileArn（BuilderId/Social 不需要调 API）
@@ -3435,14 +3878,16 @@ app.whenReady().then(async () => {
             completed++
 
             // 通知渲染进程更新账号
-            mainWindow?.webContents.send('background-refresh-result', {
+            sendMigrationMutableRendererEvent('background-refresh-result', {
               id: account.id,
               success: true,
               data: {
                 ...(isApiKey ? {} : {
                   accessToken: newAccessToken,
                   refreshToken: newRefreshToken,
-                  expiresIn: newExpiresIn
+                  expiresIn: newExpiresIn,
+                  credentialRevision: newCredentialRevision,
+                  expiresAt: newExpiresAt
                 }),
                 profileArn: resolvedBgProfileArn || undefined,
                 usage: parsedUsage,
@@ -3458,13 +3903,14 @@ app.whenReady().then(async () => {
             if (account.id) {
               localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId: account.id })
             }
-            mainWindow?.webContents.send('background-refresh-result', {
+            sendMigrationMutableRendererEvent('background-refresh-result', {
               id: account.id,
               success: false,
               error: isApiKey ? 'API key background sync failed' : (e instanceof Error ? e.message : 'Unknown error')
             })
           } finally {
             if (account.id) poolRefreshInFlightIds.delete(account.id)
+            refreshLease?.release()
           }
         })
       )
@@ -3510,6 +3956,15 @@ app.whenReady().then(async () => {
     }
     idp?: string
   }>, concurrency: number = 10) => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return {
+        success: false,
+        completed: 0,
+        successCount: 0,
+        failedCount: 0,
+        error: MIGRATION_CONFIRMATION_REQUIRED
+      }
+    }
     console.log(`[BackgroundCheck] Starting batch check for ${accounts.length} accounts, concurrency: ${concurrency}`)
     
     let completed = 0
@@ -3779,7 +4234,7 @@ app.whenReady().then(async () => {
             completed++
 
             // 通知渲染进程更新账号
-            mainWindow?.webContents.send('background-check-result', {
+            sendMigrationMutableRendererEvent('background-check-result', {
               id: account.id,
               success: true,
               data: {
@@ -3793,7 +4248,7 @@ app.whenReady().then(async () => {
           } catch (e) {
             failed++
             completed++
-            mainWindow?.webContents.send('background-check-result', {
+            sendMigrationMutableRendererEvent('background-check-result', {
               id: account.id,
               success: false,
               error: e instanceof Error ? e.message : 'Unknown error'
@@ -3875,7 +4330,9 @@ app.whenReady().then(async () => {
     region?: string
     authMethod?: string
     provider?: string  // 'BuilderId', 'Github', 'Google' 等
-  }) => {
+  }) => runCredentialRefreshOperation(
+    { success: false as const, error: MIGRATION_CONFIRMATION_REQUIRED },
+    async () => {
     console.log('[IPC] verify-account-credentials called')
     
     try {
@@ -3895,7 +4352,13 @@ app.whenReady().then(async () => {
       
       // Step 1: 使用合适的方式刷新获取 accessToken
       console.log(`[Verify] Step 1: Refreshing token (authMethod: ${authMethod || 'IdC'})...`)
-      const refreshResult = await refreshTokenByMethod(refreshToken, clientId, clientSecret, region, authMethod)
+      const refreshResult = await refreshUnmanagedKiroCredentials(
+        refreshToken,
+        clientId,
+        clientSecret,
+        region,
+        authMethod
+      )
       
       if (!refreshResult.success || !refreshResult.accessToken) {
         return { success: false, error: `Token 刷新失败: ${refreshResult.error}` }
@@ -4090,7 +4553,7 @@ app.whenReady().then(async () => {
       console.error('[Verify] Error:', error)
       return { success: false, error: error instanceof Error ? error.message : '验证失败' }
     }
-  })
+  }))
 
 
   // ============ 手动登录相关 IPC ============
@@ -4826,6 +5289,9 @@ app.whenReady().then(async () => {
 
   // IPC: 更新反代服务器配置
   ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       // 管理员密钥只能经专用 IPC 变更，泛型设置绝不能覆盖或读回它。
       const sanitizedConfig = sanitizeProxyConfig(stripAdminApiKey(config))
@@ -4961,6 +5427,9 @@ app.whenReady().then(async () => {
 
   // IPC: 添加 API Key
   ipcMain.handle('proxy-add-api-key', async (_event, apiKey: { name: string; key?: string; format?: 'sk' | 'simple' | 'token'; creditsLimit?: number }) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       const crypto = await import('crypto')
       const server = initProxyServer()
@@ -5019,6 +5488,9 @@ app.whenReady().then(async () => {
 
   // IPC: 更新 API Key
   ipcMain.handle('proxy-update-api-key', (_event, id: string, updates: Partial<import('./proxy/types').ApiKey>) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -5048,6 +5520,9 @@ app.whenReady().then(async () => {
 
   // IPC: 删除 API Key
   ipcMain.handle('proxy-delete-api-key', (_event, id: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -5073,6 +5548,9 @@ app.whenReady().then(async () => {
 
   // IPC: 重置 API Key 用量统计
   ipcMain.handle('proxy-reset-api-key-usage', (_event, id: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -5356,6 +5834,9 @@ app.whenReady().then(async () => {
   // 1) 清除反代池中的 suspended 状态
   // 2) 同步清除 store.accountData[id].lastError，状态回到 active
   ipcMain.handle('proxy-clear-account-suspended', (_event, accountId: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationWritesBlocked()) {
+      return legacyKiroRsMigrationWriteBlockedResult()
+    }
     try {
       if (proxyServer) {
         proxyServer.getAccountPool().clearSuspended(accountId)
@@ -5506,10 +5987,12 @@ app.on('will-quit', async (event) => {
       console.log('[Exit] Saving data before quit...')
       // 刷新待写入的防抖数据
       flushStoreWrites()
-      store!.set('accountData', lastSavedData)
-      // 退出场景跳过节流，确保备份立即落盘
-      await createBackup(lastSavedData)
-      await flushBackupNow()
+      if (!legacyKiroRsMigrationWritesBlocked()) {
+        store!.set('accountData', lastSavedData)
+        // 退出场景跳过节流，确保备份立即落盘
+        await createBackup(lastSavedData)
+        await flushBackupNow()
+      }
       // 强制落盘代理日志（异步节流中的尾巴数据）
       try {
         const { proxyLogStore } = await import('./proxy/logger')

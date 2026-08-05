@@ -9,7 +9,8 @@ import type {
 } from './legacyKiroRsMigrationTransaction'
 import {
   LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES,
-  LegacyKiroRsMigrationTransactionError
+  LegacyKiroRsMigrationTransactionError,
+  legacyKiroRsMigrationRecoveryRequiresCheckpoint
 } from '../shared/legacyKiroRsMigrationTransaction'
 
 const JOURNAL_FILE_NAME = 'legacy-kiro-rs-migration.v1.enc'
@@ -370,5 +371,5 @@ export class LegacyKiroRsMigrationElectronStoreSnapshot {
 }
 
 export function shouldBlockLegacyKiroRsMigrationAutoStart(status: string): boolean {
-  return !['none', 'recovered', 'rollback_available'].includes(status)
+  return legacyKiroRsMigrationRecoveryRequiresCheckpoint(status)
 }

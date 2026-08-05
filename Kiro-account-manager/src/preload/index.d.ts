@@ -1,5 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
-import type { LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
+import type { LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcFinalizeResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult, LegacyKiroRsMigrationIpcRollbackAckResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -35,6 +35,8 @@ interface RefreshResult {
     accessToken: string
     refreshToken?: string
     expiresIn: number
+    expiresAt?: number
+    credentialRevision?: string
     /** Enterprise 账号刷新时主进程自动获取的真实 profileArn */
     profileArn?: string
   }
@@ -100,6 +102,7 @@ interface StatusResult {
       accessToken: string
       refreshToken?: string
       expiresAt?: number
+      credentialRevision?: string
     }
   }
   error?: { message: string }
@@ -118,6 +121,9 @@ interface KiroApi {
     scan: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcScanPreview>>
     apply: (scanId: string, selection: LegacyKiroRsMigrationIpcSelection) => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcApplyResult>>
     rollback: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackResult>>
+    finalize: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcFinalizeResult>>
+    acknowledgeRollback: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackAckResult>>
+    resumeCredentialRefreshes: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult>>
     recover: () => Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRecoverResult>>
   }
   openExternal: (url: string, usePrivateMode?: boolean) => void
@@ -141,6 +147,7 @@ interface KiroApi {
       credentialKind?: 'oauth' | 'kiro_api_key'
       kiroApiKey?: string
       refreshToken?: string
+      credentialRevision?: string
       clientId?: string
       clientSecret?: string
       region?: string
@@ -470,7 +477,7 @@ interface KiroApi {
   onProxyAccountSuspended: (callback: (info: { id: string; email?: string; reason: string; message: string; suspendedAt: number }) => void) => () => void
 
   // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
-  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }) => void) => () => void
+  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string; profileArn?: string }) => void) => () => void
 
   // ============ Usage API 类型设置 ============
 
@@ -671,7 +678,7 @@ interface KiroApi {
       id?: string; email?: string; accessToken?: string; refreshToken?: string
       clientId?: string; clientSecret?: string; region?: string
       authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'; provider?: string
-      profileArn?: string; expiresAt?: number; proxyUrl?: string
+      profileArn?: string; expiresAt?: number; credentialRevision?: string; proxyUrl?: string
     }
     model?: string
     message?: string
@@ -682,6 +689,7 @@ interface KiroApi {
     model?: string
     content?: string
     usage?: { inputTokens: number; outputTokens: number; credits: number }
+    credentials?: { accessToken: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string }
     error?: string
   }>
 

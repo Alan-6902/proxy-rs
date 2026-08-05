@@ -5,6 +5,7 @@ import { Sidebar, TitleBar, type PageType } from './components/layout'
 import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { useAccountsStore } from './store/accounts'
+import { legacyKiroRsMigrationRecoveryRequiresCheckpoint } from '../../shared/legacyKiroRsMigrationTransaction'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
 const TRAY_UPDATE_DEBOUNCE_MS = 400
@@ -18,8 +19,9 @@ function App(): React.JSX.Element {
 
   const {
     loadFromStorage,
-    startAutoTokenRefresh,
     stopAutoTokenRefresh,
+    suspendForLegacyMigration,
+    resumeAfterLegacyMigration,
     applyBackgroundRefreshResults,
     applyBackgroundCheckResults,
     flushSaveImmediately,
@@ -33,6 +35,7 @@ function App(): React.JSX.Element {
 
   // 切换到下一个可用账户
   const switchToNextAccount = useCallback(() => {
+    if (useAccountsStore.getState().legacyMigrationCheckpointPending) return
     const activeAccounts = Array.from(accounts.values()).filter(acc => acc.status === 'active')
     if (activeAccounts.length <= 1) return
 
@@ -85,17 +88,48 @@ function App(): React.JSX.Element {
     }, TRAY_UPDATE_DEBOUNCE_MS)
   }, [])
 
-  // 应用启动时加载数据并启动自动刷新
+  // 应用启动时先恢复迁移检查点，再决定是否恢复自动化。
   useEffect(() => {
-    loadFromStorage().then(() => {
-      startAutoTokenRefresh()
-    })
+    let cancelled = false
+    const initialize = async (): Promise<void> => {
+      suspendForLegacyMigration()
+      const recovery = await window.api.legacyKiroRsMigration.recover()
+      const loaded = await loadFromStorage({ suspendAutomation: true })
+      if (cancelled) return
+
+      if (!recovery.ok || !loaded) {
+        setCurrentPage('configSync')
+        return
+      }
+      if (recovery.value.rollbackSyncRequired) {
+        const acknowledged = await window.api.legacyKiroRsMigration.acknowledgeRollback()
+        if (
+          !cancelled &&
+          acknowledged.ok &&
+          acknowledged.value.status === 'acknowledged'
+        ) {
+          if (!(await resumeAfterLegacyMigration()) && !cancelled) {
+            setCurrentPage('configSync')
+          }
+        } else if (!cancelled) {
+          setCurrentPage('configSync')
+        }
+        return
+      }
+      if (legacyKiroRsMigrationRecoveryRequiresCheckpoint(recovery.value.status)) {
+        setCurrentPage('configSync')
+        return
+      }
+      if (!(await resumeAfterLegacyMigration())) setCurrentPage('configSync')
+    }
+    void initialize()
     localStorage.removeItem(LEGACY_WEBHOOK_STORAGE_KEY)
 
     return () => {
+      cancelled = true
       stopAutoTokenRefresh()
     }
-  }, [loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh])
+  }, [loadFromStorage, resumeAfterLegacyMigration, stopAutoTokenRefresh, suspendForLegacyMigration])
 
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
@@ -115,7 +149,11 @@ function App(): React.JSX.Element {
 
   // 关闭/刷新前强制 flush 防抖中的待保存数据，防止数据丢失
   useEffect(() => {
-    const handleBeforeUnload = (): void => { void flushSaveImmediately() }
+    const handleBeforeUnload = (): void => {
+      void flushSaveImmediately().catch((error) => {
+        console.error('Failed to flush accounts before unload:', error)
+      })
+    }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -131,6 +169,7 @@ function App(): React.JSX.Element {
   // 监听托盘刷新账户事件
   useEffect(() => {
     const unsubscribe = window.api.onTrayRefreshAccount(() => {
+      if (useAccountsStore.getState().legacyMigrationCheckpointPending) return
       checkAndRefreshExpiringTokens()
       updateTrayInfo()
     })
@@ -153,15 +192,27 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const refreshBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> = []
     let flushTimer: ReturnType<typeof setTimeout> | null = null
+    let bufferEpoch = useAccountsStore.getState().legacyMigrationEpoch
 
     const flush = (): void => {
       flushTimer = null
       if (refreshBuffer.length === 0) return
+      const migration = useAccountsStore.getState()
+      if (
+        migration.legacyMigrationCheckpointPending ||
+        migration.legacyMigrationEpoch !== bufferEpoch
+      ) {
+        refreshBuffer.splice(0)
+        return
+      }
       const batch = refreshBuffer.splice(0)
       applyBackgroundRefreshResults(batch)
     }
 
     const unsubscribe = window.api.onBackgroundRefreshResult((data) => {
+      const migration = useAccountsStore.getState()
+      if (migration.legacyMigrationCheckpointPending) return
+      if (refreshBuffer.length === 0) bufferEpoch = migration.legacyMigrationEpoch
       refreshBuffer.push(data)
       if (!flushTimer) {
         flushTimer = setTimeout(flush, BACKGROUND_RESULT_FLUSH_MS)
@@ -181,15 +232,27 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const checkBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> = []
     let flushTimer: ReturnType<typeof setTimeout> | null = null
+    let bufferEpoch = useAccountsStore.getState().legacyMigrationEpoch
 
     const flush = (): void => {
       flushTimer = null
       if (checkBuffer.length === 0) return
+      const migration = useAccountsStore.getState()
+      if (
+        migration.legacyMigrationCheckpointPending ||
+        migration.legacyMigrationEpoch !== bufferEpoch
+      ) {
+        checkBuffer.splice(0)
+        return
+      }
       const batch = checkBuffer.splice(0)
       applyBackgroundCheckResults(batch)
     }
 
     const unsubscribe = window.api.onBackgroundCheckResult((data) => {
+      const migration = useAccountsStore.getState()
+      if (migration.legacyMigrationCheckpointPending) return
+      if (checkBuffer.length === 0) bufferEpoch = migration.legacyMigrationEpoch
       checkBuffer.push(data)
       if (!flushTimer) {
         flushTimer = setTimeout(flush, BACKGROUND_RESULT_FLUSH_MS)
@@ -208,6 +271,7 @@ function App(): React.JSX.Element {
   // 反代触发后，把封禁状态同步到 store 让 UI 显示
   useEffect(() => {
     const unsubscribe = window.api.onProxyAccountSuspended((info) => {
+      if (useAccountsStore.getState().legacyMigrationCheckpointPending) return
       console.warn(`[App] Account suspended via proxy: ${info.email || info.id} (${info.reason})`)
       updateAccountStatus(info.id, 'error', `[${info.reason}] ${info.message}`)
     })
@@ -216,17 +280,34 @@ function App(): React.JSX.Element {
     }
   }, [updateAccountStatus])
 
-  // 监听反代账号更新事件（Enterprise profileArn 自愈），持久化到 store + 磁盘
+  // 监听反代账号更新事件（Token 刷新 / Enterprise profileArn 自愈），持久化到 store + 磁盘
   useEffect(() => {
     const unsubscribe = window.api.onProxyAccountUpdate((info) => {
-      if (!info.profileArn) return
+      if (useAccountsStore.getState().legacyMigrationCheckpointPending) return
       const account = useAccountsStore.getState().accounts.get(info.id)
-      if (!account || account.credentials?.profileArn === info.profileArn) return
+      if (!account) return
+      const credentialChanged =
+        (info.accessToken !== undefined && info.accessToken !== account.credentials.accessToken) ||
+        (info.refreshToken !== undefined && info.refreshToken !== account.credentials.refreshToken) ||
+        (info.expiresAt !== undefined && info.expiresAt !== account.credentials.expiresAt) ||
+        (info.credentialRevision !== undefined &&
+          info.credentialRevision !== account.credentials.credentialRevision) ||
+        (info.profileArn !== undefined && info.profileArn !== account.credentials.profileArn)
+      if (!credentialChanged) return
       updateAccount(info.id, {
-        profileArn: info.profileArn,
-        credentials: { ...account.credentials, profileArn: info.profileArn }
+        ...(info.profileArn ? { profileArn: info.profileArn } : {}),
+        credentials: {
+          ...account.credentials,
+          ...(info.accessToken !== undefined ? { accessToken: info.accessToken } : {}),
+          ...(info.refreshToken !== undefined ? { refreshToken: info.refreshToken } : {}),
+          ...(info.expiresAt !== undefined ? { expiresAt: info.expiresAt } : {}),
+          ...(info.credentialRevision !== undefined
+            ? { credentialRevision: info.credentialRevision }
+            : {}),
+          ...(info.profileArn !== undefined ? { profileArn: info.profileArn } : {})
+        }
       })
-      console.log(`[App] Persisted Enterprise profileArn for ${info.id}`)
+      console.log(`[App] Persisted proxy account credentials for ${info.id}`)
     })
     return () => {
       unsubscribe()

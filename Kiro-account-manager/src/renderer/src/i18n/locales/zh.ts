@@ -75,7 +75,7 @@ const zh = {
     checkStatus: '检查状态',
     welcome: {
       title: '欢迎使用 Kiro 账户管理器',
-      description: '一个功能强大的 Kiro IDE 多账号管理工具',
+      description: 'Kiro 多账号与 API 反代工具',
       features: {
         multiAccount: '管理多个 Kiro 账号',
         autoRefresh: 'Token 过期前自动刷新',
@@ -280,7 +280,7 @@ const zh = {
   about: {
     title: '关于',
     version: '版本 {version}',
-    description: '一个功能强大的 Kiro IDE 多账号管理工具',
+    description: 'Kiro 多账号与 API 反代工具',
     features: '功能特性',
     techStack: '技术栈',
     author: '作者',

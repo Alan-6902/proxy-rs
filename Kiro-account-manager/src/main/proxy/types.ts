@@ -389,6 +389,7 @@ export interface ProxyAccount {
   kiroApiKey?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   refreshToken?: string
+  credentialRevision?: string
   clientId?: string
   clientSecret?: string
   region?: string
@@ -595,6 +596,7 @@ export interface StoredProxyAccount {
     kiroApiKey?: string
     credentialKind?: 'oauth' | 'kiro_api_key'
     refreshToken?: string
+    credentialRevision?: string
     profileArn?: string
     expiresAt?: number
     clientId?: string
@@ -650,6 +652,7 @@ export function buildProxyAccounts(
         kiroApiKey: plan.kiroApiKey,
         credentialKind: plan.credentialKind,
         refreshToken: credentials.refreshToken,
+        credentialRevision: credentials.credentialRevision,
         profileArn: account.profileArn || credentials.profileArn,
         expiresAt: credentials.expiresAt,
         clientId: credentials.clientId,
@@ -669,6 +672,7 @@ export type TokenRefreshCallback = (account: ProxyAccount) => Promise<{
   accessToken?: string
   refreshToken?: string
   expiresAt?: number
+  credentialRevision?: string
   error?: string
 }>
 

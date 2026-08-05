@@ -15,6 +15,8 @@ export interface AccountCredentials {
   accessToken?: string
   csrfToken?: string
   refreshToken?: string
+  /** Main-process generation token for CAS-protected OAuth rotation fields. */
+  credentialRevision?: string
   clientId?: string
   clientSecret?: string
   region?: string

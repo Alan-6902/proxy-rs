@@ -5,7 +5,9 @@ import type {
   LegacyKiroRsMigrationIpcScanPreview,
   LegacyKiroRsMigrationIpcSelection
 } from '../../../../shared/legacyKiroRsMigrationIpc'
+import { legacyKiroRsMigrationErrorBlocksAutoStart } from '../../../../shared/legacyKiroRsMigrationTransaction'
 import { Button, Card, CardContent, CardHeader, CardTitle, Label, Switch } from '../ui'
+import { useAccountsStore } from '../../store/accounts'
 
 import {
   defaultLegacyKiroRsMigrationSelection,
@@ -30,6 +32,22 @@ const errorText = (code: LegacyKiroRsMigrationIpcErrorCode, isEn: boolean): stri
     ROLLBACK_NOT_AVAILABLE: [
       'No completed migration is available to roll back.',
       '当前没有可回滚的已完成迁移。'
+    ],
+    FINALIZE_NOT_AVAILABLE: [
+      'No migrated snapshot is available to keep.',
+      '当前没有可保留的迁移快照。'
+    ],
+    ROLLBACK_ACK_NOT_AVAILABLE: [
+      'No restored snapshot is awaiting reload confirmation.',
+      '当前没有等待重载确认的回滚快照。'
+    ],
+    SNAPSHOT_CHANGED: [
+      'The protected snapshot changed. Automatic writes remain paused.',
+      '受保护快照已变化，自动写入仍保持暂停。'
+    ],
+    MIGRATION_CONFIRMATION_REQUIRED: [
+      'Keep or roll back the migration before changing local data.',
+      '请先保留或回滚迁移结果，再修改本地数据。'
     ],
     SCAN_NOT_AVAILABLE: [
       'Scan expired. Scan again before applying.',
@@ -63,6 +81,17 @@ const errorText = (code: LegacyKiroRsMigrationIpcErrorCode, isEn: boolean): stri
 }
 
 export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.ReactNode {
+  const loadFromStorage = useAccountsStore((store) => store.loadFromStorage)
+  const suspendForLegacyMigration = useAccountsStore(
+    (store) => store.suspendForLegacyMigration
+  )
+  const resumeAfterLegacyMigration = useAccountsStore(
+    (store) => store.resumeAfterLegacyMigration
+  )
+  const flushSaveImmediately = useAccountsStore((store) => store.flushSaveImmediately)
+  const legacyMigrationCheckpointPending = useAccountsStore(
+    (store) => store.legacyMigrationCheckpointPending
+  )
   const [state, setState] = useState<ViewState>('idle')
   const [preview, setPreview] = useState<LegacyKiroRsMigrationIpcScanPreview | null>(null)
   const [selection, setSelection] = useState<LegacyKiroRsMigrationIpcSelection>({
@@ -74,6 +103,7 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
   const [recoveryStatus, setRecoveryStatus] = useState<LegacyKiroRsMigrationRecoveryStatus>('none')
   const [rollbackAvailable, setRollbackAvailable] = useState(false)
   const [confirmRollback, setConfirmRollback] = useState(false)
+  const [checkpointLoaded, setCheckpointLoaded] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
   const handleFailure = useCallback(
@@ -90,6 +120,14 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
     },
     [isEn]
   )
+
+  const rehydrateCheckpoint = useCallback(async (): Promise<boolean> => {
+    suspendForLegacyMigration()
+    const loaded = await loadFromStorage({ suspendAutomation: true })
+    setCheckpointLoaded(loaded)
+    return loaded
+  }, [loadFromStorage, suspendForLegacyMigration])
+
   const recover = useCallback(async (): Promise<void> => {
     setState('loading')
     setMessage(null)
@@ -105,13 +143,72 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
     setRecoveryStatus(nextStatus)
     setRollbackAvailable(result.value.rollbackAvailable)
     if (!result.value.rollbackAvailable) setConfirmRollback(false)
+
+    if (result.value.rollbackAvailable) {
+      const loaded = await rehydrateCheckpoint()
+      setMessage(
+        loaded
+          ? isEn
+            ? 'Migration is protected. Keep it or roll it back before automatic writes resume.'
+            : '迁移结果已受保护。保留或回滚后才会恢复自动写入。'
+          : isEn
+            ? 'Could not reload the migrated snapshot. Automatic writes remain paused.'
+            : '无法重新加载迁移快照，自动写入仍保持暂停。'
+      )
+      setState(loaded ? 'succeeded' : 'failed')
+      return
+    }
+
+    if (result.value.rollbackSyncRequired) {
+      const loaded = await rehydrateCheckpoint()
+      if (!loaded) {
+        setMessage(recoveryMessage)
+        setState('failed')
+        return
+      }
+      const acknowledged = await window.api.legacyKiroRsMigration.acknowledgeRollback()
+      if (!acknowledged.ok) {
+        handleFailure(acknowledged.errorCode)
+        return
+      }
+      if (acknowledged.value.status === 'cleanup_pending') {
+        setRecoveryStatus('cleanup_pending')
+        setMessage(legacyKiroRsMigrationRecoveryText('cleanup_pending', isEn))
+        setState('failed')
+        return
+      }
+      if (!(await resumeAfterLegacyMigration())) {
+        handleFailure('DEPENDENCY_FAILED')
+        return
+      }
+      setRecoveryStatus('none')
+      setCheckpointLoaded(false)
+      setMessage(isEn ? 'Rollback snapshot reloaded safely.' : '回滚快照已安全重载。')
+      setState('succeeded')
+      return
+    }
+
     if (recoveryMessage) {
+      suspendForLegacyMigration()
       setMessage(recoveryMessage)
       setState('failed')
       return
     }
+    if (useAccountsStore.getState().legacyMigrationCheckpointPending) {
+      const loaded = await rehydrateCheckpoint()
+      if (!loaded) {
+        setMessage(isEn ? 'Could not reload local account data.' : '无法重新加载本地账号数据。')
+        setState('failed')
+        return
+      }
+      if (!(await resumeAfterLegacyMigration())) {
+        handleFailure('DEPENDENCY_FAILED')
+        return
+      }
+    }
+    setCheckpointLoaded(false)
     setState('idle')
-  }, [handleFailure, isEn])
+  }, [handleFailure, isEn, rehydrateCheckpoint, resumeAfterLegacyMigration, suspendForLegacyMigration])
 
   useEffect(() => {
     const unsubscribe = window.api.onProxyStatusChange((status) => {
@@ -151,23 +248,82 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
 
     setState('applying')
     setMessage(null)
+    try {
+      await flushSaveImmediately()
+    } catch {
+      handleFailure('DEPENDENCY_FAILED')
+      return
+    }
+    suspendForLegacyMigration()
     const result = await window.api.legacyKiroRsMigration.apply(preview.scanId, selection)
     if (!result.ok) {
+      if (!legacyKiroRsMigrationErrorBlocksAutoStart(result.errorCode)) {
+        const loaded = await rehydrateCheckpoint()
+        if (loaded) await resumeAfterLegacyMigration()
+      }
       handleFailure(result.errorCode)
       return
     }
 
     if (result.value.status === 'applied') {
+      const loaded = await rehydrateCheckpoint()
       setRecoveryStatus('rollback_available')
       setRollbackAvailable(true)
       setMessage(
-        isEn
-          ? `Migration completed: ${result.value.migratedCount} account(s).`
-          : `迁移完成：${result.value.migratedCount} 个账号。`
+        loaded
+          ? isEn
+            ? `Migration completed: ${result.value.migratedCount} account(s). Keep or roll back the protected result.`
+            : `迁移完成：${result.value.migratedCount} 个账号。请保留或回滚受保护的结果。`
+          : isEn
+            ? 'Migration completed, but the local snapshot could not be reloaded. Automatic writes remain paused.'
+            : '迁移已完成，但无法重载本地快照。自动写入仍保持暂停。'
       )
+      setState(loaded ? 'succeeded' : 'failed')
+      return
     } else {
+      const loaded = await rehydrateCheckpoint()
+      if (!loaded || !(await resumeAfterLegacyMigration())) {
+        handleFailure('DEPENDENCY_FAILED')
+        return
+      }
+      setPreview(null)
       setMessage(isEn ? 'No selected data required changes.' : '所选数据无需变更。')
     }
+    setState('succeeded')
+  }
+
+  const finalize = async (): Promise<void> => {
+    if (proxyRunning || recoveryBlocked || !checkpointLoaded) return
+    setState('applying')
+    setMessage(null)
+    const loaded = await rehydrateCheckpoint()
+    if (!loaded) {
+      setMessage(isEn ? 'Could not reload the migrated snapshot.' : '无法重新加载迁移快照。')
+      setState('failed')
+      return
+    }
+    const result = await window.api.legacyKiroRsMigration.finalize()
+    if (!result.ok) {
+      handleFailure(result.errorCode)
+      return
+    }
+    if (result.value.status === 'cleanup_pending') {
+      setRecoveryStatus('cleanup_pending')
+      setRollbackAvailable(false)
+      setMessage(legacyKiroRsMigrationRecoveryText('cleanup_pending', isEn))
+      setState('failed')
+      return
+    }
+    if (!(await resumeAfterLegacyMigration())) {
+      handleFailure('DEPENDENCY_FAILED')
+      return
+    }
+    setRecoveryStatus('none')
+    setRollbackAvailable(false)
+    setCheckpointLoaded(false)
+    setConfirmRollback(false)
+    setPreview(null)
+    setMessage(isEn ? 'Migration result kept.' : '已保留迁移结果。')
     setState('succeeded')
   }
 
@@ -175,6 +331,7 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
     if (proxyRunning || recoveryBlocked) return
     setState('applying')
     setMessage(null)
+    suspendForLegacyMigration()
     const result = await window.api.legacyKiroRsMigration.rollback()
     if (!result.ok) {
       handleFailure(result.errorCode)
@@ -190,7 +347,31 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
       return
     }
 
+    setRecoveryStatus('rollback_sync_required')
+    const loaded = await rehydrateCheckpoint()
+    if (!loaded) {
+      setMessage(legacyKiroRsMigrationRecoveryText('rollback_sync_required', isEn))
+      setState('failed')
+      return
+    }
+    const acknowledged = await window.api.legacyKiroRsMigration.acknowledgeRollback()
+    if (!acknowledged.ok) {
+      handleFailure(acknowledged.errorCode)
+      return
+    }
+    if (acknowledged.value.status === 'cleanup_pending') {
+      setRecoveryStatus('cleanup_pending')
+      setMessage(legacyKiroRsMigrationRecoveryText('cleanup_pending', isEn))
+      setState('failed')
+      return
+    }
+    if (!(await resumeAfterLegacyMigration())) {
+      handleFailure('DEPENDENCY_FAILED')
+      return
+    }
     setRecoveryStatus('none')
+    setCheckpointLoaded(false)
+    setPreview(null)
     setMessage(
       isEn
         ? `Migration rolled back: ${result.value.migratedCount} account(s).`
@@ -303,6 +484,15 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
           </div>
         )}
 
+        {legacyMigrationCheckpointPending && (
+          <div className="flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+            <ShieldAlert className="h-4 w-4 shrink-0" />
+            {isEn
+              ? 'Account saves, proxy configuration writes, and automatic refresh are paused until this migration checkpoint is resolved.'
+              : '迁移检查点解决前，账号保存、代理配置写入和自动刷新均已暂停。'}
+          </div>
+        )}
+
         {message && (
           <div
             className={`flex gap-2 rounded-md p-2 text-xs ${
@@ -326,20 +516,30 @@ export function LegacyKiroRsMigrationCard({ isEn }: { isEn: boolean }): React.Re
               <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />
               {isEn ? 'Retry recovery' : '重试恢复'}
             </Button>
-          ) : (
+          ) : !rollbackAvailable ? (
             <Button size="sm" variant="outline" onClick={() => void scan()} disabled={busy}>
               <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />
               {isEn ? 'Scan legacy data' : '扫描旧版数据'}
             </Button>
-          )}
+          ) : null}
 
-          {preview && !recoveryBlocked && (
+          {preview && !recoveryBlocked && !rollbackAvailable && (
             <Button
               size="sm"
               onClick={() => void apply()}
               disabled={busy || proxyRunning || !hasSelection || scanExpired}
             >
               {isEn ? 'Apply selected' : '应用所选'}
+            </Button>
+          )}
+
+          {rollbackAvailable && (
+            <Button
+              size="sm"
+              disabled={busy || proxyRunning || recoveryBlocked || !checkpointLoaded}
+              onClick={() => void finalize()}
+            >
+              {isEn ? 'Keep migration result' : '保留迁移结果'}
             </Button>
           )}
 

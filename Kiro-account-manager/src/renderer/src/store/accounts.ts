@@ -54,6 +54,20 @@ let saveInFlight: Promise<void> | null = null
 /** 等待本轮防抖窗口落盘的所有调用方 resolver；批量唤醒，避免风暴时 Promise 永久挂起 */
 let savePendingResolvers: Array<() => void> = []
 
+function cancelPendingAccountSave(): void {
+  if (saveDebounceTimer) {
+    clearTimeout(saveDebounceTimer)
+    saveDebounceTimer = null
+  }
+  if (saveMaxWaitTimer) {
+    clearTimeout(saveMaxWaitTimer)
+    saveMaxWaitTimer = null
+  }
+  const pending = savePendingResolvers
+  savePendingResolvers = []
+  for (const resolve of pending) resolve()
+}
+
 // ============ getFilteredAccounts / getStats 引用缓存 ============
 // 大账号量场景下这两个 selector 每次 re-render 都跑 O(n) 计算（filter + sort）
 // 通过引用比较缓存输入快照，命中时直接返回上次结果，将 N×n 计算降至 1×n
@@ -128,6 +142,8 @@ interface AccountsState {
   // 加载状态
   isLoading: boolean
   isSyncing: boolean
+  legacyMigrationCheckpointPending: boolean
+  legacyMigrationEpoch: number
 
   // 自动刷新设置
   autoRefreshEnabled: boolean
@@ -230,7 +246,9 @@ interface AccountsActions {
   getStats: () => AccountStats
 
   // 持久化
-  loadFromStorage: () => Promise<void>
+  loadFromStorage: (options?: { suspendAutomation?: boolean }) => Promise<boolean>
+  suspendForLegacyMigration: () => void
+  resumeAfterLegacyMigration: () => Promise<boolean>
   /** 防抖触发持久化（推荐：高频 mutation 自动合并写盘） */
   saveToStorage: () => Promise<void>
   /** 立即持久化（用于 beforeunload 或关键操作场景） */
@@ -376,6 +394,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   selectedIds: new Set(),
   isLoading: false,
   isSyncing: false,
+  legacyMigrationCheckpointPending: false,
+  legacyMigrationEpoch: 0,
   autoRefreshEnabled: true,
   autoRefreshInterval: 5,
   autoRefreshConcurrency: 100,
@@ -1041,6 +1061,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 状态管理 ====================
 
   updateAccountStatus: (id, status, error) => {
+    if (get().legacyMigrationCheckpointPending) return
     set((state) => {
       const accounts = new Map(state.accounts)
       const account = accounts.get(id)
@@ -1058,6 +1079,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   refreshAccountToken: async (id) => {
+    if (get().legacyMigrationCheckpointPending) return false
     const { accounts, updateAccountStatus } = get()
     const account = accounts.get(id)
     if (!account || !canRefreshUpstreamCredential(account.credentials)) return false
@@ -1065,6 +1087,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     updateAccountStatus(id, 'refreshing')
     try {
       const result = await window.api.refreshAccountToken(account)
+      if (get().legacyMigrationCheckpointPending) return false
       const refreshed = result.data
       if (result.success && refreshed) {
         set((state) => {
@@ -1079,7 +1102,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
                 ...acc.credentials,
                 accessToken: refreshed.accessToken,
                 refreshToken: refreshed.refreshToken || acc.credentials.refreshToken,
-                expiresAt: Date.now() + refreshed.expiresIn * 1000,
+                expiresAt: refreshed.expiresAt ?? Date.now() + refreshed.expiresIn * 1000,
+                credentialRevision: refreshed.credentialRevision ?? acc.credentials.credentialRevision,
                 profileArn: resolvedProfileArn
               },
               status: 'active',
@@ -1101,6 +1125,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   batchRefreshTokens: async (ids) => {
+    if (get().legacyMigrationCheckpointPending) {
+      return { success: 0, failed: 0, errors: [] }
+    }
     const { accounts, autoRefreshConcurrency } = get()
 
     const accountsToRefresh: Array<{
@@ -1112,6 +1139,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         credentialKind?: 'oauth' | 'kiro_api_key'
         kiroApiKey?: string
         refreshToken?: string
+        credentialRevision?: string
         clientId?: string
         clientSecret?: string
         region?: string
@@ -1137,6 +1165,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           credentialKind: account.credentials.credentialKind,
           kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,
+          credentialRevision: account.credentials.credentialRevision,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
@@ -1163,6 +1192,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   checkAccountStatus: async (id) => {
+    if (get().legacyMigrationCheckpointPending) return
     const { accounts, updateAccountStatus } = get()
     const account = accounts.get(id)
 
@@ -1174,6 +1204,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     try {
       // 通过主进程调用 Kiro API 获取状态（避免 CORS）
       const result = await window.api.checkAccountStatus(account)
+      if (get().legacyMigrationCheckpointPending) return
 
       if (result.success && result.data) {
         set((state) => {
@@ -1186,7 +1217,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
                   ...acc.credentials,
                   accessToken: result.data!.newCredentials.accessToken,
                   refreshToken: result.data!.newCredentials.refreshToken ?? acc.credentials.refreshToken,
-                  expiresAt: result.data!.newCredentials.expiresAt ?? acc.credentials.expiresAt
+                  expiresAt: result.data!.newCredentials.expiresAt ?? acc.credentials.expiresAt,
+                  credentialRevision: result.data!.newCredentials.credentialRevision
+                    ?? acc.credentials.credentialRevision
                 }
               : acc.credentials
 
@@ -1264,6 +1297,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   batchCheckStatus: async (ids) => {
+    if (get().legacyMigrationCheckpointPending) {
+      return { success: 0, failed: 0, errors: [] }
+    }
     const { accounts, autoRefreshConcurrency } = get()
     const accountsToCheck: Array<{
       id: string
@@ -1273,6 +1309,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         kiroApiKey?: string
         refreshToken?: string
+        credentialRevision?: string
         clientId?: string
         clientSecret?: string
         region?: string
@@ -1296,6 +1333,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           accessToken: account.credentials.accessToken,
           kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,
+          credentialRevision: account.credentials.credentialRevision,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
@@ -1379,8 +1417,38 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // ==================== 持久化 ====================
 
-  loadFromStorage: async () => {
+  suspendForLegacyMigration: () => {
+    set((state) => ({
+      legacyMigrationCheckpointPending: true,
+      legacyMigrationEpoch: state.legacyMigrationEpoch + 1
+    }))
+    cancelPendingAccountSave()
+    get().stopAutoTokenRefresh()
+    get().stopAutoSwitch()
+    get().stopAutoSave()
+  },
+
+  resumeAfterLegacyMigration: async () => {
+    const refreshAdmission = await window.api.legacyKiroRsMigration.resumeCredentialRefreshes()
+    if (!refreshAdmission.ok || !refreshAdmission.value.resumed) {
+      return false
+    }
+    set({ legacyMigrationCheckpointPending: false })
+    const state = get()
+    if (state.proxyEnabled && state.proxyUrl) {
+      void state.setProxy(true, state.proxyUrl)
+    }
+    if (state.autoSwitchEnabled) state.startAutoSwitch()
+    state.startAutoSave()
+    state.startAutoTokenRefresh()
+    return true
+  },
+
+  loadFromStorage: async (options) => {
+    const suspendAutomation = options?.suspendAutomation ?? false
+    if (suspendAutomation) get().suspendForLegacyMigration()
     set({ isLoading: true })
+    let loaded = false
 
     try {
       // 获取应用版本号
@@ -1407,6 +1475,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           groups: new Map(Object.entries(data.groups ?? {}) as [string, AccountGroup][]),
           tags: new Map(Object.entries(data.tags ?? {}) as [string, AccountTag][]),
           activeAccountId,
+          selectedIds: new Set(),
           autoRefreshEnabled: data.autoRefreshEnabled ?? true,
           autoRefreshInterval: data.autoRefreshInterval ?? 5,
           autoRefreshConcurrency: data.autoRefreshConcurrency ?? 100,
@@ -1434,26 +1503,15 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
         // 应用主题
         get().applyTheme()
-
-        // 如果代理已启用，通过 store 的 setProxy（会自动 normalize URL 并回写 UI）
-        if (data.proxyEnabled && data.proxyUrl) {
-          void get().setProxy(true, data.proxyUrl)
-        }
-
-        // 如果自动换号已启用，启动定时器
-        if (data.autoSwitchEnabled) {
-          get().startAutoSwitch()
-        }
-
-        // 启动定时自动保存（防止数据丢失）
-        get().startAutoSave()
-
+        loaded = true
       }
     } catch (error) {
       console.error('Failed to load accounts:', error)
     } finally {
       set({ isLoading: false })
     }
+    if (loaded && !suspendAutomation) loaded = await get().resumeAfterLegacyMigration()
+    return loaded
   },
 
   /**
@@ -1467,6 +1525,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
    * 同窗口内的所有调用方共享一组 resolvers，实际落盘后批量唤醒。
    */
   saveToStorage: async () => {
+    if (get().legacyMigrationCheckpointPending) return
     return new Promise<void>((resolve) => {
       savePendingResolvers.push(resolve)
       const flushNow = async (): Promise<void> => {
@@ -1474,8 +1533,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         if (saveMaxWaitTimer) { clearTimeout(saveMaxWaitTimer); saveMaxWaitTimer = null }
         const resolvers = savePendingResolvers
         savePendingResolvers = []
-        await get().flushSaveImmediately()
-        for (const r of resolvers) r()
+        try {
+          await get().flushSaveImmediately()
+        } catch (error) {
+          console.error('Failed to save accounts:', error)
+        } finally {
+          for (const r of resolvers) r()
+        }
       }
       if (saveDebounceTimer) clearTimeout(saveDebounceTimer)
       saveDebounceTimer = setTimeout(flushNow, SAVE_DEBOUNCE_MS)
@@ -1491,13 +1555,18 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
    * 同时会唤醒所有走 saveToStorage 在等本次窗口落盘的调用方。
    */
   flushSaveImmediately: async () => {
+    if (get().legacyMigrationCheckpointPending) {
+      cancelPendingAccountSave()
+      return
+    }
     if (saveDebounceTimer) { clearTimeout(saveDebounceTimer); saveDebounceTimer = null }
     if (saveMaxWaitTimer) { clearTimeout(saveMaxWaitTimer); saveMaxWaitTimer = null }
     const pending = savePendingResolvers
     savePendingResolvers = []
     if (saveInFlight) {
       const inflight = saveInFlight
-      void inflight.then(() => { for (const r of pending) r() })
+      const settlePending = (): void => { for (const r of pending) r() }
+      void inflight.then(settlePending, settlePending)
       return inflight
     }
 
@@ -1554,8 +1623,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           proxyPoolCursor,
           accountProxyBindings
         })
-      } catch (error) {
-        console.error('Failed to save accounts:', error)
       } finally {
         set({ isSyncing: false })
         saveInFlight = null
@@ -1736,9 +1803,14 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   startAutoSwitch: () => {
-    const { autoSwitchEnabled, autoSwitchInterval, checkAndAutoSwitch } = get()
+    const {
+      autoSwitchEnabled,
+      autoSwitchInterval,
+      checkAndAutoSwitch,
+      legacyMigrationCheckpointPending
+    } = get()
     
-    if (!autoSwitchEnabled) return
+    if (!autoSwitchEnabled || legacyMigrationCheckpointPending) return
     
     // 清除现有定时器
     if (autoSwitchTimer) {
@@ -1765,6 +1837,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   checkAndAutoSwitch: async () => {
+    if (get().legacyMigrationCheckpointPending) return
     const { accounts, autoSwitchThreshold, checkAccountStatus, setActiveAccount } = get()
     const activeAccount = get().getActiveAccount()
     
@@ -1777,6 +1850,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     // 刷新当前账号状态获取最新余额
     await checkAccountStatus(activeAccount.id)
+    if (get().legacyMigrationCheckpointPending) return
     
     // 重新获取更新后的账号信息
     const updatedAccount = get().accounts.get(activeAccount.id)
@@ -1813,6 +1887,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 自动 Token 刷新 ====================
 
   checkAndRefreshExpiringTokens: async () => {
+    if (get().legacyMigrationCheckpointPending) return
     const { accounts, refreshAccountToken, checkAccountStatus, autoSwitchEnabled, autoRefreshConcurrency, autoRefreshSyncInfo, autoRefreshInterval } = get()
     const now = Date.now()
     const refreshLeadMs = tokenRefreshLeadMs(autoRefreshInterval)
@@ -1882,6 +1957,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // 仅刷新失效的 Token（不刷新账户信息）
   refreshExpiredTokensOnly: async () => {
+    if (get().legacyMigrationCheckpointPending) return
     const { accounts, refreshAccountToken, autoRefreshConcurrency, autoRefreshInterval } = get()
     const now = Date.now()
     const refreshLeadMs = tokenRefreshLeadMs(autoRefreshInterval)
@@ -1933,7 +2009,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   startAutoTokenRefresh: () => {
-    const { autoRefreshEnabled, autoRefreshInterval } = get()
+    const { autoRefreshEnabled, autoRefreshInterval, legacyMigrationCheckpointPending } = get()
     
     // 如果已有定时器，先停止
     if (tokenRefreshTimer) {
@@ -1942,7 +2018,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
     
     // 如果未启用，不启动定时器
-    if (!autoRefreshEnabled) {
+    if (!autoRefreshEnabled || legacyMigrationCheckpointPending) {
       console.log('[AutoRefresh] Auto-refresh is disabled')
       return
     }
@@ -1969,6 +2045,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // 触发后台刷新（在主进程执行，不阻塞 UI）
   triggerBackgroundRefresh: async () => {
+    if (get().legacyMigrationCheckpointPending) return
     const { accounts, autoRefreshConcurrency, autoRefreshSyncInfo, autoSwitchEnabled, autoRefreshInterval } = get()
     const now = Date.now()
     const refreshLeadMs = tokenRefreshLeadMs(autoRefreshInterval)
@@ -1983,6 +2060,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         credentialKind?: 'oauth' | 'kiro_api_key'
         kiroApiKey?: string
         refreshToken?: string
+        credentialRevision?: string
         clientId?: string
         clientSecret?: string
         region?: string
@@ -2013,6 +2091,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             credentialKind: account.credentials.credentialKind,
             kiroApiKey: account.credentials.kiroApiKey,
             refreshToken: account.credentials.refreshToken,
+            credentialRevision: account.credentials.credentialRevision,
             clientId: account.credentials.clientId,
             clientSecret: account.credentials.clientSecret,
             region: account.credentials.region,
@@ -2041,7 +2120,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // 批量处理后台刷新结果：合并 N 条结果到一次 set，避免 N 次 Map 全量复制
   applyBackgroundRefreshResults: (items) => {
-    if (!items || items.length === 0) return
+    if (get().legacyMigrationCheckpointPending || !items || items.length === 0) return
 
     set((state) => {
       // 仅一次完整 Map 复制
@@ -2067,6 +2146,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         refreshToken?: string
         expiresIn?: number
+        expiresAt?: number
+        credentialRevision?: string
         profileArn?: string
         usage?: {
           current?: number
@@ -2108,7 +2189,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           ...account.credentials,
           accessToken: refreshData?.accessToken || account.credentials.accessToken,
           refreshToken: refreshData?.refreshToken || account.credentials.refreshToken,
-          expiresAt: refreshData?.expiresIn ? now + refreshData.expiresIn * 1000 : account.credentials.expiresAt,
+          expiresAt: refreshData?.expiresAt
+            ?? (refreshData?.expiresIn ? now + refreshData.expiresIn * 1000 : account.credentials.expiresAt),
+          credentialRevision: refreshData?.credentialRevision ?? account.credentials.credentialRevision,
           ...(bgProfileArn ? { profileArn: bgProfileArn } : {})
         },
         usage: refreshData?.usage ? (() => {
@@ -2159,7 +2242,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // 批量处理后台检查结果：合并 N 条结果到一次 set
   applyBackgroundCheckResults: (items) => {
-    if (!items || items.length === 0) return
+    if (get().legacyMigrationCheckpointPending || !items || items.length === 0) return
 
     set((state) => {
       const accounts = new Map(state.accounts)
@@ -2264,6 +2347,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 定时自动保存 ====================
 
   startAutoSave: () => {
+    if (get().legacyMigrationCheckpointPending) return
     // 如果已有定时器，先停止
     if (autoSaveTimer) {
       clearInterval(autoSaveTimer)

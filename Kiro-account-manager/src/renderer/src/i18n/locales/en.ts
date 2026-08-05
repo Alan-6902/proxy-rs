@@ -75,7 +75,7 @@ const en = {
     checkStatus: 'Check Status',
     welcome: {
       title: 'Welcome to Kiro Account Manager',
-      description: 'A powerful multi-account management tool for Kiro IDE',
+      description: 'A Kiro multi-account and API proxy tool',
       features: {
         multiAccount: 'Manage multiple Kiro accounts',
         autoRefresh: 'Auto refresh tokens before expiration',
@@ -280,7 +280,7 @@ const en = {
   about: {
     title: 'About',
     version: 'Version {version}',
-    description: 'A powerful multi-account management tool for Kiro IDE',
+    description: 'A Kiro multi-account and API proxy tool',
     features: 'Features',
     techStack: 'Tech Stack',
     author: 'Author',

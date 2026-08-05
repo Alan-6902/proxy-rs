@@ -19,7 +19,17 @@ export function legacyKiroRsMigrationRecoveryStatusForError(
 export function isLegacyKiroRsMigrationRecoveryBlocked(
   status: LegacyKiroRsMigrationRecoveryStatus
 ): boolean {
-  return status === 'manual_intervention' || status === 'cleanup_pending'
+  return (
+    status === 'manual_intervention' ||
+    status === 'cleanup_pending' ||
+    status === 'rollback_sync_required'
+  )
+}
+
+export function isLegacyKiroRsMigrationCheckpointPending(
+  status: LegacyKiroRsMigrationRecoveryStatus
+): boolean {
+  return status === 'rollback_available' || status === 'rollback_sync_required'
 }
 
 export function defaultLegacyKiroRsMigrationSelection(
@@ -51,6 +61,11 @@ export function legacyKiroRsMigrationRecoveryText(
     return isEn
       ? 'Rollback data is restored, but encrypted journal cleanup is pending. Retry recovery before starting the proxy.'
       : '回滚数据已恢复，但加密迁移日志仍待清理。请重试恢复后再启动代理。'
+  }
+  if (status === 'rollback_sync_required') {
+    return isEn
+      ? 'Rollback data is restored. Reload the local snapshot before resuming automatic writes.'
+      : '回滚数据已恢复。重新加载本地快照后才会恢复自动写入。'
   }
   return null
 }

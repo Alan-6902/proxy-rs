@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS } from '../shared/legacyKiroRsMigrationIpc'
-import type { LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
+import type { LegacyKiroRsMigrationIpcResult, LegacyKiroRsMigrationIpcScanPreview, LegacyKiroRsMigrationIpcApplyResult, LegacyKiroRsMigrationIpcRollbackResult, LegacyKiroRsMigrationIpcFinalizeResult, LegacyKiroRsMigrationIpcRollbackAckResult, LegacyKiroRsMigrationIpcRecoverResult, LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult, LegacyKiroRsMigrationIpcSelection } from '../shared/legacyKiroRsMigrationIpc'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -65,6 +65,7 @@ const api = {
       credentialKind?: 'oauth' | 'kiro_api_key'
       kiroApiKey?: string
       refreshToken?: string
+      credentialRevision?: string
       clientId?: string
       clientSecret?: string
       region?: string
@@ -158,6 +159,12 @@ const api = {
       ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.apply, scanId, selection),
     rollback: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackResult>> =>
       ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.rollback),
+    finalize: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcFinalizeResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.finalize),
+    acknowledgeRollback: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackAckResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.acknowledgeRollback),
+    resumeCredentialRefreshes: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult>> =>
+      ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.resumeCredentialRefreshes),
     recover: (): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRecoverResult>> =>
       ipcRenderer.invoke(LEGACY_KIRO_RS_MIGRATION_IPC_CHANNELS.recover)
   },
@@ -569,7 +576,7 @@ const api = {
   },
 
   // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
-  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }) => void): (() => void) => {
+  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string; profileArn?: string }) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }): void => {
       callback(info)
     }
@@ -868,7 +875,7 @@ const api = {
       id?: string; email?: string; accessToken?: string; refreshToken?: string
       clientId?: string; clientSecret?: string; region?: string
       authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'; provider?: string
-      profileArn?: string; expiresAt?: number; proxyUrl?: string
+      profileArn?: string; expiresAt?: number; credentialRevision?: string; proxyUrl?: string
     }
     model?: string
     message?: string
@@ -879,6 +886,7 @@ const api = {
     model?: string
     content?: string
     usage?: { inputTokens: number; outputTokens: number; credits: number }
+    credentials?: { accessToken: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string }
     error?: string
   }> => {
     return ipcRenderer.invoke('diagnose:account-liveness', params)

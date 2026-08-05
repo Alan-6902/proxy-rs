@@ -1257,14 +1257,16 @@ export class ProxyServer {
         this.accountPool.updateAccount(account.id, {
           accessToken: result.accessToken,
           refreshToken: result.refreshToken || account.refreshToken,
-          expiresAt: result.expiresAt
+          expiresAt: result.expiresAt,
+          credentialRevision: result.credentialRevision
         })
         // 通知外部更新
         this.events.onAccountUpdate?.({
           ...account,
           accessToken: result.accessToken,
           refreshToken: result.refreshToken || account.refreshToken,
-          expiresAt: result.expiresAt
+          expiresAt: result.expiresAt,
+          credentialRevision: result.credentialRevision
         })
         console.log(`[ProxyServer] Token refreshed for ${account.email || account.id}`)
         return true

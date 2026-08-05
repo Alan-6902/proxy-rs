@@ -3,6 +3,7 @@ import type { LegacyKiroRsMigrationIpcScanPreview } from '../../src/shared/legac
 import {
   defaultLegacyKiroRsMigrationSelection,
   hasLegacyKiroRsMigrationSelection,
+  isLegacyKiroRsMigrationCheckpointPending,
   isLegacyKiroRsMigrationRecoveryBlocked,
   legacyKiroRsMigrationRecoveryText
 } from '../../src/renderer/src/components/pages/legacyKiroRsMigrationViewModel'
@@ -30,9 +31,13 @@ describe('legacy kiro-rs migration view model', () => {
   it('treats manual intervention and cleanup pending as blocking recovery states', () => {
     expect(isLegacyKiroRsMigrationRecoveryBlocked('manual_intervention')).toBe(true)
     expect(isLegacyKiroRsMigrationRecoveryBlocked('cleanup_pending')).toBe(true)
+    expect(isLegacyKiroRsMigrationRecoveryBlocked('rollback_sync_required')).toBe(true)
     expect(isLegacyKiroRsMigrationRecoveryBlocked('none')).toBe(false)
     expect(isLegacyKiroRsMigrationRecoveryBlocked('recovered')).toBe(false)
     expect(isLegacyKiroRsMigrationRecoveryBlocked('rollback_available')).toBe(false)
+    expect(isLegacyKiroRsMigrationCheckpointPending('rollback_available')).toBe(true)
+    expect(isLegacyKiroRsMigrationCheckpointPending('rollback_sync_required')).toBe(true)
+    expect(isLegacyKiroRsMigrationCheckpointPending('none')).toBe(false)
   })
 
   it('selects only new accounts and settings with an empty target', () => {
@@ -71,6 +76,9 @@ describe('legacy kiro-rs migration view model', () => {
       'manual intervention'
     )
     expect(legacyKiroRsMigrationRecoveryText('cleanup_pending', false)).toContain('日志仍待清理')
+    expect(legacyKiroRsMigrationRecoveryText('rollback_sync_required', false)).toContain(
+      '重新加载'
+    )
     expect(legacyKiroRsMigrationRecoveryText('none', false)).toBeNull()
   })
 })

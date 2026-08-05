@@ -684,7 +684,7 @@ export function SettingsPage() {
             </select>
           </div>
           <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3 space-y-1">
-            <p>• <strong>REST</strong>: {isEn ? 'Official Kiro IDE format, recommended' : '官方 Kiro IDE 使用的格式，推荐使用'}</p>
+            <p>• <strong>REST</strong>: {isEn ? 'REST API format (recommended)' : 'REST API 格式（推荐）'}</p>
             <p>• <strong>CBOR</strong>: {isEn ? 'Web portal format, may have different fields' : '网页端格式，字段可能有差异'}</p>
           </div>
         </CardContent>

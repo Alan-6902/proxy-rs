@@ -1,12 +1,19 @@
 import type { LegacyKiroRsMigrationService } from './legacyKiroRsMigration'
 import type { LegacyKiroRsMigrationTransaction } from './legacyKiroRsMigrationTransaction'
 import { LegacyKiroRsMigrationError } from '../shared/legacyKiroRsMigration'
-import { LegacyKiroRsMigrationTransactionError } from '../shared/legacyKiroRsMigrationTransaction'
+import {
+  LegacyKiroRsMigrationTransactionError,
+  legacyKiroRsMigrationErrorBlocksAutoStart,
+  legacyKiroRsMigrationRecoveryRequiresCheckpoint
+} from '../shared/legacyKiroRsMigrationTransaction'
 import type {
   LegacyKiroRsMigrationIpcApplyResult,
   LegacyKiroRsMigrationIpcErrorCode,
+  LegacyKiroRsMigrationIpcFinalizeResult,
   LegacyKiroRsMigrationIpcRecoverResult,
+  LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult,
   LegacyKiroRsMigrationIpcResult,
+  LegacyKiroRsMigrationIpcRollbackAckResult,
   LegacyKiroRsMigrationIpcRollbackResult,
   LegacyKiroRsMigrationIpcScanPreview,
   LegacyKiroRsMigrationIpcSelection
@@ -14,9 +21,14 @@ import type {
 
 type MigrationDependencies = {
   scanner: Pick<LegacyKiroRsMigrationService, 'scan'>
-  transaction: Pick<LegacyKiroRsMigrationTransaction, 'apply' | 'rollback' | 'recover'>
+  transaction: Pick<
+    LegacyKiroRsMigrationTransaction,
+    'apply' | 'rollback' | 'finalize' | 'acknowledgeRollback' | 'recover'
+  >
   ensureReady: () => Promise<void>
   proxyIsRunning: () => boolean
+  quiesceCredentialRefreshes: () => Promise<void>
+  resumeCredentialRefreshes: () => boolean
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -46,6 +58,10 @@ function errorCode(error: unknown): LegacyKiroRsMigrationIpcErrorCode {
 }
 
 export class LegacyKiroRsMigrationIpc {
+  private applyOperationsInFlight = 0
+  private credentialRefreshResumeBlocked = false
+  private credentialRefreshResumeClearPending = false
+
   constructor(private readonly dependencies: MigrationDependencies) {}
 
   async scan(): Promise<LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcScanPreview>> {
@@ -85,10 +101,29 @@ export class LegacyKiroRsMigrationIpc {
     try {
       await this.dependencies.ensureReady()
       if (this.dependencies.proxyIsRunning()) return { ok: false, errorCode: 'PROXY_RUNNING' }
-      const result = await this.dependencies.transaction.apply(scanId, selection)
-      return {
-        ok: true,
-        value: { status: result.status, migratedCount: result.migratedAccountIds.length }
+      this.applyOperationsInFlight += 1
+      let retainCredentialRefreshBlock = false
+      try {
+        await this.dependencies.quiesceCredentialRefreshes()
+        const result = await this.dependencies.transaction.apply(scanId, selection)
+        retainCredentialRefreshBlock = result.status === 'applied'
+        return {
+          ok: true,
+          value: { status: result.status, migratedCount: result.migratedAccountIds.length }
+        }
+      } catch (error) {
+        retainCredentialRefreshBlock = legacyKiroRsMigrationErrorBlocksAutoStart(errorCode(error))
+        throw error
+      } finally {
+        if (retainCredentialRefreshBlock) this.retainCredentialRefreshResumeBlock()
+        this.applyOperationsInFlight -= 1
+        if (
+          this.applyOperationsInFlight === 0 &&
+          this.credentialRefreshResumeClearPending
+        ) {
+          this.credentialRefreshResumeBlocked = false
+          this.credentialRefreshResumeClearPending = false
+        }
       }
     } catch (error) {
       return { ok: false, errorCode: errorCode(error) }
@@ -102,6 +137,43 @@ export class LegacyKiroRsMigrationIpc {
       await this.dependencies.ensureReady()
       if (this.dependencies.proxyIsRunning()) return { ok: false, errorCode: 'PROXY_RUNNING' }
       const result = await this.dependencies.transaction.rollback()
+      this.retainCredentialRefreshResumeBlock()
+      return {
+        ok: true,
+        value: { status: result.status, migratedCount: result.migratedAccountIds.length }
+      }
+    } catch (error) {
+      return { ok: false, errorCode: errorCode(error) }
+    }
+  }
+
+  async finalize(): Promise<
+    LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcFinalizeResult>
+  > {
+    try {
+      await this.dependencies.ensureReady()
+      if (this.dependencies.proxyIsRunning()) return { ok: false, errorCode: 'PROXY_RUNNING' }
+      const result = await this.dependencies.transaction.finalize()
+      if (result.status === 'finalized') this.clearCredentialRefreshResumeBlock()
+      else this.retainCredentialRefreshResumeBlock()
+      return {
+        ok: true,
+        value: { status: result.status, migratedCount: result.migratedAccountIds.length }
+      }
+    } catch (error) {
+      return { ok: false, errorCode: errorCode(error) }
+    }
+  }
+
+  async acknowledgeRollback(): Promise<
+    LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcRollbackAckResult>
+  > {
+    try {
+      await this.dependencies.ensureReady()
+      if (this.dependencies.proxyIsRunning()) return { ok: false, errorCode: 'PROXY_RUNNING' }
+      const result = await this.dependencies.transaction.acknowledgeRollback()
+      if (result.status === 'acknowledged') this.clearCredentialRefreshResumeBlock()
+      else this.retainCredentialRefreshResumeBlock()
       return {
         ok: true,
         value: { status: result.status, migratedCount: result.migratedAccountIds.length }
@@ -115,18 +187,56 @@ export class LegacyKiroRsMigrationIpc {
     try {
       await this.dependencies.ensureReady()
       const result = await this.dependencies.transaction.recover()
+      if (legacyKiroRsMigrationRecoveryRequiresCheckpoint(result.status)) {
+        this.retainCredentialRefreshResumeBlock()
+      } else {
+        this.clearCredentialRefreshResumeBlock()
+      }
       const rollbackAvailable = result.status === 'rollback_available'
+      const rollbackSyncRequired = result.status === 'rollback_sync_required'
       return {
         ok: true,
         value: {
           status: result.status,
           migratedCount: result.migratedAccountIds.length,
           proxyRunning: this.dependencies.proxyIsRunning(),
-          rollbackAvailable
+          rollbackAvailable,
+          rollbackSyncRequired
         }
       }
     } catch (error) {
       return { ok: false, errorCode: errorCode(error) }
     }
+  }
+
+  async resumeCredentialRefreshes(): Promise<
+    LegacyKiroRsMigrationIpcResult<LegacyKiroRsMigrationIpcResumeCredentialRefreshesResult>
+  > {
+    try {
+      await this.dependencies.ensureReady()
+      if (this.applyOperationsInFlight > 0 || this.credentialRefreshResumeBlocked) {
+        return { ok: true, value: { resumed: false } }
+      }
+      return {
+        ok: true,
+        value: { resumed: this.dependencies.resumeCredentialRefreshes() }
+      }
+    } catch (error) {
+      return { ok: false, errorCode: errorCode(error) }
+    }
+  }
+
+  private clearCredentialRefreshResumeBlock(): void {
+    if (this.applyOperationsInFlight === 0) {
+      this.credentialRefreshResumeBlocked = false
+      this.credentialRefreshResumeClearPending = false
+    } else {
+      this.credentialRefreshResumeClearPending = true
+    }
+  }
+
+  private retainCredentialRefreshResumeBlock(): void {
+    this.credentialRefreshResumeBlocked = true
+    this.credentialRefreshResumeClearPending = false
   }
 }

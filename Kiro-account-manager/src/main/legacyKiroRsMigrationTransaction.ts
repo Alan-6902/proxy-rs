@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID as generateRandomUUID } from 'node:crypto'
 import type { ApiKey, ProxyConfig } from './proxy/types'
 import type { PreparedMigrationPlan } from './legacyKiroRsMigration'
 import { LegacyKiroRsMigrationError } from '../shared/legacyKiroRsMigration'
@@ -6,12 +6,17 @@ import {
   LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES,
   LegacyKiroRsMigrationTransactionError,
   type LegacyKiroRsMigrationApplyResult,
+  type LegacyKiroRsMigrationFinalizeResult,
   type LegacyKiroRsMigrationRecoveryResult,
+  type LegacyKiroRsMigrationRollbackAckResult,
   type LegacyKiroRsMigrationRollbackResult,
   type LegacyKiroRsMigrationSelection
 } from '../shared/legacyKiroRsMigrationTransaction'
 
-import { legacyKiroRsMigrationErrorBlocksAutoStart } from '../shared/legacyKiroRsMigrationTransaction'
+import {
+  legacyKiroRsMigrationErrorBlocksAutoStart,
+  legacyKiroRsMigrationRecoveryRequiresCheckpoint
+} from '../shared/legacyKiroRsMigrationTransaction'
 
 type AccountData = Record<string, unknown> & {
   accounts: Record<string, Record<string, unknown>>
@@ -62,7 +67,7 @@ export interface LegacyKiroRsMigrationTransactionDependencies {
   }
   coordinator: LegacyKiroRsMigrationCoordinator
   proxyIsRunning: () => boolean
-  setAutoStartBlocked: (blocked: boolean) => void
+  setCheckpointBlocked: (blocked: boolean) => void
   clock?: () => number
   randomUUID?: () => string
 }
@@ -182,7 +187,7 @@ export class LegacyKiroRsMigrationTransaction {
 
   constructor(private readonly dependencies: LegacyKiroRsMigrationTransactionDependencies) {
     this.clock = dependencies.clock ?? Date.now
-    this.randomUUID = dependencies.randomUUID ?? crypto.randomUUID
+    this.randomUUID = dependencies.randomUUID ?? generateRandomUUID
   }
 
   async apply(
@@ -190,7 +195,7 @@ export class LegacyKiroRsMigrationTransaction {
     selection: LegacyKiroRsMigrationSelection
   ): Promise<LegacyKiroRsMigrationApplyResult> {
     return this.boundary(() =>
-      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationApplyResult>(async () => {
+      this.runExclusiveWithCheckpointGate<LegacyKiroRsMigrationApplyResult>(async () => {
         if (!selection.accounts && !selection.inboundApiKey && !selection.adminApiKey) {
           return {
             status: 'noop',
@@ -225,6 +230,7 @@ export class LegacyKiroRsMigrationTransaction {
             LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.TARGET_CHANGED
           )
         }
+        this.dependencies.setCheckpointBlocked(true)
         try {
           await this.dependencies.journal.write(clone(journal))
         } catch {
@@ -247,13 +253,13 @@ export class LegacyKiroRsMigrationTransaction {
               : LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
           )
         }
-      }, result => result.status === 'applied' ? false : undefined)
+      }, result => (result.status === 'applied' ? true : undefined))
     )
   }
 
   async recover(): Promise<LegacyKiroRsMigrationRecoveryResult> {
     return this.boundary(() =>
-      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationRecoveryResult>(async () => {
+      this.runExclusiveWithCheckpointGate<LegacyKiroRsMigrationRecoveryResult>(async () => {
         const journal = await this.readValidJournal()
         if (!journal) return { status: 'none', migratedAccountIds: [] }
         if (journal.operation === 'apply' && journal.state === 'completed') {
@@ -274,32 +280,10 @@ export class LegacyKiroRsMigrationTransaction {
               migratedAccountIds: [...journal.migratedAccountIds]
             }
           }
-          try {
-            await this.dependencies.journal.remove()
-            return {
-              status: 'recovered',
-              scanId: journal.scanId,
-              migratedAccountIds: [...journal.migratedAccountIds]
-            }
-          } catch {
-            const cleanup = await this.classifyRollbackCleanup(journal)
-            if (cleanup === 'removed')
-              return {
-                status: 'recovered',
-                scanId: journal.scanId,
-                migratedAccountIds: [...journal.migratedAccountIds]
-              }
-            if (cleanup === 'pending')
-              return {
-                status: 'cleanup_pending',
-                scanId: journal.scanId,
-                migratedAccountIds: [...journal.migratedAccountIds]
-              }
-            return {
-              status: 'manual_intervention',
-              scanId: journal.scanId,
-              migratedAccountIds: [...journal.migratedAccountIds]
-            }
+          return {
+            status: 'rollback_sync_required',
+            scanId: journal.scanId,
+            migratedAccountIds: [...journal.migratedAccountIds]
           }
         }
         if (journal.state === 'rolled_back') {
@@ -331,37 +315,15 @@ export class LegacyKiroRsMigrationTransaction {
           }
           if (journal.operation === 'rollback') {
             await this.writeJournal(journal, 'rolled_back')
-            try {
-              await this.dependencies.journal.remove()
-              return {
-                status: 'recovered',
-                scanId: journal.scanId,
-                migratedAccountIds: [...journal.migratedAccountIds]
-              }
-            } catch {
-              const cleanup = await this.classifyRollbackCleanup(journal)
-              if (cleanup === 'removed')
-                return {
-                  status: 'recovered',
-                  scanId: journal.scanId,
-                  migratedAccountIds: [...journal.migratedAccountIds]
-                }
-              if (cleanup === 'pending')
-                return {
-                  status: 'cleanup_pending',
-                  scanId: journal.scanId,
-                  migratedAccountIds: [...journal.migratedAccountIds]
-                }
-              return {
-                status: 'manual_intervention',
-                scanId: journal.scanId,
-                migratedAccountIds: [...journal.migratedAccountIds]
-              }
+            return {
+              status: 'rollback_sync_required',
+              scanId: journal.scanId,
+              migratedAccountIds: [...journal.migratedAccountIds]
             }
           }
           await this.writeJournal(journal, 'completed')
           return {
-            status: 'recovered',
+            status: 'rollback_available',
             scanId: journal.scanId,
             migratedAccountIds: [...journal.migratedAccountIds]
           }
@@ -370,13 +332,13 @@ export class LegacyKiroRsMigrationTransaction {
             LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.WRITE_FAILED
           )
         }
-      }, result => result.status === 'manual_intervention' || result.status === 'cleanup_pending')
+      }, result => legacyKiroRsMigrationRecoveryRequiresCheckpoint(result.status))
     )
   }
 
   async rollback(): Promise<LegacyKiroRsMigrationRollbackResult> {
     return this.boundary(() =>
-      this.runExclusiveWithAutoStartGate<LegacyKiroRsMigrationRollbackResult>(async () => {
+      this.runExclusiveWithCheckpointGate<LegacyKiroRsMigrationRollbackResult>(async () => {
         this.assertProxyStopped()
         const applied = await this.readValidJournal()
         if (!applied || applied.operation !== 'apply' || applied.state !== 'completed') {
@@ -429,7 +391,7 @@ export class LegacyKiroRsMigrationTransaction {
           const terminal = await this.rollbackTerminalState(journal)
           if (terminal === true) {
             return {
-              status: 'cleanup_pending',
+              status: 'rolled_back',
               scanId: journal.scanId,
               migratedAccountIds: [...journal.migratedAccountIds]
             }
@@ -446,36 +408,110 @@ export class LegacyKiroRsMigrationTransaction {
               : LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
           )
         }
+        return {
+          status: 'rolled_back',
+          scanId: journal.scanId,
+          migratedAccountIds: [...journal.migratedAccountIds]
+        }
+      }, () => true)
+    )
+  }
+
+  async finalize(): Promise<LegacyKiroRsMigrationFinalizeResult> {
+    return this.boundary(() =>
+      this.runExclusiveWithCheckpointGate<LegacyKiroRsMigrationFinalizeResult>(async () => {
+        this.assertProxyStopped()
+        const journal = await this.readValidJournal()
+        if (!journal || journal.operation !== 'apply' || journal.state !== 'completed') {
+          throw new LegacyKiroRsMigrationTransactionError(
+            LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.FINALIZE_NOT_AVAILABLE
+          )
+        }
+        if (!sameSnapshot(await this.dependencies.snapshotStore.read(), journal.after)) {
+          throw new LegacyKiroRsMigrationTransactionError(
+            LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.SNAPSHOT_CHANGED
+          )
+        }
+        await this.dependencies.snapshotStore.syncLastSavedData()
         try {
           await this.dependencies.journal.remove()
           return {
-            status: 'rolled_back',
+            status: 'finalized',
             scanId: journal.scanId,
             migratedAccountIds: [...journal.migratedAccountIds]
           }
         } catch {
-          const cleanup = await this.classifyRollbackCleanup(journal)
-          if (cleanup === 'removed')
+          const cleanup = await this.classifyJournalCleanup(journal)
+          if (cleanup === 'removed') {
             return {
-              status: 'rolled_back',
+              status: 'finalized',
               scanId: journal.scanId,
               migratedAccountIds: [...journal.migratedAccountIds]
             }
-          if (cleanup === 'pending')
+          }
+          if (cleanup === 'pending') {
             return {
               status: 'cleanup_pending',
               scanId: journal.scanId,
               migratedAccountIds: [...journal.migratedAccountIds]
             }
+          }
           throw new LegacyKiroRsMigrationTransactionError(
             LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
           )
         }
-      }, result => result.status === 'cleanup_pending')
+      }, result => result.status !== 'finalized')
     )
   }
 
-private async runExclusiveWithAutoStartGate<T>(
+  async acknowledgeRollback(): Promise<LegacyKiroRsMigrationRollbackAckResult> {
+    return this.boundary(() =>
+      this.runExclusiveWithCheckpointGate<LegacyKiroRsMigrationRollbackAckResult>(async () => {
+        this.assertProxyStopped()
+        const journal = await this.readValidJournal()
+        if (!journal || journal.operation !== 'rollback' || journal.state !== 'rolled_back') {
+          throw new LegacyKiroRsMigrationTransactionError(
+            LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.ROLLBACK_ACK_NOT_AVAILABLE
+          )
+        }
+        if (!sameSnapshot(await this.dependencies.snapshotStore.read(), journal.after)) {
+          throw new LegacyKiroRsMigrationTransactionError(
+            LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.SNAPSHOT_CHANGED
+          )
+        }
+        await this.dependencies.snapshotStore.syncLastSavedData()
+        try {
+          await this.dependencies.journal.remove()
+          return {
+            status: 'acknowledged',
+            scanId: journal.scanId,
+            migratedAccountIds: [...journal.migratedAccountIds]
+          }
+        } catch {
+          const cleanup = await this.classifyJournalCleanup(journal)
+          if (cleanup === 'removed') {
+            return {
+              status: 'acknowledged',
+              scanId: journal.scanId,
+              migratedAccountIds: [...journal.migratedAccountIds]
+            }
+          }
+          if (cleanup === 'pending') {
+            return {
+              status: 'cleanup_pending',
+              scanId: journal.scanId,
+              migratedAccountIds: [...journal.migratedAccountIds]
+            }
+          }
+          throw new LegacyKiroRsMigrationTransactionError(
+            LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
+          )
+        }
+      }, result => result.status !== 'acknowledged')
+    )
+  }
+
+  private async runExclusiveWithCheckpointGate<T>(
     operation: () => Promise<T>,
     blockForResult: (result: T) => boolean | undefined
   ): Promise<T> {
@@ -483,7 +519,7 @@ private async runExclusiveWithAutoStartGate<T>(
       try {
         const result = await operation()
         const blocked = blockForResult(result)
-        if (blocked !== undefined) this.dependencies.setAutoStartBlocked(blocked)
+        if (blocked !== undefined) this.dependencies.setCheckpointBlocked(blocked)
         return result
       } catch (error) {
         const code =
@@ -491,7 +527,7 @@ private async runExclusiveWithAutoStartGate<T>(
             ? (error as { code: string }).code
             : undefined
         if (code && legacyKiroRsMigrationErrorBlocksAutoStart(code)) {
-          this.dependencies.setAutoStartBlocked(true)
+          this.dependencies.setCheckpointBlocked(true)
         }
         throw error
       }
@@ -676,7 +712,7 @@ private async runExclusiveWithAutoStartGate<T>(
     return 'unknown'
   }
 
-  private async classifyRollbackCleanup(
+  private async classifyJournalCleanup(
     journal: LegacyKiroRsMigrationJournal
   ): Promise<'removed' | 'pending' | 'manual'> {
     const current = await this.dependencies.snapshotStore.read()
@@ -684,8 +720,8 @@ private async runExclusiveWithAutoStartGate<T>(
     const stored = await this.readValidJournal()
     if (!stored) return 'removed'
     if (
-      stored.operation === 'rollback' &&
-      stored.state === 'rolled_back' &&
+      stored.operation === journal.operation &&
+      stored.state === journal.state &&
       sameSnapshot(stored.after, journal.after)
     ) {
       return 'pending'

@@ -173,7 +173,7 @@ export function HomePage() {
           />
           <div>
             <h1 className="text-2xl font-bold text-primary">{isEn ? 'Welcome to Kiro Account Manager' : '欢迎使用 Kiro 账户管理器'}</h1>
-            <p className="text-muted-foreground">{isEn ? 'Manage your Kiro IDE accounts, one-click switch' : '管理你的 Kiro IDE 账号，一键切换，高效开发'}</p>
+            <p className="text-muted-foreground">{isEn ? 'Manage Kiro accounts and API proxy locally' : '统一管理 Kiro 账号与 API 反代服务'}</p>
           </div>
         </div>
       </div>
@@ -620,7 +620,7 @@ export function HomePage() {
               <div>
                 <p className="font-medium text-sm">{isEn ? 'API Proxy' : 'API 反代'}</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {isEn ? 'OpenAI, Anthropic and Gemini compatible endpoints' : '聚合 OpenAI、Anthropic 与 Gemini 兼容接口'}
+                  {isEn ? 'OpenAI and Anthropic compatible endpoints' : '聚合 OpenAI 与 Anthropic 兼容接口'}
                 </p>
               </div>
             </div>

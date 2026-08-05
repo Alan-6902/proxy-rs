@@ -2,6 +2,7 @@ appId: com.kiro.account-manager
 productName: Kiro Account Manager
 directories:
   buildResources: build
+afterPack: build/after-pack.cjs
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -39,7 +40,7 @@ nsis:
   installerIcon: resources/kiro-high-resolution-logo-transparent.ico
   uninstallerIcon: resources/kiro-high-resolution-logo-transparent.ico
 mac:
-  identity: null  # 跳过代码签名（没有 Apple 开发者证书时）
+  identity: null  # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
   # 使用无空格的包名作为本地产物文件名前缀，保证各平台命名一致。
   artifactName: ${name}-${version}-${arch}-mac.${ext}
   # 显式构建 x64 + arm64 两个架构的 zip 和 dmg。

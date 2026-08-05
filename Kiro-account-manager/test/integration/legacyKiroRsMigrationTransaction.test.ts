@@ -80,6 +80,7 @@ function makeTransaction(
     setAutoStartBlocked?: (blocked: boolean) => void
     clock?: () => number
     randomUUID?: () => string
+    useDefaultRandomUUID?: boolean
   } = {}
 ) {
   let current = clone(options.initial ?? snapshot())
@@ -177,17 +178,18 @@ function makeTransaction(
     },
     coordinator,
     proxyIsRunning: () => options.running ?? false,
-    setAutoStartBlocked: (blocked) => {
+    setCheckpointBlocked: (blocked) => {
       autoStartBlocked = blocked
       options.setAutoStartBlocked?.(blocked)
     },
     clock: options.clock ?? (() => 100),
-    randomUUID:
-      options.randomUUID ??
-      (() => {
-        let index = 0
-        return () => `uuid-${++index}`
-      })()
+    randomUUID: options.useDefaultRandomUUID
+      ? undefined
+      : options.randomUUID ??
+        (() => {
+          let index = 0
+          return () => `uuid-${++index}`
+        })()
   })
   return {
     transaction,
@@ -201,6 +203,22 @@ function makeTransaction(
 }
 
 describe('LegacyKiroRsMigrationTransaction', () => {
+  it('uses the production UUID generator without losing its receiver', async () => {
+    const fake = makeTransaction({ useDefaultRandomUUID: true })
+
+    const result = await fake.transaction.apply('scan-1', {
+      accounts: true,
+      inboundApiKey: false,
+      adminApiKey: false
+    })
+
+    expect(result.status).toBe('applied')
+    expect(result.migratedAccountIds).toHaveLength(1)
+    expect(result.migratedAccountIds[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
+  })
+
   it('imports only new scanner credentials, preserves unknown account data, and activates the first new account', async () => {
     const fake = makeTransaction()
     const result = await fake.transaction.apply('scan-1', {
@@ -431,7 +449,7 @@ describe('LegacyKiroRsMigrationTransaction', () => {
       initial: completed.before,
       journal: { ...completed, state: 'prepared' }
     })
-    await expect(pre.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
+    await expect(pre.transaction.recover()).resolves.toMatchObject({ status: 'rollback_available' })
     expect(pre.current()).toEqual(completed.after)
 
     const half = makeTransaction({
@@ -441,14 +459,14 @@ describe('LegacyKiroRsMigrationTransaction', () => {
       },
       journal: { ...completed, state: 'half' }
     })
-    await expect(half.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
+    await expect(half.transaction.recover()).resolves.toMatchObject({ status: 'rollback_available' })
     expect(half.current()).toEqual(completed.after)
 
     const post = makeTransaction({
       initial: completed.after,
       journal: { ...completed, state: 'applied' }
     })
-    await expect(post.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
+    await expect(post.transaction.recover()).resolves.toMatchObject({ status: 'rollback_available' })
     expect(post.calls).toEqual(['journal:completed'])
 
     const unknown = makeTransaction({
@@ -473,7 +491,13 @@ describe('LegacyKiroRsMigrationTransaction', () => {
       scanId: 'scan-1'
     })
     expect(fake.current()).toEqual(snapshot())
+    expect(fake.journal()).toMatchObject({ operation: 'rollback', state: 'rolled_back' })
+    expect(fake.autoStartBlocked()).toBe(true)
+    await expect(fake.transaction.acknowledgeRollback()).resolves.toMatchObject({
+      status: 'acknowledged'
+    })
     expect(fake.journal()).toBeUndefined()
+    expect(fake.autoStartBlocked()).toBe(false)
 
     const changed = makeTransaction()
     await changed.transaction.apply('scan-1', {
@@ -490,6 +514,34 @@ describe('LegacyKiroRsMigrationTransaction', () => {
     })
     expect(guarded.calls).toEqual([])
   })
+
+  it('keeps an applied checkpoint blocked until finalize and rejects a changed snapshot', async () => {
+    const fake = makeTransaction()
+    await fake.transaction.apply('scan-1', {
+      accounts: true,
+      inboundApiKey: true,
+      adminApiKey: true
+    })
+    const completed = fake.journal()!
+    expect(fake.autoStartBlocked()).toBe(true)
+    await expect(fake.transaction.finalize()).resolves.toMatchObject({ status: 'finalized' })
+    expect(fake.current()).toEqual(completed.after)
+    expect(fake.journal()).toBeUndefined()
+    expect(fake.autoStartBlocked()).toBe(false)
+
+    const altered = clone(completed.after)
+    altered.proxyConfig.host = 'changed-before-finalize'
+    const guarded = makeTransaction({
+      initial: altered,
+      journal: completed,
+      initialAutoStartBlocked: true
+    })
+    await expect(guarded.transaction.finalize()).rejects.toMatchObject({
+      code: LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.SNAPSHOT_CHANGED
+    })
+    expect(guarded.journal()).toEqual(completed)
+    expect(guarded.autoStartBlocked()).toBe(true)
+  })
 })
 
 describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () => {
@@ -500,7 +552,7 @@ describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () 
       inboundApiKey: true,
       adminApiKey: true
     })
-    expect(fake.autoStartBlocked()).toBe(false)
+    expect(fake.autoStartBlocked()).toBe(true)
     const completed = fake.journal()
     const beforeCalls = [...fake.calls]
 
@@ -642,6 +694,45 @@ describe('LegacyKiroRsMigrationTransaction coordination and journal safety', () 
       code: LEGACY_KIRO_RS_MIGRATION_TRANSACTION_ERROR_CODES.MANUAL_INTERVENTION
     })
     await expect(queuedStart).resolves.toBe(true)
+  })
+
+  it('blocks a stale snapshot writer queued behind a successful apply', async () => {
+    const coordinator = new LegacyKiroRsMigrationExclusiveCoordinator()
+    let releaseProxyWrite!: () => void
+    let reachProxyWrite!: () => void
+    const proxyWriteReached = new Promise<void>((resolve) => {
+      reachProxyWrite = resolve
+    })
+    const proxyWriteRelease = new Promise<void>((resolve) => {
+      releaseProxyWrite = resolve
+    })
+    const fake = makeTransaction({
+      coordinator,
+      beforeOperation: async (operation) => {
+        if (operation === 'proxy') {
+          reachProxyWrite()
+          await proxyWriteRelease
+        }
+      }
+    })
+
+    const migration = fake.transaction.apply('scan-1', {
+      accounts: true,
+      inboundApiKey: true,
+      adminApiKey: true
+    })
+    await proxyWriteReached
+    let staleWrites = 0
+    const queuedWriter = coordinator.runExclusive(async () => {
+      if (fake.autoStartBlocked()) return 'blocked'
+      staleWrites += 1
+      return 'written'
+    })
+    releaseProxyWrite()
+
+    await expect(migration).resolves.toMatchObject({ status: 'applied' })
+    await expect(queuedWriter).resolves.toBe('blocked')
+    expect(staleWrites).toBe(0)
   })
 
   it('serializes external writers with apply through the injected coordinator', async () => {
@@ -1002,37 +1093,7 @@ describe('LegacyKiroRsMigrationTransaction rollback terminal and sanitized bound
     }
   )
 
-  it('treats a persisted rollback terminal state as complete when its journal write or cleanup fails, then retries cleanup', async () => {
-    for (const [operation, phase, firstStatus, hasTerminalJournal] of [
-      ['journal:rolled_back', 'after', 'cleanup_pending', true],
-      ['journal:remove', 'before', 'cleanup_pending', true],
-      ['journal:remove', 'after', 'rolled_back', false]
-    ] as const) {
-      const seed = makeTransaction()
-      await seed.transaction.apply('scan-1', {
-        accounts: true,
-        inboundApiKey: true,
-        adminApiKey: true
-      })
-      const completed = seed.journal()!
-      const fake = makeTransaction({
-        initial: completed.after,
-        journal: completed,
-        fail: (name, count, when) => name === operation && count === 1 && when === phase
-      })
-      await expect(fake.transaction.rollback()).resolves.toMatchObject({ status: firstStatus })
-      expect(fake.current()).toEqual(completed.before)
-      if (hasTerminalJournal) {
-        expect(fake.journal()).toMatchObject({ operation: 'rollback', state: 'rolled_back' })
-        await expect(fake.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
-      } else {
-        expect(fake.journal()).toBeUndefined()
-      }
-      await expect(fake.transaction.recover()).resolves.toMatchObject({ status: 'none' })
-    }
-  })
-
-  it('handles recover journal deletion before/after exceptions without undoing terminal data', async () => {
+  it('keeps a persisted rollback terminal state blocked until renderer acknowledgement', async () => {
     const seed = makeTransaction()
     await seed.transaction.apply('scan-1', {
       accounts: true,
@@ -1040,34 +1101,62 @@ describe('LegacyKiroRsMigrationTransaction rollback terminal and sanitized bound
       adminApiKey: true
     })
     const completed = seed.journal()!
-    const terminal = makeTransaction({
+    const fake = makeTransaction({
       initial: completed.after,
       journal: completed,
-      fail: (name, count, phase) => name === 'journal:remove' && count === 1 && phase === 'before'
+      fail: (name, count, phase) =>
+        name === 'journal:rolled_back' && count === 1 && phase === 'after'
     })
-    await expect(terminal.transaction.rollback()).resolves.toMatchObject({
-      status: 'cleanup_pending'
-    })
-    const rollbackJournal = terminal.journal()!
 
-    const before = makeTransaction({
-      initial: terminal.current(),
-      journal: rollbackJournal,
-      fail: (name, count, phase) => name === 'journal:remove' && count === 1 && phase === 'before'
+    await expect(fake.transaction.rollback()).resolves.toMatchObject({ status: 'rolled_back' })
+    expect(fake.current()).toEqual(completed.before)
+    expect(fake.journal()).toMatchObject({ operation: 'rollback', state: 'rolled_back' })
+    expect(fake.autoStartBlocked()).toBe(true)
+    await expect(fake.transaction.recover()).resolves.toMatchObject({
+      status: 'rollback_sync_required'
     })
-    await expect(before.transaction.recover()).resolves.toMatchObject({ status: 'cleanup_pending' })
-    expect(before.current()).toEqual(completed.before)
-    await expect(before.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
-    await expect(before.transaction.recover()).resolves.toMatchObject({ status: 'none' })
+    await expect(fake.transaction.acknowledgeRollback()).resolves.toMatchObject({
+      status: 'acknowledged'
+    })
+    expect(fake.journal()).toBeUndefined()
+    expect(fake.autoStartBlocked()).toBe(false)
+  })
 
-    const after = makeTransaction({
-      initial: terminal.current(),
-      journal: rollbackJournal,
-      fail: (name, count, phase) => name === 'journal:remove' && count === 1 && phase === 'after'
-    })
-    await expect(after.transaction.recover()).resolves.toMatchObject({ status: 'recovered' })
-    expect(after.current()).toEqual(completed.before)
-    await expect(after.transaction.recover()).resolves.toMatchObject({ status: 'none' })
+  it('handles acknowledgement journal deletion before/after exceptions without undoing terminal data', async () => {
+    for (const [phase, firstStatus] of [
+      ['before', 'cleanup_pending'],
+      ['after', 'acknowledged']
+    ] as const) {
+      const seed = makeTransaction()
+      await seed.transaction.apply('scan-1', {
+        accounts: true,
+        inboundApiKey: true,
+        adminApiKey: true
+      })
+      await seed.transaction.rollback()
+      const rollbackJournal = seed.journal()!
+      const fake = makeTransaction({
+        initial: seed.current(),
+        journal: rollbackJournal,
+        initialAutoStartBlocked: true,
+        fail: (name, count, when) =>
+          name === 'journal:remove' && count === 1 && when === phase
+      })
+
+      await expect(fake.transaction.acknowledgeRollback()).resolves.toMatchObject({
+        status: firstStatus
+      })
+      expect(fake.current()).toEqual(seed.current())
+      if (firstStatus === 'cleanup_pending') {
+        expect(fake.journal()).toMatchObject({ operation: 'rollback', state: 'rolled_back' })
+        expect(fake.autoStartBlocked()).toBe(true)
+        await expect(fake.transaction.acknowledgeRollback()).resolves.toMatchObject({
+          status: 'acknowledged'
+        })
+      }
+      expect(fake.journal()).toBeUndefined()
+      expect(fake.autoStartBlocked()).toBe(false)
+    }
   })
 
   it('keeps manual intervention visible when rollback compensation or completed-journal restoration fails', async () => {

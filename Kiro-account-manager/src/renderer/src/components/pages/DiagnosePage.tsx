@@ -25,6 +25,12 @@ interface LivenessResult {
   model?: string
   content?: string
   usage?: { inputTokens: number; outputTokens: number; credits: number }
+  credentials?: {
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: number
+    credentialRevision?: string
+  }
   error?: string
 }
 
@@ -192,7 +198,7 @@ export function DiagnosePage(): React.ReactNode {
   const testOneAccount = useCallback(async (account: typeof accountList[number]): Promise<LivenessResult> => {
     const cred = account.credentials
     try {
-      return await window.api.diagnoseAccountLiveness({
+      const result = await window.api.diagnoseAccountLiveness({
         account: {
           id: account.id,
           email: account.email,
@@ -205,15 +211,31 @@ export function DiagnosePage(): React.ReactNode {
           provider: cred.provider,
           profileArn: account.profileArn,
           expiresAt: cred.expiresAt,
+          credentialRevision: cred.credentialRevision,
           proxyUrl: getAccountProxyUrl(account.id)
         },
         model: livenessModel.trim(),
         message: livenessMessage.trim() || undefined
       })
+      if (
+        result.credentials &&
+        !useAccountsStore.getState().legacyMigrationCheckpointPending
+      ) {
+        const latest = useAccountsStore.getState().accounts.get(account.id)
+        if (latest) {
+          updateAccount(account.id, {
+            credentials: {
+              ...latest.credentials,
+              ...result.credentials
+            }
+          })
+        }
+      }
+      return result
     } catch (err) {
       return { success: false, latencyMs: 0, error: err instanceof Error ? err.message : String(err) }
     }
-  }, [livenessModel, livenessMessage, getAccountProxyUrl])
+  }, [livenessModel, livenessMessage, getAccountProxyUrl, updateAccount])
 
   const runLiveness = useCallback(async (): Promise<void> => {
     const account = accounts.get(livenessAccountId)

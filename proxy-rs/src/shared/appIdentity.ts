@@ -1,0 +1,10 @@
+export const APP_NAME = 'Proxy RS'
+export const APP_ID = 'com.proxy.rs'
+export const APP_PACKAGE_NAME = 'proxy-rs'
+export const APP_DATA_DIRECTORY_NAME = APP_NAME
+export const APP_PROTOCOL_SCHEME = APP_PACKAGE_NAME
+export const APP_SOCIAL_AUTH_REDIRECT_URI = `${APP_PROTOCOL_SCHEME}://kiro.kiroAgent/authenticate-success`
+export const APP_PORTABLE_CONFIG_ID = APP_PACKAGE_NAME
+export const APP_ACCOUNT_EXPORT_TYPE = `${APP_PACKAGE_NAME}-config`
+export const APP_ACCOUNT_STORE_NAME = `${APP_PACKAGE_NAME}-accounts`
+export const APP_ACCOUNT_STORE_ENCRYPTION_KEY = `${APP_PACKAGE_NAME}-account-store-v1`

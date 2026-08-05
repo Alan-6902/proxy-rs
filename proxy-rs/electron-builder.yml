@@ -1,0 +1,73 @@
+appId: com.proxy.rs
+productName: Proxy RS
+directories:
+  buildResources: build
+afterPack: build/after-pack.cjs
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asarUnpack:
+  - resources/**
+  - node_modules/koffi/**
+  - node_modules/tlsclientwrapper/**
+  - node_modules/piscina/**
+extraResources:
+  - from: "resources/tls-client-xgo-1.14.0-windows-amd64.dll"
+    to: "tls-client-xgo-1.14.0-windows-amd64.dll"
+protocols:
+  name: Proxy RS Auth
+  schemes:
+    - proxy-rs
+copyright: Copyright 2026 Proxy RS
+win:
+  executableName: proxy-rs
+  icon: resources/icon.ico
+  legalTrademarks: Copyright 2026 Proxy RS
+  requestedExecutionLevel: asInvoker
+nsis:
+  artifactName: ${name}-${version}-${arch}-setup.${ext}
+  shortcutName: Proxy RS
+  uninstallDisplayName: Proxy RS
+  createDesktopShortcut: always
+  oneClick: false           # 关闭一键安装，显示安装向导
+  allowToChangeInstallationDirectory: true  # 允许选择安装位置
+  perMachine: false
+  runAfterFinish: false     # 安装完不自动启动
+  installerIcon: resources/icon.ico
+  uninstallerIcon: resources/icon.ico
+mac:
+  identity: null  # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
+  # 使用无空格的包名作为本地产物文件名前缀，保证各平台命名一致。
+  artifactName: ${name}-${version}-${arch}-mac.${ext}
+  # 架构由 npm 打包命令决定，便于双架构与当前机器单架构构建共用配置。
+  target:
+    - target: zip
+    - target: dmg
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: false
+  hardenedRuntime: false  # 禁用强化运行时（需要签名）
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}
+linux:
+  target:
+    - AppImage
+    - snap
+    - deb
+  executableName: proxy-rs
+  maintainer: electronjs.org
+  category: Utility
+deb:
+  afterInstall: build/linux/after-install.sh
+  afterRemove: build/linux/after-remove.sh
+appImage:
+  artifactName: ${name}-${version}-${arch}.${ext}
+npmRebuild: false

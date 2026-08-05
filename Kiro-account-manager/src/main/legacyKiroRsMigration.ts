@@ -64,6 +64,7 @@ export interface LegacyKiroRsMigrationFileSystem {
 
 export interface LegacyKiroRsMigrationTargetSnapshot {
   upstreamKiroApiKeys: Iterable<string>
+  apiKeys: Iterable<{ key: string; enabled: boolean }>
   apiKey?: string
   adminApiKey?: string
 }
@@ -80,13 +81,14 @@ export interface LegacyKiroRsMigrationDependencies {
   clearExpiration?: (timer: { unref?: () => void }) => void
 }
 
-interface PreparedCredential {
+export interface PreparedCredential {
   itemId: string
   kiroApiKey: string
   keyHash: string
+  state: 'new' | 'existing' | 'duplicate'
 }
 
-interface PreparedMigrationPlan {
+export interface PreparedMigrationPlan {
   scanId: string
   expiresAt: number
   sourceFingerprint: string
@@ -144,9 +146,16 @@ function sameSecret(first: string, second: string): boolean {
   return timingSafeEqual(digest(first), digest(second))
 }
 
-function stableTargetFingerprint(upstreamKeyHashes: string[], snapshot: LegacyKiroRsMigrationTargetSnapshot): string {
+function stableTargetFingerprint(
+  upstreamKeyHashes: string[],
+  apiKeys: Array<{ keyHash: string; enabled: boolean }>,
+  snapshot: LegacyKiroRsMigrationTargetSnapshot
+): string {
   return digest(JSON.stringify({
     upstream: [...upstreamKeyHashes].sort(),
+    apiKeys: apiKeys
+      .map(({ keyHash, enabled }) => ({ keyHash, enabled }))
+      .sort((left, right) => left.keyHash.localeCompare(right.keyHash) || Number(left.enabled) - Number(right.enabled)),
     apiKey: snapshot.apiKey === undefined ? undefined : digest(snapshot.apiKey).toString('hex'),
     adminApiKey: snapshot.adminApiKey === undefined ? undefined : digest(snapshot.adminApiKey).toString('hex')
   })).toString('hex')
@@ -204,7 +213,7 @@ export class LegacyKiroRsMigrationService {
       this.addSecretToBucket(seenSourceKeys, keyHash, key)
       const itemId = `item_${scanId}_${preparedCredentials.length}`
       const redactedId = createHmac('sha256', hmacKey).update(key).digest('hex').slice(0, 16)
-      preparedCredentials.push({ itemId, kiroApiKey: key, keyHash })
+      preparedCredentials.push({ itemId, kiroApiKey: key, keyHash, state })
       items.push({ itemId, redactedId, state })
     }
 
@@ -357,12 +366,19 @@ export class LegacyKiroRsMigrationService {
     }
 
     const upstreamKiroApiKeys: string[] = []
+    const apiKeys: Array<{ key: string; enabled: boolean }> = []
     try {
       for (const key of snapshot.upstreamKiroApiKeys) {
         if (upstreamKiroApiKeys.length >= MAX_CREDENTIALS || !isValidKey(key)) {
           throw new LegacyKiroRsMigrationError(LEGACY_KIRO_RS_MIGRATION_ERROR_CODES.TARGET_SNAPSHOT_INVALID)
         }
         upstreamKiroApiKeys.push(key)
+      }
+      for (const apiKey of snapshot.apiKeys) {
+        if (apiKeys.length >= MAX_CREDENTIALS || !apiKey || !isValidKey(apiKey.key) || typeof apiKey.enabled !== 'boolean') {
+          throw new LegacyKiroRsMigrationError(LEGACY_KIRO_RS_MIGRATION_ERROR_CODES.TARGET_SNAPSHOT_INVALID)
+        }
+        apiKeys.push({ key: apiKey.key, enabled: apiKey.enabled })
       }
     } catch (error) {
       if (error instanceof LegacyKiroRsMigrationError) throw error
@@ -380,7 +396,13 @@ export class LegacyKiroRsMigrationService {
       keyHashes.push(keyHash)
       this.addSecretToBucket(buckets, keyHash, key)
     }
-    return { snapshot: { ...snapshot, upstreamKiroApiKeys }, keyHashes, buckets, fingerprint: stableTargetFingerprint(keyHashes, snapshot) }
+    const apiKeyHashes = apiKeys.map(apiKey => ({ keyHash: digest(apiKey.key).toString('hex'), enabled: apiKey.enabled }))
+    return {
+      snapshot: { ...snapshot, upstreamKiroApiKeys, apiKeys },
+      keyHashes,
+      buckets,
+      fingerprint: stableTargetFingerprint(keyHashes, apiKeyHashes, snapshot)
+    }
   }
 
   private addSecretToBucket(buckets: Map<string, string[]>, keyHash: string, key: string): void {

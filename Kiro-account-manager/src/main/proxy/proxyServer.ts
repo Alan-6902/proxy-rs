@@ -54,6 +54,7 @@ export interface ProxyServerEvents {
   onTokensUpdate?: (inputTokens: number, outputTokens: number) => void
   onRequestStatsUpdate?: (totalRequests: number, successRequests: number, failedRequests: number) => void
   onPoolEmpty?: () => Promise<void> // 账号池为空时触发（冷启动懒加载）
+  onUnexpectedClose?: () => Promise<void>
 }
 
 type ModelModality = 'text' | 'audio' | 'image' | 'video' | 'pdf'
@@ -298,6 +299,7 @@ export class ProxyServer {
   private refreshingTokens: Map<string, Promise<boolean>> = new Map() // 在途刷新去重（并发方共享同一结果）
   private isHttps: boolean = false
   private isStopping: boolean = false
+  private stopPromise: Promise<void> | null = null
   private activeRequests: Set<AbortController> = new Set()
   private sockets: Set<Socket> = new Set()
   /** P1-7 按 API Key/IP 的滑动窗口限流（每分钟桶） */
@@ -484,18 +486,24 @@ export class ProxyServer {
         })
       })
 
-      // 服务器关闭时尝试自动重启
+      // 主进程决定意外关闭后的恢复，避免绕过迁移恢复 gate。
+      const closingServer = this.server
       this.server.on('close', () => {
-        if (!this.isStopping && this.config.autoStart && this.config.enabled) {
-          console.log('[ProxyServer] Server closed unexpectedly, attempting restart in 3s...')
-          setTimeout(() => {
-            if (!this.isStopping && this.config.autoStart && !this.isRunning()) {
-              console.log('[ProxyServer] Auto-restarting...')
-              this.start().catch(err => {
-                console.error('[ProxyServer] Auto-restart failed:', err)
-              })
-            }
-          }, 3000)
+        if (this.server !== closingServer) return
+        this.server = null
+        if (this.isStopping) return
+        if (this.cleanupTimer !== null) {
+          clearInterval(this.cleanupTimer)
+          this.cleanupTimer = null
+        }
+        const closingFallback = this.fallbackServer
+        closingFallback?.close()
+        if (this.fallbackServer === closingFallback) this.fallbackServer = null
+        this.events.onStatusChange?.(false, this.config.port)
+        if (this.config.autoStart && this.config.enabled) {
+          void this.events.onUnexpectedClose?.().catch(err => {
+            console.error('[ProxyServer] Unexpected-close restart failed:', err)
+          })
         }
       })
 
@@ -507,7 +515,7 @@ export class ProxyServer {
       this.server.requestTimeout = 0  // 流式响应可能很长，禁用 request 总超时
 
       // 启动定期清理（每 5 分钟）
-      if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+      if (this.cleanupTimer !== null) clearInterval(this.cleanupTimer)
       this.cleanupTimer = setInterval(() => this.cleanupExpiredCaches(), 5 * 60_000)
       // 让 timer 在 Node 退出时不阻塞
       this.cleanupTimer.unref?.()
@@ -614,49 +622,53 @@ export class ProxyServer {
    * - 同时停 fallback HTTP 服务器
    */
   async stop(gracefulMs: number = 5000): Promise<void> {
-    if (!this.server) {
-      return
-    }
+    if (this.stopPromise) return this.stopPromise
+    if (!this.server) return
 
     this.isStopping = true
-
     const main = this.server
     const fallback = this.fallbackServer
-
-    return new Promise((resolve) => {
+    const sockets = new Set(this.sockets)
+    const cleanupTimer = this.cleanupTimer
+    let forceTimer: NodeJS.Timeout | undefined
+    this.stopPromise = new Promise<void>((resolve) => {
       let done = false
       const finish = () => {
         if (done) return
         done = true
+        if (forceTimer !== undefined) clearTimeout(forceTimer)
         proxyLogger.info('ProxyServer', 'Stopped')
-        this.server = null
-        this.fallbackServer = null
+        if (this.server === main) this.server = null
+        if (this.fallbackServer === fallback) this.fallbackServer = null
         this.isStopping = false
-        this.activeRequests.clear()
-        this.sockets.clear()
-        if (this.cleanupTimer) { clearInterval(this.cleanupTimer); this.cleanupTimer = null }
+        for (const socket of sockets) this.sockets.delete(socket)
+        if (this.cleanupTimer === cleanupTimer && cleanupTimer !== null) {
+          clearInterval(cleanupTimer)
+          this.cleanupTimer = null
+        }
         this.events.onStatusChange?.(false, this.config.port)
         resolve()
       }
 
-      // 先停止接受新连接
       main.close(() => {
         fallback?.close(() => finish()) || finish()
       })
       fallback?.close()
-
-      // P1-14 优雅停止：给正在进行中的请求时间完成，超时再强制
       this.activeRequests.forEach(controller => {
-        // 给客户端一个明确的 stop 信号，但不立即中断已发送的响应流
         try { controller.abort(new Error('Proxy server stopped')) } catch { /* ignore */ }
       })
-
-      // 超时强制 destroy
-      setTimeout(() => {
-        this.sockets.forEach(socket => { try { socket.destroy() } catch { /* ignore */ } })
+      forceTimer = setTimeout(() => {
+        if (done) return
+        for (const socket of sockets) {
+          try { socket.destroy() } catch { /* ignore */ }
+        }
         finish()
       }, Math.max(0, gracefulMs))
+      if (done && forceTimer !== undefined) clearTimeout(forceTimer)
+    }).finally(() => {
+      this.stopPromise = null
     })
+    return this.stopPromise!
   }
 
   // 更新配置

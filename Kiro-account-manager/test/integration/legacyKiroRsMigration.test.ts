@@ -117,7 +117,7 @@ function makeService(options: {
     isPosixPlatform: options.isPosixPlatform,
     scheduleExpiration: options.scheduleExpiration,
     clearExpiration: options.clearExpiration,
-    readTargetSnapshot: options.readTargetSnapshot ?? (async () => ({ upstreamKiroApiKeys: [], ...options.target }))
+    readTargetSnapshot: options.readTargetSnapshot ?? (async () => ({ upstreamKiroApiKeys: [], apiKeys: [], ...options.target }))
   })
   return { service, ...fake }
 }
@@ -211,6 +211,21 @@ describe('LegacyKiroRsMigrationService', () => {
     expect(closed).toBe(true)
   })
 
+  it('stores scanner credential states and fingerprints enabled target API keys', async () => {
+    let enabled = false
+    const { service } = makeService({
+      entries: { [CREDENTIALS_PATH]: { bytes: Buffer.from(JSON.stringify([{ kiroApiKey: 'new-key' }, { kiroApiKey: 'new-key' }])) } },
+      readTargetSnapshot: async () => ({ upstreamKiroApiKeys: [], apiKeys: [{ key: 'inbound-key', enabled }] })
+    })
+    const preview = await service.scan()
+    const prepared = await service.consumePreparedPlanForApply(preview.scanId)
+    expect(prepared?.credentials.map(credential => credential.state)).toEqual(['new', 'duplicate'])
+
+    const secondPreview = await service.scan()
+    enabled = true
+    await expectMigrationError(service.consumePreparedPlanForApply(secondPreview.scanId), LEGACY_KIRO_RS_MIGRATION_ERROR_CODES.STALE_SCAN)
+  })
+
   it('rejects unsupported platforms before filesystem access', async () => {
     const { service, calls } = makeService({ isPosixPlatform: () => false })
     await expectMigrationError(service.scan(), LEGACY_KIRO_RS_MIGRATION_ERROR_CODES.UNSUPPORTED_PLATFORM)
@@ -290,7 +305,7 @@ describe('LegacyKiroRsMigrationService', () => {
     await expect(source.service.consumePreparedPlanForApply(sourcePreview.scanId)).resolves.toBeUndefined()
 
     let targetKey = 'target-one'
-    const target = makeService({ readTargetSnapshot: async () => ({ upstreamKiroApiKeys: [targetKey] }) })
+    const target = makeService({ readTargetSnapshot: async () => ({ upstreamKiroApiKeys: [targetKey], apiKeys: [] }) })
     const targetPreview = await target.service.scan()
     targetKey = 'target-two'
     await expectMigrationError(target.service.consumePreparedPlanForApply(targetPreview.scanId), LEGACY_KIRO_RS_MIGRATION_ERROR_CODES.STALE_SCAN)

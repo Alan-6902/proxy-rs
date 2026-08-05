@@ -1,4 +1,12 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut, safeStorage } from 'electron'
+import { LegacyKiroRsMigrationService } from './legacyKiroRsMigration'
+import { LegacyKiroRsMigrationTransaction } from './legacyKiroRsMigrationTransaction'
+import {
+  LegacyKiroRsMigrationElectronStoreSnapshot,
+  LegacyKiroRsMigrationEncryptedJournal,
+  LegacyKiroRsMigrationExclusiveCoordinator,
+  shouldBlockLegacyKiroRsMigrationAutoStart
+} from './legacyKiroRsMigrationMainAdapters'
 import { join } from 'path'
 import { randomBytes } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -191,6 +199,7 @@ function debouncedUpdateTrayMenu(): void {
 }
 
 // ============ Kiro API 反代服务器 ============
+const UNEXPECTED_PROXY_RESTART_DELAY_MS = 3000
 let proxyServer: ProxyServer | null = null
 
 function initProxyServer(): ProxyServer {
@@ -205,9 +214,6 @@ function initProxyServer(): ProxyServer {
     ? sanitizeProxyConfig(storedProxyConfig)
     : undefined
   const savedConfig = sanitizedStoredProxyConfig?.value
-  if (sanitizedStoredProxyConfig?.changed) {
-    store?.set('proxyConfig', savedConfig)
-  }
   // 从 store 加载保存的 Usage API 类型
   const savedUsageApiType = store?.get('usageApiType') as 'rest' | 'cbor' | undefined
   if (savedUsageApiType) {
@@ -264,6 +270,13 @@ function initProxyServer(): ProxyServer {
       },
       onStatusChange: (running, port) => {
         mainWindow?.webContents.send('proxy-status-change', { running, port })
+      },
+      onUnexpectedClose: async () => {
+        await new Promise(resolve => setTimeout(resolve, UNEXPECTED_PROXY_RESTART_DELAY_MS))
+        const result = await startProxyWithMigrationGate()
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to restart proxy server')
+        }
       },
       // Token 刷新回调 - 复用已有的刷新逻辑，含账号绑定代理
       onTokenRefresh: async (account) => {
@@ -1290,6 +1303,10 @@ let store: {
 // 最后保存的数据（用于崩溃恢复）
 let lastSavedData: unknown = null
 
+const legacyKiroRsMigrationCoordinator = new LegacyKiroRsMigrationExclusiveCoordinator()
+let legacyKiroRsMigrationTransaction: LegacyKiroRsMigrationTransaction | null = null
+let legacyKiroRsMigrationAutoStartBlocked = true
+
 const LEGACY_PROXY_CONFIG_KEYS = ['agentMode', 'workspacePath'] as const
 const LEGACY_ACCOUNT_DATA_KEYS = ['switchTarget'] as const
 const LEGACY_PROACTIVE_RENEWAL_KEY = 'proactiveRenewalEnabled'
@@ -1319,27 +1336,43 @@ function sanitizeProxyConfig(
 }
 
 /** 先持久化再更新运行时，避免高权限密钥只存在于内存或磁盘。 */
-function updateAdminApiKeyAtomically(adminApiKey: string | undefined): { success: boolean; error?: string } {
-  try {
-    const server = initProxyServer()
-    const currentStore = store
-    if (!currentStore) return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+async function updateAdminApiKeyAtomically(adminApiKey: string | undefined): Promise<{ success: boolean; error?: string }> {
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    try {
+      const server = initProxyServer()
+      const currentStore = store
+      if (!currentStore) return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
 
-    const previousConfig = server.getConfig()
-    assertDistinctAdminApiKey({ ...previousConfig, adminApiKey })
-    return switchAdminApiKey(
-      previousConfig,
-      adminApiKey,
-      { write: config => currentStore.set('proxyConfig', sanitizeProxyConfig(config).value) },
-      { update: key => server.updateConfig({ adminApiKey: key }) }
-    )
-  } catch {
-    return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-  }
+      const previousConfig = server.getConfig()
+      assertDistinctAdminApiKey({ ...previousConfig, adminApiKey })
+      return switchAdminApiKey(
+        previousConfig,
+        adminApiKey,
+        { write: config => currentStore.set('proxyConfig', sanitizeProxyConfig(config).value) },
+        { update: key => server.updateConfig({ adminApiKey: key }) }
+      )
+    } catch {
+      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
+    }
+  })
 }
 
+let initStorePromise: Promise<void> | null = null
+
 async function initStore(): Promise<void> {
-  if (store) return
+  if (store && legacyKiroRsMigrationTransaction) return
+  if (!initStorePromise) {
+    initStorePromise = initStoreInternal().catch(error => {
+      store = null
+      legacyKiroRsMigrationTransaction = null
+      initStorePromise = null
+      throw error
+    })
+  }
+  return initStorePromise
+}
+
+async function initStoreInternal(): Promise<void> {
   const Store = (await import('electron-store')).default
   const path = await import('path')
 
@@ -1349,6 +1382,28 @@ async function initStore(): Promise<void> {
   })
 
   store = storeInstance as unknown as typeof store
+  const snapshotStore = new LegacyKiroRsMigrationElectronStoreSnapshot(storeInstance, accountData => {
+    lastSavedData = accountData
+  })
+  const scanner = new LegacyKiroRsMigrationService({
+    readTargetSnapshot: async () => {
+      const snapshot = await snapshotStore.read()
+      const accounts = (snapshot.accountData as { accounts?: Record<string, { credentials?: { kiroApiKey?: unknown } }> }).accounts ?? {}
+      return {
+        upstreamKiroApiKeys: Object.values(accounts).flatMap(account => typeof account.credentials?.kiroApiKey === 'string' ? [account.credentials.kiroApiKey] : []),
+        apiKey: snapshot.proxyConfig.apiKey,
+        apiKeys: snapshot.proxyConfig.apiKeys ?? [],
+        adminApiKey: snapshot.proxyConfig.adminApiKey
+      }
+    }
+  })
+  legacyKiroRsMigrationTransaction = new LegacyKiroRsMigrationTransaction({
+    scanner,
+    snapshotStore,
+    journal: new LegacyKiroRsMigrationEncryptedJournal(storeInstance.path, safeStorage),
+    coordinator: legacyKiroRsMigrationCoordinator,
+    proxyIsRunning: () => proxyServer?.isRunning() ?? false
+  })
 
   // 尝试从备份恢复数据（如果主数据损坏）。备份优先读加密 .enc，兼容旧明文 .json
   try {
@@ -1403,6 +1458,89 @@ async function initStore(): Promise<void> {
   } catch (error) {
     console.error('[Store] Account data migration failed:', error)
   }
+}
+
+async function recoverLegacyKiroRsMigrationBeforeStartup(): Promise<void> {
+  legacyKiroRsMigrationAutoStartBlocked = true
+  try {
+    await initStore()
+    if (!legacyKiroRsMigrationTransaction) {
+      console.error('[LegacyKiroRsMigration] startup recovery failed: RECOVERY_UNAVAILABLE')
+      return
+    }
+    const recovery = await legacyKiroRsMigrationTransaction.recover()
+    legacyKiroRsMigrationAutoStartBlocked = shouldBlockLegacyKiroRsMigrationAutoStart(recovery.status)
+    if (legacyKiroRsMigrationAutoStartBlocked) {
+      console.error('[LegacyKiroRsMigration] startup recovery blocked:', recovery.status)
+    }
+  } catch (error) {
+    const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : 'RECOVERY_FAILED'
+    console.error('[LegacyKiroRsMigration] startup recovery failed:', code)
+  }
+}
+
+const MIGRATION_START_BLOCKED = 'MIGRATION_START_BLOCKED'
+
+type ProxyLifecycleResult = { success: boolean; port?: number; error?: string }
+
+async function startProxyWithMigrationGate(config?: Partial<ProxyConfig>): Promise<ProxyLifecycleResult> {
+  await initStore()
+  return legacyKiroRsMigrationCoordinator.runExclusive(() => startProxyWithMigrationGateUnlocked(config))
+}
+
+async function startProxyWithMigrationGateUnlocked(config?: Partial<ProxyConfig>): Promise<ProxyLifecycleResult> {
+  if (legacyKiroRsMigrationAutoStartBlocked) {
+    return { success: false, error: MIGRATION_START_BLOCKED }
+  }
+  try {
+    const server = initProxyServer()
+    if (config) server.updateConfig(sanitizeProxyConfig(stripAdminApiKey(config)).value)
+    await server.start()
+    updateTrayMenu()
+    return { success: true, port: server.getConfig().port }
+  } catch (error) {
+    console.error('[ProxyServer] Start failed:', error)
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to start proxy server' }
+  }
+}
+
+async function restartProxyWithMigrationGate(): Promise<ProxyLifecycleResult> {
+  await initStore()
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    if (legacyKiroRsMigrationAutoStartBlocked) return { success: false, error: MIGRATION_START_BLOCKED }
+    if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
+    try {
+      await proxyServer.restartServer()
+      updateTrayMenu()
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to restart proxy server' }
+    }
+  })
+}
+
+async function stopProxyWithMigrationGate(): Promise<ProxyLifecycleResult> {
+  await initStore()
+  return legacyKiroRsMigrationCoordinator.runExclusive(stopProxyUnlocked)
+}
+
+async function stopProxyUnlocked(): Promise<ProxyLifecycleResult> {
+  try {
+    await proxyServer?.stop()
+    updateTrayMenu()
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to stop proxy server' }
+  }
+}
+
+async function toggleProxyWithMigrationGate(): Promise<ProxyLifecycleResult> {
+  await initStore()
+  return legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+    return proxyServer?.isRunning() ? stopProxyUnlocked() : startProxyWithMigrationGateUnlocked()
+  })
 }
 
 /**
@@ -1752,13 +1890,8 @@ function initTray(): void {
   createTray({
     onShowWindow: () => {
       if (mainWindow) {
-        // macOS: 显示窗口时恢复 Dock 图标
-        if (process.platform === 'darwin' && app.dock) {
-          app.dock.show()
-        }
-        if (mainWindow.isMinimized()) {
-          mainWindow.restore()
-        }
+        if (process.platform === 'darwin' && app.dock) app.dock.show()
+        if (mainWindow.isMinimized()) mainWindow.restore()
         mainWindow.show()
         mainWindow.focus()
       }
@@ -1774,39 +1907,22 @@ function initTray(): void {
       mainWindow?.webContents.send('tray-switch-account')
     },
     onToggleProxy: async () => {
-      const server = initProxyServer()
-      if (server.isRunning()) {
-        server.stop()
-      } else {
-        await server.start()
-      }
-      updateTrayMenu()
+      await toggleProxyWithMigrationGate()
     },
     getProxyStatus: () => {
-      const server = initProxyServer()
-      return {
-        running: server.isRunning(),
-        port: server.getConfig().port
-      }
+      if (!proxyServer) return { running: false, port: 5580 }
+      return { running: proxyServer.isRunning(), port: proxyServer.getConfig().port }
     },
     getCurrentAccount: () => currentProxyAccount,
     getAccountList: () => allAccounts,
     getProxyStats: () => {
-      const server = initProxyServer()
-      const stats = server.getStats()
-      return {
-        totalRequests: stats.totalRequests,
-        successRequests: stats.successRequests,
-        failedRequests: stats.failedRequests
-      }
+      if (!proxyServer) return { totalRequests: 0, successRequests: 0, failedRequests: 0 }
+      const stats = proxyServer.getStats()
+      return { totalRequests: stats.totalRequests, successRequests: stats.successRequests, failedRequests: stats.failedRequests }
     },
-    getSessionStats: () => {
-      const server = initProxyServer()
-      return server.getSessionStats()
-    }
+    getSessionStats: () => proxyServer?.getSessionStats() ?? { totalRequests: 0, successRequests: 0, failedRequests: 0, startTime: Date.now() }
   })
 
-  // 设置初始提示
   setTrayTooltip(`Kiro 账号管理器 v${app.getVersion()}`)
 }
 
@@ -1849,10 +1965,13 @@ function createWindow(): void {
     mainWindow?.show()
     
     // 检查代理服务自启动配置
-    setTimeout(async () => {
+    setTimeout(() => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
       try {
         await initStore()
-        if (!store) return
+        if (!store || legacyKiroRsMigrationAutoStartBlocked) {
+          if (legacyKiroRsMigrationAutoStartBlocked) console.error('[LegacyKiroRsMigration] proxy auto-start blocked by recovery')
+          return
+        }
         
         const savedProxyConfig = store.get('proxyConfig') as ProxyConfig | undefined
         if (!savedProxyConfig?.autoStart) return
@@ -1910,13 +2029,17 @@ function createWindow(): void {
           retrySync(1)
         }
         
-        await server.start()
+        const startResult = await startProxyWithMigrationGateUnlocked()
+        if (!startResult.success) {
+          console.error('[ProxyServer] Auto-start blocked:', startResult.error)
+          return
+        }
         console.log('[ProxyServer] Auto-started successfully on port', savedProxyConfig.port || 5580)
       } catch (error) {
         console.error('[ProxyServer] Auto-start failed:', error)
       }
 
-    }, 1000)
+    }), 1000)
   })
 
   mainWindow.on('close', (event) => {
@@ -1941,21 +2064,18 @@ function createWindow(): void {
       // closeAction === 'quit' 时继续关闭流程
     }
 
-    // 窗口关闭前保存数据（同步保存，不等待备份）
+    // 窗口关闭前把账号写入排到事务锁后，避免覆盖恢复或迁移结果。
     if (lastSavedData && store) {
-      try {
-        console.log('[Window] Saving data before close...')
-        store.set('accountData', lastSavedData)
-        // 备份异步进行，不阻塞关闭
-        createBackup(lastSavedData).then(() => {
-          console.log('[Window] Backup created')
-        }).catch(err => {
-          console.error('[Window] Backup failed:', err)
-        })
-        console.log('[Window] Data saved successfully')
-      } catch (error) {
-        console.error('[Window] Failed to save data:', error)
-      }
+      void legacyKiroRsMigrationCoordinator.runExclusive(async () => {
+        try {
+          console.log('[Window] Saving data before close...')
+          store!.set('accountData', lastSavedData)
+          await createBackup(lastSavedData)
+          console.log('[Window] Data saved successfully')
+        } catch (error) {
+          console.error('[Window] Failed to save data:', error)
+        }
+      })
     }
   })
 
@@ -2038,6 +2158,7 @@ app.whenReady().then(async () => {
   // 初始化日志系统（尽早拦截，确保所有 console 输出都进入日志存储）
   proxyLogStore.initialize(app.getPath('userData'))
   interceptConsole()
+  await recoverLegacyKiroRsMigrationBeforeStartup()
 
   // 注册自定义协议
   registerProtocol()
@@ -2431,7 +2552,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 保存账号数据
-  ipcMain.handle('save-accounts', async (_event, data) => {
+  ipcMain.handle('save-accounts', async (_event, data) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       await initStore()
       store!.set('accountData', data)
@@ -2445,7 +2566,7 @@ app.whenReady().then(async () => {
       console.error('Failed to save accounts:', error)
       throw error
     }
-  })
+  }))
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
   ipcMain.handle('refresh-account-token', async (_event, account) => {
@@ -4582,36 +4703,10 @@ app.whenReady().then(async () => {
   // ============ Kiro API 反代服务器 IPC ============
 
   // IPC: 启动反代服务器
-  ipcMain.handle('proxy-start', async (_event, config?: Partial<ProxyConfig>) => {
-    try {
-      const server = initProxyServer()
-      if (config) {
-        server.updateConfig(sanitizeProxyConfig(stripAdminApiKey(config)).value)
-      }
-      await server.start()
-      // 更新托盘菜单状态
-      updateTrayMenu()
-      return { success: true, port: server.getConfig().port }
-    } catch (error) {
-      console.error('[ProxyServer] Start failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to start proxy server' }
-    }
-  })
+  ipcMain.handle('proxy-start', async (_event, config?: Partial<ProxyConfig>) => startProxyWithMigrationGate(config))
 
   // IPC: 停止反代服务器
-  ipcMain.handle('proxy-stop', async () => {
-    try {
-      if (proxyServer) {
-        await proxyServer.stop()
-      }
-      // 更新托盘菜单状态
-      updateTrayMenu()
-      return { success: true }
-    } catch (error) {
-      console.error('[ProxyServer] Stop failed:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to stop proxy server' }
-    }
-  })
+  ipcMain.handle('proxy-stop', async () => stopProxyWithMigrationGate())
 
   // IPC: 获取反代服务器状态
   ipcMain.handle('proxy-get-status', () => {
@@ -4701,7 +4796,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 更新反代服务器配置
-  ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) => {
+  ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       // 管理员密钥只能经专用 IPC 变更，泛型设置绝不能覆盖或读回它。
       const sanitizedConfig = sanitizeProxyConfig(stripAdminApiKey(config))
@@ -4733,41 +4828,42 @@ app.whenReady().then(async () => {
       console.error('[ProxyServer] Update config failed:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update config' }
     }
-  })
+  }))
 
   // 管理员密钥始终在主进程生成、持久化和清除；原文只在本次 rotate/set 响应返回。
   ipcMain.handle('proxy-admin-key-status', () => {
     try {
-      return { configured: !!initProxyServer().getConfig().adminApiKey }
+      const config = proxyServer?.getConfig() ?? store?.get('proxyConfig') as ProxyConfig | undefined
+      return { configured: !!config?.adminApiKey }
     } catch {
       return { configured: false, success: false, error: ADMIN_KEY_UPDATE_ERROR }
     }
   })
 
-  ipcMain.handle('proxy-admin-key-rotate', () => {
+  ipcMain.handle('proxy-admin-key-rotate', async () => {
     try {
       const adminApiKey = `${ADMIN_API_KEY_PREFIX}${randomBytes(32).toString('base64url')}`
-      const result = updateAdminApiKeyAtomically(adminApiKey)
+      const result = await updateAdminApiKeyAtomically(adminApiKey)
       return result.success ? { success: true, adminApiKey } : result
     } catch {
       return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
     }
   })
 
-  ipcMain.handle('proxy-admin-key-set', (_event, value: unknown) => {
+  ipcMain.handle('proxy-admin-key-set', async (_event, value: unknown) => {
     try {
       if (typeof value !== 'string' || !value.trim()) return { success: false, error: 'Invalid admin API key' }
       const adminApiKey = value.trim()
-      const result = updateAdminApiKeyAtomically(adminApiKey)
+      const result = await updateAdminApiKeyAtomically(adminApiKey)
       return result.success ? { success: true, adminApiKey } : result
     } catch {
       return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
     }
   })
 
-  ipcMain.handle('proxy-admin-key-clear', () => {
+  ipcMain.handle('proxy-admin-key-clear', async () => {
     try {
-      return updateAdminApiKeyAtomically(undefined)
+      return await updateAdminApiKeyAtomically(undefined)
     } catch {
       return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
     }
@@ -4810,15 +4906,7 @@ app.whenReady().then(async () => {
   })
 
   // 重启反代（用户在 UI 点"立即重启"时调用）
-  ipcMain.handle('proxy-restart', async () => {
-    try {
-      if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
-      await proxyServer.restartServer()
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
+  ipcMain.handle('proxy-restart', async () => restartProxyWithMigrationGate())
 
   // 获取反代审计日志
   ipcMain.handle('proxy-audit-log', () => {
@@ -4835,16 +4923,15 @@ app.whenReady().then(async () => {
   // IPC: 获取所有 API Keys
   ipcMain.handle('proxy-get-api-keys', () => {
     try {
-      const server = initProxyServer()
-      const config = server.getConfig()
-      return { success: true, apiKeys: config.apiKeys || [] }
+      const config = proxyServer?.getConfig() ?? store?.get('proxyConfig') as ProxyConfig | undefined
+      return { success: true, apiKeys: config?.apiKeys || [] }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to get API keys', apiKeys: [] }
     }
   })
 
   // IPC: 添加 API Key
-  ipcMain.handle('proxy-add-api-key', async (_event, apiKey: { name: string; key?: string; format?: 'sk' | 'simple' | 'token'; creditsLimit?: number }) => {
+  ipcMain.handle('proxy-add-api-key', async (_event, apiKey: { name: string; key?: string; format?: 'sk' | 'simple' | 'token'; creditsLimit?: number }) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       const crypto = await import('crypto')
       const server = initProxyServer()
@@ -4899,10 +4986,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to add API key' }
     }
-  })
+  }))
 
   // IPC: 更新 API Key
-  ipcMain.handle('proxy-update-api-key', (_event, id: string, updates: Partial<import('./proxy/types').ApiKey>) => {
+  ipcMain.handle('proxy-update-api-key', (_event, id: string, updates: Partial<import('./proxy/types').ApiKey>) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -4928,10 +5015,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update API key' }
     }
-  })
+  }))
 
   // IPC: 删除 API Key
-  ipcMain.handle('proxy-delete-api-key', (_event, id: string) => {
+  ipcMain.handle('proxy-delete-api-key', (_event, id: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -4953,10 +5040,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete API key' }
     }
-  })
+  }))
 
   // IPC: 重置 API Key 用量统计
-  ipcMain.handle('proxy-reset-api-key-usage', (_event, id: string) => {
+  ipcMain.handle('proxy-reset-api-key-usage', (_event, id: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       const server = initProxyServer()
       const config = server.getConfig()
@@ -4989,7 +5076,7 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to reset usage' }
     }
-  })
+  }))
 
   // IPC: 添加账号到反代池
   ipcMain.handle('proxy-add-account', (_event, account: ProxyAccount) => {
@@ -5239,7 +5326,7 @@ app.whenReady().then(async () => {
   // IPC: 手动解除账号封禁标记（用户确认账号已恢复后调用）
   // 1) 清除反代池中的 suspended 状态
   // 2) 同步清除 store.accountData[id].lastError，状态回到 active
-  ipcMain.handle('proxy-clear-account-suspended', (_event, accountId: string) => {
+  ipcMain.handle('proxy-clear-account-suspended', (_event, accountId: string) => legacyKiroRsMigrationCoordinator.runExclusive(async () => {
     try {
       if (proxyServer) {
         proxyServer.getAccountPool().clearSuspended(accountId)
@@ -5265,7 +5352,7 @@ app.whenReady().then(async () => {
       console.error('[ProxyServer] Clear suspended failed:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Failed to clear suspended' }
     }
-  })
+  }))
 
 
   // 更新协议处理函数以支持 Social Auth 回调
@@ -5386,10 +5473,11 @@ app.on('will-quit', async (event) => {
     }, 3000)
     
     try {
+      await legacyKiroRsMigrationCoordinator.runExclusive(async () => {
       console.log('[Exit] Saving data before quit...')
       // 刷新待写入的防抖数据
       flushStoreWrites()
-      store.set('accountData', lastSavedData)
+      store!.set('accountData', lastSavedData)
       // 退出场景跳过节流，确保备份立即落盘
       await createBackup(lastSavedData)
       await flushBackupNow()
@@ -5407,6 +5495,7 @@ app.on('will-quit', async (event) => {
       } catch (err) {
         console.error('[Exit] Failed to shutdown TLS client pool:', err)
       }
+      })
       console.log('[Exit] Data saved successfully')
     } catch (error) {
       console.error('[Exit] Failed to save data:', error)

@@ -69,5 +69,11 @@
     "typescript": "^5.9.2",
     "vite": "^7.1.6",
     "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "cbor-extract@2.2.0": true,
+    "electron@38.7.2": true,
+    "esbuild@0.25.12": true,
+    "koffi@2.16.2": true
   }
 }

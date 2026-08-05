@@ -29,7 +29,7 @@ export interface ProxyEntry {
 
   // 元数据
   label?: string         // 用户标注的备注名
-  source?: string        // 来源标记（手动 / 文件 / 订阅）
+  source?: string        // 来源标记：manual（单条手动添加）/ import（批量粘贴导入）
   tags?: string[]
 
   // 验活信息

@@ -67,6 +67,16 @@ export class ClaudeCodeStreamBuffer {
     this.bufferedBytes = 0
   }
 
+  /**
+   * 缓冲是否已释放（即帧是否已真正写入响应流）。
+   *
+   * 调用方据此判断中途失败时补发收尾帧有无意义：未释放时 discard 会连
+   * message_start 一起丢掉，客户端本就收不到任何内容帧，补收尾反而多余。
+   */
+  get isReleased(): boolean {
+    return this.released
+  }
+
   private enqueue(operation: () => Promise<void>): Promise<void> {
     this.writeQueue = this.writeQueue.then(operation).catch(() => {
       this.discard()

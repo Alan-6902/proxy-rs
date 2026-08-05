@@ -109,14 +109,25 @@ export class AccountPool {
       return null
     }
 
-    // 单账号特殊处理：绕过断路器，直接返回（让用户看到真实 API 错误）
+    const now = Date.now()
+
+    // 单账号特殊处理：没有备选账号，拦下来只会变成 503，不如把真实上游错误透给用户，
+    // 所以不因「退避冷却」拦它（冷却是为切号服务的，单账号切不了）。
+    // 但确定性不可用的状态仍然拦：继续打上游没有意义，只会加重风控或白等一次超时。
     if (accountList.length === 1) {
       const account = accountList[0]
       if (excludeIds?.has(account.id)) return null
+      if (this.isSuspended(account)) {
+        console.log(`[AccountPool] Single account ${account.email || account.id} is suspended, needs manual unblock`)
+        return null
+      }
+      if (this.isQuotaExhausted(account, now)) {
+        console.log(`[AccountPool] Single account ${account.email || account.id} quota exhausted`)
+        return null
+      }
       return account
     }
 
-    const now = Date.now()
     // 从当前粘滞索引开始遍历所有账号
     const startIndex = this.currentIndex
 

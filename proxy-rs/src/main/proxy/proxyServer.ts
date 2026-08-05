@@ -3707,6 +3707,37 @@ export class ProxyServer {
     }
 
     let hasWrittenUpstreamChunk = false
+
+    /**
+     * 上游中途失败、已经吐出部分内容且无法重试时，把 SSE 流合法收尾。
+     *
+     * 已发送 message_start + content_block_delta 后直接 res.end() 会留下未闭合的
+     * content block：宽容的客户端认下 error 事件，严格的会挂在解析上。这里补齐
+     * content_block_stop 与 message_delta(stop_reason: 'error')，让流符合协议，
+     * 客户端能明确区分"截断"与"正常结束"。
+     */
+    const closeTruncatedStream = async (): Promise<void> => {
+      if (hasStartedThinkingBlock) {
+        await flushThinkingSignature()
+        const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+        await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+        currentBlockIndex++
+        hasStartedThinkingBlock = false
+      }
+      if (hasStartedTextBlock) {
+        const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+        await emitSse(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
+        currentBlockIndex++
+        hasStartedTextBlock = false
+      }
+      // stop_reason 用 'error' 明确告知这是截断而非 end_turn
+      const messageDelta = createClaudeStreamEvent('message_delta', {
+        delta: { stop_reason: 'error', stop_sequence: null } as any,
+        usage: { output_tokens: 0 }
+      })
+      await emitSse(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
+    }
+
     return new Promise((resolve) => {
       let settled = false
       const settle = () => {
@@ -3930,9 +3961,21 @@ export class ProxyServer {
               return
             }
           }
-          claudeCodeBuffer?.discard()
           const upstreamError = normalizeKiroUpstreamError(error)
           console.error(`[ProxyServer] Stream error: HTTP ${upstreamError.statusCode || 'unknown'}`)
+          // 已吐出部分内容且无法重试：先把 content block 闭合再报错，避免客户端
+          // 收到未闭合的流。必须在 discard 之前做，否则这些帧会被一起丢掉。
+          //
+          // Claude Code 缓冲未释放时跳过：那种情况下 discard 会连 message_start
+          // 一起丢，客户端本就收不到任何内容帧，补收尾无意义。
+          if (hasWrittenUpstreamChunk && (!claudeCodeBuffer || claudeCodeBuffer.isReleased)) {
+            try {
+              await closeTruncatedStream()
+            } catch (closeError) {
+              proxyLogger.warn('ProxyServer', 'Failed to close truncated Claude stream', closeError)
+            }
+          }
+          claudeCodeBuffer?.discard()
           const errorEvent = createClaudeStreamEvent('error', {
             error: { type: 'api_error', message: upstreamError.message }
           })

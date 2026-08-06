@@ -306,3 +306,22 @@ export interface AccountStats {
   expiringSoonCount: number // 7天内到期
   bannedCount: number // 封禁账号数
 }
+
+/**
+ * 账号验活结果：走反代底层调用给指定模型发一条真实消息的返回。
+ * 与 window.api.diagnoseAccountLiveness 的返回结构一致，供账号管理页与诊断页共用。
+ */
+export interface AccountLivenessResult {
+  success: boolean
+  latencyMs: number
+  model?: string
+  content?: string
+  usage?: { inputTokens: number; outputTokens: number; credits: number }
+  credentials?: {
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: number
+    credentialRevision?: string
+  }
+  error?: string
+}

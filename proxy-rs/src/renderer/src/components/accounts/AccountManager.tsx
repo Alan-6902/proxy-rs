@@ -9,6 +9,7 @@ import { EditAccountDialog } from './EditAccountDialog'
 import { GroupManageDialog } from './GroupManageDialog'
 import { TagManageDialog } from './TagManageDialog'
 import { ExportDialog } from './ExportDialog'
+import { LivenessPanel } from './LivenessPanel'
 import { Button } from '../ui'
 import type { Account } from '@/types/account'
 import { splitCredentialLine } from '@/lib/utils'
@@ -38,6 +39,8 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
   const [showTagDialog, setShowTagDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [isFilterExpanded, setIsFilterExpanded] = useState(false)
+  // 页内批量验活面板（结果就地打在账号行/卡片上）
+  const [isLivenessExpanded, setIsLivenessExpanded] = useState(false)
   // 视图模式：grid（卡片，默认）/ list（紧凑列表），持久化到 localStorage
   const [viewMode, setViewMode] = useState<AccountViewMode>(() => {
     const saved = localStorage.getItem('accounts_viewMode')
@@ -308,11 +311,15 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
           onManageTags={handleManageTags}
           isFilterExpanded={isFilterExpanded}
           onToggleFilter={() => setIsFilterExpanded(!isFilterExpanded)}
+          onToggleLiveness={() => setIsLivenessExpanded((v) => !v)}
         />
       </header>
 
       {/* 主内容区域 */}
       <div className="flex-1 overflow-hidden flex flex-col px-3 py-3 gap-3">
+        {/* 批量验活面板 */}
+        {isLivenessExpanded && <LivenessPanel onClose={() => setIsLivenessExpanded(false)} />}
+
         {/* 账号列表（卡片 或 紧凑列表） */}
         <div className="flex-1 overflow-hidden">
           {viewMode === 'grid' ? (

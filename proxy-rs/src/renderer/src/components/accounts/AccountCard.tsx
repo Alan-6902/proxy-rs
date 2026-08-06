@@ -4,7 +4,7 @@ import { Card, CardContent, Badge, Button, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
-import type { Account, AccountTag, AccountGroup } from '@/types/account'
+import type { Account, AccountTag, AccountGroup, AccountLivenessResult } from '@/types/account'
 import {
   Check,
   RefreshCw,
@@ -25,7 +25,9 @@ import {
   CreditCard,
   Sparkles,
   RotateCcw,
-  Download
+  Download,
+  Zap,
+  XCircle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ExportDialog } from './ExportDialog'
@@ -79,6 +81,10 @@ interface AccountCardProps {
   tags: Map<string, AccountTag>
   groups: Map<string, AccountGroup>
   isSelected: boolean
+  /** 能否勾选：批量选择锁定在单一分组，其它分组的账号为 false */
+  canSelect: boolean
+  /** 本轮批量验活的结果；null = 进行中，undefined = 本轮未参与 */
+  livenessResult?: AccountLivenessResult | null
   onSelect: () => void
   onEdit: () => void
   onShowDetail: () => void
@@ -164,6 +170,8 @@ export const AccountCard = memo(function AccountCard({
   tags,
   groups,
   isSelected,
+  canSelect,
+  livenessResult,
   onSelect,
   onEdit,
   onShowDetail
@@ -511,7 +519,7 @@ export const AccountCard = memo(function AccountCard({
         accountTags.length > 0 && !account.isActive && !isUnauthorized && 'border-transparent'
       )}
       style={finalStyle}
-      onClick={() => toggleSelection(account.id)}
+      onClick={() => canSelect && toggleSelection(account.id)}
     >
       {/* 选中态独立覆盖层 — 避免被标签光环的 inline style (box-shadow/background) 覆盖
           z-10 在卡片内容上方，pointer-events-none 让交互穿透到 Card */}
@@ -526,17 +534,26 @@ export const AccountCard = memo(function AccountCard({
       <CardContent className="p-4 flex-1 flex flex-col gap-3 overflow-hidden">
         {/* Header: Checkbox, Email/Nickname, Group */}
         <div className="flex gap-3 items-start">
-          {/* Checkbox */}
+          {/* Checkbox — 已锁定其它分组时置灰不可点，从源头阻止跨分组混选 */}
           <div
             className={cn(
-              'w-5 h-5 rounded border-2 flex items-center justify-center transition-colors flex-shrink-0 mt-0.5 cursor-pointer',
+              'w-5 h-5 rounded border-2 flex items-center justify-center transition-colors flex-shrink-0 mt-0.5',
               isSelected
-                ? 'bg-primary border-primary text-primary-foreground'
-                : 'border-muted-foreground/30 hover:border-primary'
+                ? 'bg-primary border-primary text-primary-foreground cursor-pointer'
+                : canSelect
+                  ? 'border-muted-foreground/30 hover:border-primary cursor-pointer'
+                  : 'border-muted-foreground/15 opacity-40 cursor-not-allowed'
             )}
+            title={
+              canSelect
+                ? undefined
+                : isEn
+                  ? 'Selection is locked to one group. Clear the selection to pick accounts from another group.'
+                  : '批量选择已锁定在同一分组，如需选其它分组的账号请先清除当前选中'
+            }
             onClick={(e) => {
               e.stopPropagation()
-              onSelect()
+              if (canSelect) onSelect()
             }}
           >
             {isSelected && <Check className="h-3.5 w-3.5" />}
@@ -568,6 +585,48 @@ export const AccountCard = memo(function AccountCard({
                     ? maskEmail(account.email)
                     : getDisplayName(account)}
               </h3>
+              {/* 验活徽标：仅参与本轮批量验活的账号显示，就地反映结果 */}
+              {livenessResult !== undefined && (
+                <div
+                  className={cn(
+                    'text-2xs font-medium px-2 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0',
+                    livenessResult === null
+                      ? 'bg-muted text-muted-foreground'
+                      : livenessResult.success
+                        ? 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400'
+                        : 'bg-destructive/12 text-destructive'
+                  )}
+                  title={
+                    livenessResult === null
+                      ? isEn
+                        ? 'Liveness test running...'
+                        : '验活进行中...'
+                      : livenessResult.success
+                        ? `${isEn ? 'Alive' : '存活'} · ${livenessResult.latencyMs}ms${
+                            livenessResult.content ? ` · ${livenessResult.content}` : ''
+                          }`
+                        : livenessResult.error || (isEn ? 'Liveness test failed' : '验活失败')
+                  }
+                >
+                  {livenessResult === null ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      {isEn ? 'Test' : '验活'}
+                    </>
+                  ) : livenessResult.success ? (
+                    <>
+                      <Zap className="h-3 w-3" />
+                      {livenessResult.latencyMs}ms
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="h-3 w-3" />
+                      {isEn ? 'Dead' : '失败'}
+                    </>
+                  )}
+                </div>
+              )}
+
               {/* Status Badge */}
               <div
                 className={cn(

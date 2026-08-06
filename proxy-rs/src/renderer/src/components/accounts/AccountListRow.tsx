@@ -2,7 +2,7 @@ import { memo, useState, useMemo, useCallback } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Badge, Button, askConfirm } from '../ui'
-import type { Account, AccountTag, AccountGroup } from '@/types/account'
+import type { Account, AccountTag, AccountGroup, AccountLivenessResult } from '@/types/account'
 import {
   Check,
   RefreshCw,
@@ -18,7 +18,9 @@ import {
   KeyRound,
   FolderOpen,
   Copy,
-  Download
+  Download,
+  Zap,
+  XCircle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -38,6 +40,10 @@ interface AccountListRowProps {
   tags: Map<string, AccountTag>
   groups: Map<string, AccountGroup>
   isSelected: boolean
+  /** 能否勾选：批量选择锁定在单一分组，其它分组的账号为 false */
+  canSelect: boolean
+  /** 本轮批量验活的结果；null = 进行中，undefined = 本轮未参与 */
+  livenessResult?: AccountLivenessResult | null
   onEdit: () => void
   onShowDetail: () => void
 }
@@ -52,6 +58,8 @@ function AccountListRowComponent({
   tags,
   groups,
   isSelected,
+  canSelect,
+  livenessResult,
   onEdit,
   onShowDetail
 }: AccountListRowProps): React.ReactNode {
@@ -63,6 +71,7 @@ function AccountListRowComponent({
     toggleSelection,
     maskEmail,
     maskNickname,
+    privacyMode,
     usagePrecision,
     updateAccountStatus,
     accountProxyBindings,
@@ -103,12 +112,18 @@ function AccountListRowComponent({
   }, [account.groupId, groups])
 
   // 显示名（昵称优先 + 隐私模式 mask）
+  // privacyMode 必须进依赖：maskEmail / maskNickname 是 store 的稳定引用，
+  // 内部读 get().privacyMode，少了这个依赖 memo 会一直返回首次计算的结果，
+  // 表现为隐私模式开关点了没反应。
   const displayName = useMemo(() => {
     if (account.nickname) return maskNickname(account.nickname)
     return maskEmail(account.email)
-  }, [account.nickname, account.email, maskEmail, maskNickname])
+  }, [account.nickname, account.email, maskEmail, maskNickname, privacyMode])
 
-  const maskedEmail = useMemo(() => maskEmail(account.email), [account.email, maskEmail])
+  const maskedEmail = useMemo(
+    () => maskEmail(account.email),
+    [account.email, maskEmail, privacyMode]
+  )
 
   // Credits
   const formatUsage = (value: number): string => {
@@ -224,24 +239,33 @@ function AccountListRowComponent({
           'border-border'
       )}
       style={rowStyle}
-      onClick={() => toggleSelection(account.id)}
+      onClick={() => canSelect && toggleSelection(account.id)}
     >
       {/* 选中态独立覆盖层 — 避免被多标签 rowStyle 的 backgroundImage 覆盖 */}
       {isSelected && !account.isActive && !isUnauthorized && (
         <div className="absolute inset-0 pointer-events-none rounded-[inherit] ring-2 ring-inset ring-primary/60 bg-primary/[0.08] z-10" />
       )}
 
-      {/* Checkbox */}
+      {/* Checkbox — 已锁定其它分组时置灰不可点，从源头阻止跨分组混选 */}
       <div
         className={cn(
-          'flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors cursor-pointer',
+          'flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors',
           isSelected
-            ? 'bg-primary border-primary text-primary-foreground'
-            : 'border-muted-foreground/30 hover:border-primary'
+            ? 'bg-primary border-primary text-primary-foreground cursor-pointer'
+            : canSelect
+              ? 'border-muted-foreground/30 hover:border-primary cursor-pointer'
+              : 'border-muted-foreground/15 opacity-40 cursor-not-allowed'
         )}
+        title={
+          canSelect
+            ? undefined
+            : isEn
+              ? 'Selection is locked to one group. Clear the selection to pick accounts from another group.'
+              : '批量选择已锁定在同一分组，如需选其它分组的账号请先清除当前选中'
+        }
         onClick={(e) => {
           e.stopPropagation()
-          toggleSelection(account.id)
+          if (canSelect) toggleSelection(account.id)
         }}
       >
         {isSelected && <Check className="h-3 w-3" />}
@@ -327,6 +351,48 @@ function AccountListRowComponent({
 
       {/* === 徽章固定列（紧贴邮箱列，每个徽章等宽确保跨行对齐） === */}
       <div className="flex-shrink-0 flex items-center gap-1.5">
+        {/* 验活徽标：仅参与本轮批量验活的账号显示，就地反映结果 */}
+        {livenessResult !== undefined && (
+          <div
+            className={cn(
+              'text-2xs font-medium h-5 px-2 rounded-full flex items-center justify-center gap-1 min-w-[56px]',
+              livenessResult === null
+                ? 'bg-muted text-muted-foreground'
+                : livenessResult.success
+                  ? 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400'
+                  : 'bg-destructive/12 text-destructive'
+            )}
+            title={
+              livenessResult === null
+                ? isEn
+                  ? 'Liveness test running...'
+                  : '验活进行中...'
+                : livenessResult.success
+                  ? `${isEn ? 'Alive' : '存活'} · ${livenessResult.latencyMs}ms${
+                      livenessResult.content ? ` · ${livenessResult.content}` : ''
+                    }`
+                  : livenessResult.error || (isEn ? 'Liveness test failed' : '验活失败')
+            }
+          >
+            {livenessResult === null ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {isEn ? 'Test' : '验活'}
+              </>
+            ) : livenessResult.success ? (
+              <>
+                <Zap className="h-3 w-3" />
+                {livenessResult.latencyMs}ms
+              </>
+            ) : (
+              <>
+                <XCircle className="h-3 w-3" />
+                {isEn ? 'Dead' : '失败'}
+              </>
+            )}
+          </div>
+        )}
+
         {/* 状态徽章（min-w 保持等宽） */}
         <div
           className={cn(

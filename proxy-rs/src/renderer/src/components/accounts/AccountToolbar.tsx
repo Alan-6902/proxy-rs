@@ -29,9 +29,7 @@ import {
   Users,
   Inbox,
   ArrowRightLeft,
-  Zap,
-  Activity,
-  KeyRound
+  Zap
 } from 'lucide-react'
 
 export type AccountViewMode = 'grid' | 'list'
@@ -46,6 +44,8 @@ interface AccountToolbarProps {
   onManageTags: () => void
   isFilterExpanded: boolean
   onToggleFilter: () => void
+  /** 展开/收起页内批量验活面板 */
+  onToggleLiveness: () => void
 }
 
 export function AccountToolbar({
@@ -57,12 +57,14 @@ export function AccountToolbar({
   onManageGroups,
   onManageTags,
   isFilterExpanded,
-  onToggleFilter
+  onToggleFilter,
+  onToggleLiveness
 }: AccountToolbarProps): React.ReactNode {
   const {
     filter,
     setFilter,
     selectedIds,
+    selectionGroupId,
     selectAll,
     deselectAll,
     removeAccounts,
@@ -86,8 +88,6 @@ export function AccountToolbar({
     unbindAccountFromProxy
   } = useAccountsStore()
 
-  const [isRefreshing, setIsRefreshing] = useState(false)
-  const [isChecking, setIsChecking] = useState(false)
   // 批量刷新 = 先刷 Token 再拉账号信息（用量 / 订阅 / 封禁）
   const [isBatchRefreshing, setIsBatchRefreshing] = useState(false)
   const [showTagMenu, setShowTagMenu] = useState(false)
@@ -205,8 +205,15 @@ export function AccountToolbar({
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const stats = getStats()
-  const filteredCount = getFilteredAccounts().length
+  const filteredAccounts = getFilteredAccounts()
+  const filteredCount = filteredAccounts.length
   const selectedCount = selectedIds.size
+  /** 当前分组内可选的账号（锁定分组后只有同组账号能被勾） */
+  const selectableCount = useMemo(() => {
+    if (selectedCount === 0) return filteredCount
+    return filteredAccounts.filter((a) => a.groupId === selectionGroupId).length
+  }, [filteredAccounts, filteredCount, selectedCount, selectionGroupId])
+  const isAllSelected = selectedCount > 0 && selectedCount === selectableCount
 
   // 分组 Tab 计数（全部 / 未分组 / 各分组）
   const tabCounts = useMemo(() => {
@@ -233,25 +240,22 @@ export function AccountToolbar({
     setFilter({ ...filter, search: value || undefined })
   }
 
-  const handleBatchRefresh = async (): Promise<void> => {
-    if (selectedCount === 0) return
-    setIsRefreshing(true)
-    await batchRefreshTokens(Array.from(selectedIds))
-    setIsRefreshing(false)
-  }
-
-  const handleBatchCheck = async (): Promise<void> => {
-    if (selectedCount === 0) return
-    setIsChecking(true)
-    await batchCheckStatus(Array.from(selectedIds))
-    setIsChecking(false)
-  }
+  /**
+   * 批量操作的目标账号：选中了就用选中集合，没选中就作用于当前分组筛选出的全部账号。
+   * 「一个都没选 = 整组」比「禁用按钮」更符合日常用法：进入某个分组后直接点刷新即可。
+   */
+  const batchTargetIds = useMemo(() => {
+    if (selectedIds.size > 0) return Array.from(selectedIds)
+    return filteredAccounts.map((a) => a.id)
+  }, [selectedIds, filteredAccounts])
+  const refreshTargetIds = batchTargetIds
+  const livenessTargetIds = batchTargetIds
 
   // 批量刷新 = 先刷 Token，再拉账号信息（用量 / 订阅 / 封禁状态）
   // 顺序不能反：Token 过期时 checkStatus 会整批 401
   const handleBatchRefreshAll = async (): Promise<void> => {
-    if (selectedCount === 0) return
-    const ids = Array.from(selectedIds)
+    const ids = refreshTargetIds
+    if (ids.length === 0) return
     setIsBatchRefreshing(true)
     try {
       await batchRefreshTokens(ids)
@@ -259,12 +263,6 @@ export function AccountToolbar({
     } finally {
       setIsBatchRefreshing(false)
     }
-  }
-
-  // 跳转到一键诊断页"账号测活"，对当前选中账号做批量测活（选中状态保存在 store，跳页后仍在）
-  const handleBatchLiveness = (): void => {
-    if (selectedCount === 0) return
-    window.dispatchEvent(new CustomEvent('navigate-page', { detail: 'diagnose' }))
   }
 
   const handleBatchDelete = async (): Promise<void> => {
@@ -288,7 +286,7 @@ export function AccountToolbar({
   }
 
   const handleToggleSelectAll = (): void => {
-    if (selectedCount === filteredCount && filteredCount > 0) {
+    if (isAllSelected) {
       deselectAll()
     } else {
       selectAll()
@@ -748,21 +746,22 @@ export function AccountToolbar({
 
           <div className="w-px h-6 bg-border mx-1" />
 
-          {/* 批量刷新 — 带文字的显式入口：Token + 账号信息一起刷 */}
+          {/* 批量刷新 — 唯一的刷新入口：Token + 账号信息一起刷。
+              未选中账号时作用于当前分组筛选出的全部账号。 */}
           <Button
             variant="outline"
             size="sm"
             className="h-8"
             onClick={handleBatchRefreshAll}
-            disabled={isBatchRefreshing || selectedCount === 0}
+            disabled={isBatchRefreshing || refreshTargetIds.length === 0}
             title={
               selectedCount > 0
                 ? isEn
                   ? `Refresh ${selectedCount} selected accounts: access token, then usage / subscription / banned status`
                   : `批量刷新选中 ${selectedCount} 个账号：先刷访问令牌，再拉用量 / 订阅 / 封禁状态`
                 : isEn
-                  ? 'Batch refresh (select accounts first)'
-                  : '批量刷新（请先选中账号）'
+                  ? `Refresh all ${refreshTargetIds.length} accounts in the current group`
+                  : `刷新当前分组全部 ${refreshTargetIds.length} 个账号`
             }
           >
             {isBatchRefreshing ? (
@@ -771,51 +770,27 @@ export function AccountToolbar({
               <RefreshCw className="h-4 w-4 mr-1" />
             )}
             {isEn ? 'Refresh' : '批量刷新'}
-            {selectedCount > 0 && (
+            {refreshTargetIds.length > 0 && (
               <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-2xs tabular-nums">
-                {selectedCount}
+                {refreshTargetIds.length}
               </Badge>
             )}
           </Button>
 
-          {/* 批量操作 — 纯图标 + tooltip（带选中计数）*/}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={handleBatchCheck}
-            disabled={isChecking || selectedCount === 0}
-            title={
-              selectedCount > 0
-                ? isEn
-                  ? `Check ${selectedCount} accounts info (usage / subscription / banned)`
-                  : `检查选中 ${selectedCount} 个账号信息：刷新用量、订阅详情、封禁状态`
-                : isEn
-                  ? 'Check accounts info (select first)'
-                  : '检查账户信息（请先选中账号）'
-            }
-          >
-            {/* 与 batchRefresh 区分图标：Activity 代表"查看状态/活动" */}
-            {isChecking ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Activity className="h-4 w-4" />
-            )}
-          </Button>
           <Button
             variant="ghost"
             size="icon"
             className="h-8 w-8 text-emerald-600 hover:text-emerald-600 hover:bg-emerald-500/10"
-            onClick={handleBatchLiveness}
-            disabled={selectedCount === 0}
+            onClick={onToggleLiveness}
+            disabled={livenessTargetIds.length === 0}
             title={
               selectedCount > 0
                 ? isEn
-                  ? `Liveness test ${selectedCount} accounts via reverse-proxy`
+                  ? `Liveness test ${selectedCount} selected accounts via reverse-proxy`
                   : `走反代对选中 ${selectedCount} 个账号批量测活`
                 : isEn
-                  ? 'Liveness test (select first)'
-                  : '账号测活（请先选中账号）'
+                  ? `Liveness test all ${livenessTargetIds.length} accounts in the current group`
+                  : `对当前分组全部 ${livenessTargetIds.length} 个账号测活`
             }
           >
             <Zap className="h-4 w-4" />
@@ -838,60 +813,6 @@ export function AccountToolbar({
           >
             <Trash2 className="h-4 w-4" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={handleBatchRefresh}
-            disabled={isRefreshing || selectedCount === 0}
-            title={
-              selectedCount > 0
-                ? isEn
-                  ? `Refresh ${selectedCount} access tokens`
-                  : `刷新选中 ${selectedCount} 个账号的访问令牌`
-                : isEn
-                  ? 'Refresh Token (select first)'
-                  : '刷新 Token（请先选中账号）'
-            }
-          >
-            {/* 与 batchCheck 区分图标：KeyRound 代表"刷新令牌"，与 AccountCard 单账号视图一致 */}
-            {isRefreshing ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <KeyRound className="h-4 w-4" />
-            )}
-          </Button>
-
-          <div className="w-px h-6 bg-border mx-1" />
-
-          {/* 全选 / 取消全选 */}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleToggleSelectAll}
-            title={
-              selectedCount === filteredCount && filteredCount > 0
-                ? isEn
-                  ? 'Deselect all'
-                  : '取消全选'
-                : isEn
-                  ? 'Select all'
-                  : '全选'
-            }
-          >
-            {selectedCount === filteredCount && filteredCount > 0 ? (
-              <CheckSquare className="h-4 w-4 mr-1" />
-            ) : (
-              <Square className="h-4 w-4 mr-1" />
-            )}
-            {selectedCount > 0
-              ? isEn
-                ? `${selectedCount} sel`
-                : `已选 ${selectedCount}`
-              : isEn
-                ? 'All'
-                : '全选'}
-          </Button>
 
           {/* 清除选中（仅多选时显示，独立明确入口） */}
           {selectedCount > 0 && (
@@ -908,8 +829,48 @@ export function AccountToolbar({
         </div>
       </div>
 
-      {/* 分组平铺行 — 横向 chips，超宽横向滚动 */}
+      {/* 分组平铺行 — 横向 chips，超宽横向滚动。全选放在行首，与分组 chip 同排 */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mb-0.5">
+        {/* 全选 / 取消全选 —— 作用范围是当前分组筛选出的账号 */}
+        <button
+          type="button"
+          onClick={handleToggleSelectAll}
+          disabled={filteredCount === 0}
+          className={cn(
+            'flex items-center gap-1.5 h-7 px-2 rounded-lg border text-xs font-medium transition-colors flex-shrink-0',
+            'disabled:opacity-40 disabled:cursor-not-allowed',
+            selectedCount > 0
+              ? 'border-primary/45 bg-primary/12 text-primary'
+              : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted'
+          )}
+          title={
+            isAllSelected
+              ? isEn
+                ? 'Deselect all'
+                : '取消全选'
+              : isEn
+                ? 'Select all in current group'
+                : '全选当前分组'
+          }
+        >
+          {isAllSelected ? (
+            <CheckSquare className="h-3.5 w-3.5 flex-shrink-0" />
+          ) : (
+            <Square className="h-3.5 w-3.5 flex-shrink-0" />
+          )}
+          <span>
+            {selectedCount > 0
+              ? isEn
+                ? `${selectedCount} sel`
+                : `已选 ${selectedCount}`
+              : isEn
+                ? 'All'
+                : '全选'}
+          </span>
+        </button>
+
+        <div className="w-px h-5 bg-border flex-shrink-0" />
+
         {renderGroupChip({
           key: 'all',
           isActive: activeGroupTab === 'all',

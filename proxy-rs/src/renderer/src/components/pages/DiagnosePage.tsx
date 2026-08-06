@@ -13,14 +13,11 @@ import {
   Download,
   MessageSquare,
   Zap,
-  Square,
-  RefreshCw,
-  Trash2,
-  Flag,
-  RotateCcw
+  RefreshCw
 } from 'lucide-react'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useAccountsStore } from '@/store/accounts'
+import { useLivenessModels } from '@/hooks/useLivenessModels'
 import {
   Card,
   CardContent,
@@ -30,36 +27,12 @@ import {
   Badge,
   Label,
   Input,
-  PageHeader,
-  askConfirm
+  PageHeader
 } from '../ui'
 import { cn } from '@/lib/utils'
 import { APP_NAME } from '../../../../shared/appIdentity'
 
-/** 账号测活：常用模型候选（可在输入框自定义其它模型 ID） */
-const LIVENESS_MODELS = [
-  'claude-sonnet-4.5',
-  'claude-sonnet-4',
-  'claude-haiku-4.5',
-  'claude-opus-4.5',
-  'claude-3.7-sonnet',
-  'auto'
-]
-
-interface LivenessResult {
-  success: boolean
-  latencyMs: number
-  model?: string
-  content?: string
-  usage?: { inputTokens: number; outputTokens: number; credits: number }
-  credentials?: {
-    accessToken: string
-    refreshToken?: string
-    expiresAt?: number
-    credentialRevision?: string
-  }
-  error?: string
-}
+import type { AccountLivenessResult as LivenessResult } from '@/types/account'
 
 /** 脱敏代理 URL（隐藏密码） */
 function maskProxyUrl(url: string): string {
@@ -177,115 +150,32 @@ export function DiagnosePage(): React.ReactNode {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const pick = (x: BiText): string => (isEn ? x.en : x.zh)
-  const {
-    proxyPool,
-    proxyPoolConfig,
-    accounts,
-    selectedIds,
-    getAccountProxyUrl,
-    updateAccount,
-    removeAccounts
-  } = useAccountsStore()
+  const { proxyPool, proxyPoolConfig, accounts, getAccountProxyUrl, updateAccount } =
+    useAccountsStore()
 
-  // ============ 账号测活状态 ============
+  // ============ 账号测活状态（单账号；批量测活已移到账号管理页，结果就地显示在账号行上） ============
   const accountList = useMemo(() => Array.from(accounts.values()), [accounts])
-  // 账户管理页多选的账号（用于"批量测活选中"）
-  const selectedAccounts = useMemo(
-    () =>
-      Array.from(selectedIds)
-        .map((id) => accounts.get(id))
-        .filter((a): a is NonNullable<typeof a> => !!a),
-    [selectedIds, accounts]
-  )
-  // 若从账户页带着选中账号进入，自动默认"选中账号"批量模式
-  const [livenessMode, setLivenessMode] = useState<'single' | 'selected'>(() =>
-    useAccountsStore.getState().selectedIds.size > 0 ? 'selected' : 'single'
-  )
   const [livenessAccountId, setLivenessAccountId] = useState<string>('')
-  // 模型选择持久化：从 localStorage 恢复上次选择
-  const [livenessModel, setLivenessModel] = useState<string>(() => {
-    try {
-      return localStorage.getItem('kiro-liveness-model') || LIVENESS_MODELS[0]
-    } catch {
-      return LIVENESS_MODELS[0]
-    }
-  })
+  const {
+    model: livenessModel,
+    setModel: setLivenessModel,
+    modelOptions,
+    cachedCount,
+    loading: modelsLoading,
+    reload: loadModels
+  } = useLivenessModels()
   const [livenessMessage, setLivenessMessage] = useState<string>('Hi, reply with "pong" only.')
   const [livenessRunning, setLivenessRunning] = useState(false)
   const [livenessResult, setLivenessResult] = useState<LivenessResult | null>(null)
-  // 批量测活结果：accountId -> 结果（undefined 表示进行中）
-  const [livenessBatch, setLivenessBatch] = useState<Map<string, LivenessResult | null>>(new Map())
-  const [livenessConcurrency] = useState(3)
-  // 中止标志：停止按钮 / 组件卸载时置 true，让 worker 立即停止（避免切页后继续消耗账号 credits）
+  // 中止标志：组件卸载时置 true，避免切页后仍 setState / 继续消耗账号 credits
   const livenessAbort = useRef(false)
-
-  // 本地缓存的真实模型列表（来自代理缓存 / Kiro 可用模型；持久化到 localStorage，离线/代理未启时也能用上次结果）
-  const [cachedModels, setCachedModels] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem('kiro-liveness-models-cache')
-      if (raw) {
-        const arr = JSON.parse(raw)
-        if (Array.isArray(arr)) return arr.filter((x): x is string => typeof x === 'string')
-      }
-    } catch {
-      /* ignore */
-    }
-    return []
-  })
-  const [modelsLoading, setModelsLoading] = useState(false)
-  // datalist 选项 = 缓存的真实模型 ∪ 内置常用候选（去重，缓存优先）
-  const modelOptions = useMemo(
-    () => Array.from(new Set([...cachedModels, ...LIVENESS_MODELS])),
-    [cachedModels]
-  )
-
-  // 模型选择持久化
-  useEffect(() => {
-    try {
-      localStorage.setItem('kiro-liveness-model', livenessModel)
-    } catch {
-      /* ignore */
-    }
-  }, [livenessModel])
-
-  /** 拉取真实可用模型并缓存：优先代理缓存模型，回退 Kiro 可用模型；失败保留上次缓存 */
-  const loadModels = useCallback(async (): Promise<void> => {
-    setModelsLoading(true)
-    try {
-      let models: string[] = []
-      try {
-        const r = await window.api.proxyGetModels()
-        if (r.success && r.models?.length) models = r.models.map((m) => m.id)
-      } catch {
-        /* 代理未启动则忽略，走下面回退 */
-      }
-      if (models.length === 0) {
-        try {
-          const r = await window.api.getKiroAvailableModels()
-          if (r.models?.length) models = r.models.map((m) => m.id)
-        } catch {
-          /* 无 active 账号则忽略 */
-        }
-      }
-      if (models.length > 0) {
-        setCachedModels(models)
-        try {
-          localStorage.setItem('kiro-liveness-models-cache', JSON.stringify(models))
-        } catch {
-          /* ignore */
-        }
-      }
-    } finally {
-      setModelsLoading(false)
-    }
-  }, [])
 
   // 进入页面后台刷新一次模型列表（成功则更新缓存，失败则保留上次）
   useEffect(() => {
     void loadModels()
   }, [loadModels])
 
-  // 组件卸载时中止所有进行中的批量测活，防止后台继续调用 Kiro API 浪费额度
+  // 组件卸载时中止进行中的测活
   useEffect(() => {
     return () => {
       livenessAbort.current = true
@@ -350,148 +240,6 @@ export function DiagnosePage(): React.ReactNode {
     setLivenessResult(res)
     setLivenessRunning(false)
   }, [accounts, livenessAccountId, testOneAccount])
-
-  /** 批量测活选中账号（并发受限，可中止） */
-  const runLivenessBatch = useCallback(async (): Promise<void> => {
-    if (selectedAccounts.length === 0) return
-    livenessAbort.current = false
-    setLivenessRunning(true)
-    // 初始化所有为"进行中"(null)
-    const init = new Map<string, LivenessResult | null>()
-    for (const a of selectedAccounts) init.set(a.id, null)
-    setLivenessBatch(new Map(init))
-
-    const queue = [...selectedAccounts]
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        if (livenessAbort.current) break // 停止/卸载 → 不再取新账号测试
-        const acc = queue.shift()
-        if (!acc) break
-        const res = await testOneAccount(acc)
-        if (livenessAbort.current) break // 测完发现已中止 → 不再 setState（组件可能已卸载）
-        setLivenessBatch((prev) => {
-          const next = new Map(prev)
-          next.set(acc.id, res)
-          return next
-        })
-      }
-    }
-    const workers = Array.from(
-      { length: Math.min(livenessConcurrency, selectedAccounts.length) },
-      () => worker()
-    )
-    await Promise.all(workers)
-    if (!livenessAbort.current) setLivenessRunning(false)
-  }, [selectedAccounts, testOneAccount, livenessConcurrency])
-
-  /** 停止批量测活 */
-  const stopLivenessBatch = useCallback((): void => {
-    livenessAbort.current = true
-    setLivenessRunning(false)
-  }, [])
-
-  /** 单个账号重测（用于批量结果列表里每行的「重测」按钮） */
-  const retestOne = useCallback(
-    async (accountId: string): Promise<void> => {
-      const account = accounts.get(accountId)
-      if (!account) return
-      livenessAbort.current = false
-      setLivenessBatch((prev) => new Map(prev).set(accountId, null)) // 标记进行中
-      const res = await testOneAccount(account)
-      if (livenessAbort.current) return
-      setLivenessBatch((prev) => new Map(prev).set(accountId, res))
-    },
-    [accounts, testOneAccount]
-  )
-
-  /** 当前批量结果里失败的账号（保持 selectedAccounts 顺序） */
-  const failedAccountIds = useMemo(() => {
-    return selectedAccounts
-      .filter((a) => {
-        const r = livenessBatch.get(a.id)
-        return r && !r.success
-      })
-      .map((a) => a.id)
-  }, [selectedAccounts, livenessBatch])
-
-  /** 重测全部失败的账号（并发受限，可中止） */
-  const retestFailed = useCallback(async (): Promise<void> => {
-    const ids = failedAccountIds
-    if (ids.length === 0) return
-    livenessAbort.current = false
-    setLivenessRunning(true)
-    setLivenessBatch((prev) => {
-      const next = new Map(prev)
-      for (const id of ids) next.set(id, null) // 失败项重置为进行中
-      return next
-    })
-    const queue = ids.map((id) => accounts.get(id)).filter((a): a is NonNullable<typeof a> => !!a)
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        if (livenessAbort.current) break
-        const acc = queue.shift()
-        if (!acc) break
-        const res = await testOneAccount(acc)
-        if (livenessAbort.current) break
-        setLivenessBatch((prev) => new Map(prev).set(acc.id, res))
-      }
-    }
-    const workers = Array.from({ length: Math.min(livenessConcurrency, queue.length) }, () =>
-      worker()
-    )
-    await Promise.all(workers)
-    if (!livenessAbort.current) setLivenessRunning(false)
-  }, [failedAccountIds, accounts, testOneAccount, livenessConcurrency])
-
-  /** 一键把失败账号标记为 error 状态（账号管理页会显示红色错误态） */
-  const markFailedAsError = useCallback((): void => {
-    for (const id of failedAccountIds) {
-      const r = livenessBatch.get(id)
-      updateAccount(id, {
-        status: 'error',
-        lastError: r?.error || (isEn ? 'Liveness test failed' : '测活失败')
-      })
-    }
-  }, [failedAccountIds, livenessBatch, updateAccount, isEn])
-
-  /** 一键删除失败账号（带确认） */
-  const deleteFailed = useCallback(async (): Promise<void> => {
-    const ids = failedAccountIds
-    if (ids.length === 0) return
-    const ok = await askConfirm({
-      title: isEn
-        ? `Delete ${ids.length} account(s) that failed the liveness test?`
-        : `确定删除 ${ids.length} 个测活失败的账号？`,
-      description: isEn
-        ? 'These accounts and their stored credentials are removed from this app. This cannot be undone.'
-        : '这些账号及其保存的凭据将从本应用中移除，此操作不可恢复。',
-      confirmText: isEn ? `Delete ${ids.length}` : `删除 ${ids.length} 个`,
-      cancelText: isEn ? 'Cancel' : '取消',
-      tone: 'danger',
-      holdToConfirmMs: ids.length >= 10 ? 2000 : 0
-    })
-    if (!ok) return
-    removeAccounts(ids)
-    setLivenessBatch((prev) => {
-      const next = new Map(prev)
-      for (const id of ids) next.delete(id)
-      return next
-    })
-  }, [failedAccountIds, removeAccounts, isEn])
-
-  // 批量结果统计
-  const batchStats = useMemo(() => {
-    let done = 0,
-      ok = 0,
-      fail = 0
-    for (const r of livenessBatch.values()) {
-      if (r === null) continue
-      done++
-      if (r.success) ok++
-      else fail++
-    }
-    return { done, ok, fail, total: livenessBatch.size }
-  }, [livenessBatch])
 
   // 自定义探测 URL（替代旧的 MoEmail 字段，可填任意 HTTP/HTTPS 端点做连通性测试）
   // 兼容老配置：先读新 key，找不到则尝试读旧的 MoEmail key 完成迁移
@@ -752,87 +500,42 @@ export function DiagnosePage(): React.ReactNode {
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">
             {isEn
-              ? 'Send a real chat message to the selected model via the reverse-proxy call path (account-bound proxy applies). Verifies the account can actually get a response.'
-              : '走反代底层调用给指定模型发一条真实消息（自动应用账号绑定的代理），验证账号能否正常返回。'}
+              ? 'Send a real chat message to the selected model via the reverse-proxy call path (account-bound proxy applies). Verifies the account can actually get a response. For batch testing, use the Accounts page — results show inline on each account.'
+              : '走反代底层调用给指定模型发一条真实消息（自动应用账号绑定的代理），验证账号能否正常返回。批量测活请到「账号管理」页面，结果会直接显示在账号行上。'}
           </p>
 
-          {/* 模式切换：单个账号 / 选中账号批量 */}
-          <div className="flex items-center gap-1 p-0.5 bg-muted rounded-md w-fit">
-            <button
-              type="button"
-              onClick={() => setLivenessMode('single')}
-              disabled={livenessRunning}
-              className={cn(
-                'px-3 h-7 rounded text-xs font-medium transition-colors',
-                livenessMode === 'single'
-                  ? 'bg-background shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              {isEn ? 'Single' : '单个账号'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setLivenessMode('selected')}
-              disabled={livenessRunning}
-              className={cn(
-                'px-3 h-7 rounded text-xs font-medium transition-colors flex items-center gap-1',
-                livenessMode === 'selected'
-                  ? 'bg-background shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              {isEn ? 'Selected' : '选中账号'}
-              <Badge variant="secondary" className="h-4 px-1.5 text-2xs tabular-nums">
-                {selectedAccounts.length}
-              </Badge>
-            </button>
-          </div>
-
-          {livenessMode === 'selected' && selectedAccounts.length === 0 && (
-            <div className="flex items-center gap-1.5 text-xs text-amber-600">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              {isEn
-                ? 'No accounts selected. Go to the Accounts page and multi-select first.'
-                : '未选中任何账号。请先到「账号管理」页面多选账号。'}
-            </div>
-          )}
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {/* 单个模式：账号选择 */}
-            {livenessMode === 'single' && (
-              <div className="space-y-1">
-                <Label className="text-xs">{isEn ? 'Account' : '账号'}</Label>
-                <select
-                  value={livenessAccountId}
-                  onChange={(e) => setLivenessAccountId(e.target.value)}
-                  disabled={livenessRunning}
-                  className="h-9 w-full px-2 rounded-md border bg-background text-xs"
-                >
-                  <option value="">-- {isEn ? 'Select an account' : '选择账号'} --</option>
-                  {accountList.map((a) => {
-                    const bound = getAccountProxyUrl(a.id)
-                    return (
-                      <option key={a.id} value={a.id}>
-                        {a.email}
-                        {a.subscription?.type ? ` [${a.subscription.type}]` : ''}
-                        {bound ? ' 🔗' : ''}
-                      </option>
-                    )
-                  })}
-                </select>
-                {livenessAccountId && getAccountProxyUrl(livenessAccountId) && (
-                  <p className="text-2xs text-muted-foreground">
-                    {isEn ? 'Bound proxy: ' : '绑定代理: '}
-                    <code className="font-mono">
-                      {maskProxyUrl(getAccountProxyUrl(livenessAccountId)!)}
-                    </code>
-                  </p>
-                )}
-              </div>
-            )}
+            <div className="space-y-1">
+              <Label className="text-xs">{isEn ? 'Account' : '账号'}</Label>
+              <select
+                value={livenessAccountId}
+                onChange={(e) => setLivenessAccountId(e.target.value)}
+                disabled={livenessRunning}
+                className="h-9 w-full px-2 rounded-md border bg-background text-xs"
+              >
+                <option value="">-- {isEn ? 'Select an account' : '选择账号'} --</option>
+                {accountList.map((a) => {
+                  const bound = getAccountProxyUrl(a.id)
+                  return (
+                    <option key={a.id} value={a.id}>
+                      {a.email}
+                      {a.subscription?.type ? ` [${a.subscription.type}]` : ''}
+                      {bound ? ' 🔗' : ''}
+                    </option>
+                  )
+                })}
+              </select>
+              {livenessAccountId && getAccountProxyUrl(livenessAccountId) && (
+                <p className="text-2xs text-muted-foreground">
+                  {isEn ? 'Bound proxy: ' : '绑定代理: '}
+                  <code className="font-mono">
+                    {maskProxyUrl(getAccountProxyUrl(livenessAccountId)!)}
+                  </code>
+                </p>
+              )}
+            </div>
 
-            {/* 模型选择（两种模式共用） */}
+            {/* 模型选择 */}
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <Label className="text-xs">{isEn ? 'Model' : '模型'}</Label>
@@ -848,10 +551,10 @@ export function DiagnosePage(): React.ReactNode {
                   }
                 >
                   <RefreshCw className={cn('h-3 w-3', modelsLoading && 'animate-spin')} />
-                  {cachedModels.length > 0
+                  {cachedCount > 0
                     ? isEn
-                      ? `${cachedModels.length} cached`
-                      : `${cachedModels.length} 个缓存`
+                      ? `${cachedCount} cached`
+                      : `${cachedCount} 个缓存`
                     : isEn
                       ? 'Refresh'
                       : '刷新'}
@@ -886,65 +589,27 @@ export function DiagnosePage(): React.ReactNode {
           </div>
 
           <div className="flex items-center gap-2">
-            {livenessMode === 'single' ? (
-              <Button
-                onClick={runLiveness}
-                disabled={livenessRunning || !livenessAccountId || !livenessModel.trim()}
-              >
-                {livenessRunning ? (
-                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                ) : (
-                  <Zap className="h-4 w-4 mr-1" />
-                )}
-                {livenessRunning
-                  ? isEn
-                    ? 'Testing...'
-                    : '测试中...'
-                  : isEn
-                    ? 'Test Now'
-                    : '开始测活'}
-              </Button>
-            ) : (
-              <>
-                <Button
-                  onClick={runLivenessBatch}
-                  disabled={
-                    livenessRunning || selectedAccounts.length === 0 || !livenessModel.trim()
-                  }
-                >
-                  {livenessRunning ? (
-                    <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                  ) : (
-                    <Zap className="h-4 w-4 mr-1" />
-                  )}
-                  {livenessRunning
-                    ? `${isEn ? 'Testing' : '测试中'} ${batchStats.done}/${batchStats.total}`
-                    : `${isEn ? 'Test Selected' : '批量测活'} (${selectedAccounts.length})`}
-                </Button>
-                {livenessRunning && (
-                  <Button variant="destructive" onClick={stopLivenessBatch}>
-                    <Square className="h-4 w-4 mr-1" />
-                    {isEn ? 'Stop' : '停止'}
-                  </Button>
-                )}
-              </>
-            )}
-            {livenessMode === 'selected' && batchStats.total > 0 && (
-              <div className="ml-auto flex items-center gap-2 text-xs">
-                <Badge variant="outline" className="text-green-600 border-green-200">
-                  <CheckCircle2 className="h-3 w-3 mr-1" /> {batchStats.ok}
-                </Badge>
-                {batchStats.fail > 0 && (
-                  <Badge variant="outline" className="text-red-600 border-red-200">
-                    <XCircle className="h-3 w-3 mr-1" /> {batchStats.fail}
-                  </Badge>
-                )}
-              </div>
-            )}
+            <Button
+              onClick={runLiveness}
+              disabled={livenessRunning || !livenessAccountId || !livenessModel.trim()}
+            >
+              {livenessRunning ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Zap className="h-4 w-4 mr-1" />
+              )}
+              {livenessRunning
+                ? isEn
+                  ? 'Testing...'
+                  : '测试中...'
+                : isEn
+                  ? 'Test Now'
+                  : '开始测活'}
+            </Button>
           </div>
 
-          {/* 单个测活结果 */}
-          {livenessMode === 'single' && livenessResult && (
+          {/* 测活结果 */}
+          {livenessResult && (
             <div
               className={cn(
                 'rounded-md p-3 text-xs space-y-2 border',
@@ -1004,112 +669,6 @@ export function DiagnosePage(): React.ReactNode {
                   <span className="break-all">{livenessResult.error}</span>
                 </div>
               )}
-            </div>
-          )}
-
-          {/* 失败账号批量操作工具栏 */}
-          {livenessMode === 'selected' && !livenessRunning && failedAccountIds.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 p-2 rounded-md bg-red-50/50 dark:bg-red-950/10 border border-red-200 dark:border-red-900">
-              <span className="text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
-                <AlertTriangle className="h-3.5 w-3.5" />
-                {isEn ? `${failedAccountIds.length} failed` : `${failedAccountIds.length} 个失败`}
-              </span>
-              <div className="ml-auto flex items-center gap-1.5">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => void retestFailed()}
-                >
-                  <RotateCcw className="h-3.5 w-3.5 mr-1" />
-                  {isEn ? 'Retest failed' : '重测失败'}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={markFailedAsError}
-                >
-                  <Flag className="h-3.5 w-3.5 mr-1" />
-                  {isEn ? 'Mark as error' : '标记为错误'}
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={deleteFailed}
-                >
-                  <Trash2 className="h-3.5 w-3.5 mr-1" />
-                  {isEn ? 'Delete failed' : '删除失败'}
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* 批量测活结果列表 */}
-          {livenessMode === 'selected' && batchStats.total > 0 && (
-            <div className="space-y-1 max-h-80 overflow-y-auto">
-              {selectedAccounts.map((a) => {
-                const r = livenessBatch.get(a.id)
-                const pending = r === null
-                return (
-                  <div
-                    key={a.id}
-                    className={cn(
-                      'flex items-center gap-2 p-2 rounded-md text-xs',
-                      pending && 'bg-muted/30',
-                      r && r.success && 'bg-green-50/50 dark:bg-green-950/10',
-                      r && !r.success && 'bg-red-50/50 dark:bg-red-950/10'
-                    )}
-                  >
-                    <div className="w-5 flex justify-center flex-shrink-0">
-                      {pending && (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                      )}
-                      {r && r.success && <CheckCircle2 className="h-4 w-4 text-green-500" />}
-                      {r && !r.success && <XCircle className="h-4 w-4 text-red-500" />}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate flex items-center gap-1">
-                        {a.email}
-                        {getAccountProxyUrl(a.id) && (
-                          <span title={isEn ? 'bound proxy' : '已绑定代理'}>🔗</span>
-                        )}
-                      </div>
-                      {r && r.success && r.content && (
-                        <div
-                          className="text-2xs text-muted-foreground truncate font-mono"
-                          title={r.content}
-                        >
-                          → {r.content}
-                        </div>
-                      )}
-                      {r && !r.success && r.error && (
-                        <div className="text-2xs text-red-500 truncate" title={r.error}>
-                          {r.error}
-                        </div>
-                      )}
-                    </div>
-                    {r && (
-                      <span className="font-mono tabular-nums text-2xs text-muted-foreground flex-shrink-0">
-                        {r.latencyMs}ms
-                      </span>
-                    )}
-                    {/* 单行重测：进行中不显示；已出结果（成功/失败）均可单独重测 */}
-                    {!pending && (
-                      <button
-                        type="button"
-                        onClick={() => void retestOne(a.id)}
-                        disabled={livenessRunning}
-                        title={isEn ? 'Retest this account' : '重测该账号'}
-                        className="flex-shrink-0 p-1 rounded hover:bg-background/80 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
             </div>
           )}
         </CardContent>

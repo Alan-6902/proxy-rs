@@ -51,8 +51,16 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
     return () => resizeObserver.disconnect()
   }, [])
 
-  const { getFilteredAccounts, tags, groups, selectedIds, toggleSelection, checkAccountStatus } =
-    useAccountsStore()
+  const {
+    getFilteredAccounts,
+    tags,
+    groups,
+    selectedIds,
+    selectionGroupId,
+    livenessResults,
+    toggleSelection,
+    checkAccountStatus
+  } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
 
@@ -144,6 +152,14 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
                         tags={tags}
                         groups={groups}
                         isSelected={selectedIds.has(item.id)}
+                        canSelect={
+                          selectedIds.size === 0 ||
+                          selectedIds.has(item.id) ||
+                          item.groupId === selectionGroupId
+                        }
+                        livenessResult={
+                          livenessResults.has(item.id) ? livenessResults.get(item.id) : undefined
+                        }
                         onSelect={() => toggleSelection(item.id)}
                         onEdit={() => onEditAccount(item)}
                         onShowDetail={() => handleShowDetail(item)}

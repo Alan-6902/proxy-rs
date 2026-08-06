@@ -22,7 +22,15 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
   const [detailAccount, setDetailAccount] = useState<Account | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  const { getFilteredAccounts, tags, groups, selectedIds, checkAccountStatus } = useAccountsStore()
+  const {
+    getFilteredAccounts,
+    tags,
+    groups,
+    selectedIds,
+    selectionGroupId,
+    livenessResults,
+    checkAccountStatus
+  } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
 
@@ -83,6 +91,14 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
                 tags={tags}
                 groups={groups}
                 isSelected={selectedIds.has(account.id)}
+                canSelect={
+                  selectedIds.size === 0 ||
+                  selectedIds.has(account.id) ||
+                  account.groupId === selectionGroupId
+                }
+                livenessResult={
+                  livenessResults.has(account.id) ? livenessResults.get(account.id) : undefined
+                }
                 onEdit={() => onEditAccount(account)}
                 onShowDetail={() => handleShowDetail(account)}
               />

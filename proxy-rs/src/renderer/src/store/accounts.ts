@@ -13,7 +13,8 @@ import type {
   BatchOperationResult,
   AccountSubscription,
   SubscriptionType,
-  IdpType
+  IdpType,
+  AccountLivenessResult
 } from '../types/account'
 import type {
   ProxyEntry,
@@ -43,9 +44,14 @@ function resolveTrayLanguage(language: AppLanguage): 'en' | 'zh' {
   return language === 'auto' ? (navigator.language.startsWith('zh') ? 'zh' : 'en') : language
 }
 
+// ============ 批量验活 ============
+/** 验活并发：每次验活都是一次真实模型请求，会消耗账号 credits，控制在低位 */
+const LIVENESS_CONCURRENCY = 3
+/** 中止标志：停止按钮 / 清空结果时置 true，让 worker 立刻停下不再消耗额度 */
+let livenessAbort = false
+
 // 持久化防抖：合并连续 mutation 为单次写盘，避免后台刷新风暴时 IPC + IO 风暴
-const SAVE_DEBOUNCE_MS = 500
-/** 防抖最大延迟：连续 mutation 时也最迟在此时间内落盘一次，防止风暴下数据长时间不入磁盘 */
+const SAVE_DEBOUNCE_MS = 500 /** 防抖最大延迟：连续 mutation 时也最迟在此时间内落盘一次，防止风暴下数据长时间不入磁盘 */
 const SAVE_MAX_WAIT_MS = 5000
 let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let saveMaxWaitTimer: ReturnType<typeof setTimeout> | null = null
@@ -123,6 +129,16 @@ interface AccountsState {
 
   // 选中的账号（用于批量操作）
   selectedIds: Set<string>
+  /**
+   * 选中账号所属的分组，选中集合非空时锁定（undefined = 未分组）。
+   * 批量操作（移入分组、打标签、刷新、验活）都按整组语义处理，
+   * 混选跨分组账号会让"批量移入本组"之类的操作含义不清，所以从勾选阶段就限制。
+   */
+  selectionGroupId: string | undefined
+  /** 批量验活结果：accountId -> 结果；值为 null 表示进行中 */
+  livenessResults: Map<string, AccountLivenessResult | null>
+  /** 批量验活是否进行中 */
+  livenessRunning: boolean
 
   // 加载状态
   isLoading: boolean
@@ -209,6 +225,22 @@ interface AccountsActions {
   deselectAll: () => void
   toggleSelection: (id: string) => void
   getSelectedAccounts: () => Account[]
+  /**
+   * 该账号能否被勾选：选中集合非空且账号不在锁定分组内时为 false。
+   * UI 据此把 checkbox 置灰，从源头阻止跨分组混选。
+   */
+  canSelectAccount: (id: string) => boolean
+
+  // 批量验活（结果就地显示在账号列表/卡片上）
+  runLivenessBatch: (params: {
+    ids: string[]
+    model: string
+    message?: string
+    /** true = 只重置本次 ids 的结果，保留其它账号已有结果（用于「重测失败」） */
+    keepExisting?: boolean
+  }) => Promise<void>
+  stopLivenessBatch: () => void
+  clearLivenessResults: () => void
 
   // 导入导出
   exportAccounts: (ids?: string[]) => AccountExportData
@@ -386,6 +418,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   activeGroupTab: loadActiveGroupTab(),
   sort: defaultSort,
   selectedIds: new Set(),
+  selectionGroupId: undefined,
+  livenessResults: new Map(),
+  livenessRunning: false,
   isLoading: false,
   isSyncing: false,
   autoRefreshEnabled: true,
@@ -462,7 +497,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const bindings = { ...state.accountProxyBindings }
       delete bindings[id]
 
-      return { accounts, selectedIds, activeAccountId, accountProxyBindings: bindings }
+      return {
+        accounts,
+        selectedIds,
+        selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId,
+        activeAccountId,
+        accountProxyBindings: bindings
+      }
     })
     get().saveToStorage()
   },
@@ -489,7 +530,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         }
       }
 
-      return { accounts, selectedIds, activeAccountId, accountProxyBindings: bindings }
+      return {
+        accounts,
+        selectedIds,
+        selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId,
+        activeAccountId,
+        accountProxyBindings: bindings
+      }
     })
 
     get().saveToStorage()
@@ -589,7 +636,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           accounts.set(id, { ...account, groupId })
         }
       }
-      return { accounts }
+      // 移动的正是当前选中集合时，锁定分组要跟着走，否则选中项立刻变成"跨组"状态
+      const movedAll =
+        state.selectedIds.size > 0 && accountIds.every((id) => state.selectedIds.has(id))
+      return movedAll ? { accounts, selectionGroupId: groupId } : { accounts }
     })
     get().saveToStorage()
   },
@@ -691,7 +741,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     } catch {
       /* no-op */
     }
-    set({ activeGroupTab: tab })
+    // 切组时清空选中：留着上一组的选中项会在当前视图里看不见，
+    // 但批量操作仍会作用到它们上，属于危险的隐藏状态。
+    set({ activeGroupTab: tab, selectedIds: new Set(), selectionGroupId: undefined })
   },
 
   setSort: (sort) => {
@@ -830,9 +882,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   selectAccount: (id) => {
     set((state) => {
+      const account = state.accounts.get(id)
+      if (!account) return {}
+      // 跨分组混选会让"批量移入本组""按组刷新"这类操作语义不清，直接拒绝
+      if (state.selectedIds.size > 0 && account.groupId !== state.selectionGroupId) return {}
       const selectedIds = new Set(state.selectedIds)
       selectedIds.add(id)
-      return { selectedIds }
+      return { selectedIds, selectionGroupId: account.groupId }
     })
   },
 
@@ -840,17 +896,28 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     set((state) => {
       const selectedIds = new Set(state.selectedIds)
       selectedIds.delete(id)
-      return { selectedIds }
+      // 清空后解除分组锁定，下次勾选可自由选组
+      return {
+        selectedIds,
+        selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId
+      }
     })
   },
 
   selectAll: () => {
-    const filtered = get().getFilteredAccounts()
-    set({ selectedIds: new Set(filtered.map((a) => a.id)) })
+    const { getFilteredAccounts, selectedIds, selectionGroupId } = get()
+    const filtered = getFilteredAccounts()
+    // 已有选中 → 沿用锁定分组；无选中 → 以筛选结果里第一个账号的分组为准
+    const lockGroupId = selectedIds.size > 0 ? selectionGroupId : filtered[0]?.groupId
+    const inGroup = filtered.filter((a) => a.groupId === lockGroupId)
+    set({
+      selectedIds: new Set(inGroup.map((a) => a.id)),
+      selectionGroupId: inGroup.length > 0 ? lockGroupId : undefined
+    })
   },
 
   deselectAll: () => {
-    set({ selectedIds: new Set() })
+    set({ selectedIds: new Set(), selectionGroupId: undefined })
   },
 
   toggleSelection: (id) => {
@@ -858,11 +925,105 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const selectedIds = new Set(state.selectedIds)
       if (selectedIds.has(id)) {
         selectedIds.delete(id)
-      } else {
-        selectedIds.add(id)
+        return {
+          selectedIds,
+          selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId
+        }
       }
-      return { selectedIds }
+      const account = state.accounts.get(id)
+      if (!account) return {}
+      if (selectedIds.size > 0 && account.groupId !== state.selectionGroupId) return {}
+      selectedIds.add(id)
+      return { selectedIds, selectionGroupId: account.groupId }
     })
+  },
+
+  canSelectAccount: (id) => {
+    const { accounts, selectedIds, selectionGroupId } = get()
+    if (selectedIds.size === 0) return true
+    if (selectedIds.has(id)) return true
+    return accounts.get(id)?.groupId === selectionGroupId
+  },
+
+  // ==================== 批量验活 ====================
+
+  runLivenessBatch: async ({ ids, model, message, keepExisting }) => {
+    if (ids.length === 0 || get().livenessRunning) return
+    livenessAbort = false
+    // 本次涉及的账号标记为"进行中"，UI 立刻显示 spinner。
+    // keepExisting 时保留其它账号已有结果（重测失败不该抹掉成功项的记录）。
+    set((state) => {
+      const next = keepExisting ? new Map(state.livenessResults) : new Map()
+      for (const id of ids) next.set(id, null)
+      return { livenessRunning: true, livenessResults: next }
+    })
+
+    const queue = [...ids]
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (livenessAbort) break
+        const id = queue.shift()
+        if (!id) break
+        const account = get().accounts.get(id)
+        if (!account) continue
+        const cred = account.credentials
+        let result: AccountLivenessResult
+        try {
+          result = await window.api.diagnoseAccountLiveness({
+            account: {
+              id: account.id,
+              email: account.email,
+              accessToken: cred.accessToken,
+              refreshToken: cred.refreshToken,
+              clientId: cred.clientId,
+              clientSecret: cred.clientSecret,
+              region: cred.region,
+              authMethod: cred.authMethod,
+              provider: cred.provider,
+              profileArn: account.profileArn,
+              expiresAt: cred.expiresAt,
+              credentialRevision: cred.credentialRevision,
+              proxyUrl: get().getAccountProxyUrl(account.id)
+            },
+            model,
+            message
+          })
+        } catch (err) {
+          result = {
+            success: false,
+            latencyMs: 0,
+            error: err instanceof Error ? err.message : String(err)
+          }
+        }
+        // 验活途中上游可能轮换凭据，落盘避免下次请求用到旧 token
+        if (result.credentials) {
+          const latest = get().accounts.get(account.id)
+          if (latest) {
+            get().updateAccount(account.id, {
+              credentials: { ...latest.credentials, ...result.credentials }
+            })
+          }
+        }
+        if (livenessAbort) break
+        set((state) => ({ livenessResults: new Map(state.livenessResults).set(id, result) }))
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(LIVENESS_CONCURRENCY, ids.length) }, () =>
+      worker()
+    )
+    await Promise.all(workers)
+    set({ livenessRunning: false })
+  },
+
+  stopLivenessBatch: () => {
+    livenessAbort = true
+    set({ livenessRunning: false })
+  },
+
+  clearLivenessResults: () => {
+    livenessAbort = true
+    set({ livenessResults: new Map(), livenessRunning: false })
   },
 
   getSelectedAccounts: () => {
@@ -1450,6 +1611,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           tags: new Map(Object.entries(data.tags ?? {}) as [string, AccountTag][]),
           activeAccountId,
           selectedIds: new Set(),
+          selectionGroupId: undefined,
           autoRefreshEnabled: data.autoRefreshEnabled ?? true,
           autoRefreshInterval: data.autoRefreshInterval ?? 5,
           autoRefreshConcurrency: data.autoRefreshConcurrency ?? 100,

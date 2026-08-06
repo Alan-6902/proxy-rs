@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, type PageType } from './components/layout'
-import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SubscriptionPage, LogsPage } from './components/pages'
+import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SeatsPage, ConvoyPage, LogsPage } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
+import { ConfirmDialogHost } from './components/ui'
 import { useAccountsStore } from './store/accounts'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
@@ -11,10 +12,22 @@ const TRAY_UPDATE_DEBOUNCE_MS = 400
 // 后台刷新结果批量化间隔：N 条结果合并到一次 set，避免 N 次 Map 全量复制 + 渲染抖动
 const BACKGROUND_RESULT_FLUSH_MS = 120
 const LEGACY_WEBHOOK_STORAGE_KEY = 'kiro-webhooks'
+const SETTINGS_SHORTCUT_KEY = ','
 
 function App(): React.JSX.Element {
   const [currentPage, setCurrentPage] = useState<PageType>('home')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
+
+  useEffect(() => {
+    const openSettings = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key === SETTINGS_SHORTCUT_KEY) {
+        event.preventDefault()
+        setCurrentPage('settings')
+      }
+    }
+    window.addEventListener('keydown', openSettings)
+    return () => window.removeEventListener('keydown', openSettings)
+  }, [])
 
   const {
     loadFromStorage,
@@ -260,8 +273,10 @@ function App(): React.JSX.Element {
         return <ProxyPoolPage />
       case 'register':
         return <RegisterPage />
-      case 'subscription':
-        return <SubscriptionPage />
+      case 'seats':
+        return <SeatsPage />
+      case 'convoy':
+        return <ConvoyPage />
       case 'diagnose':
         return <DiagnosePage />
       case 'configSync':
@@ -303,6 +318,7 @@ function App(): React.JSX.Element {
         </main>
       </div>
       <CloseConfirmDialog />
+      <ConfirmDialogHost />
     </div>
   )
 }

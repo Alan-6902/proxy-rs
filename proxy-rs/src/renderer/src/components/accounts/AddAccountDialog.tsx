@@ -3,12 +3,22 @@ import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select 
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import type { SubscriptionType } from '@/types/account'
-import { X, Loader2, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
+import { X, Loader2, Copy, Check, ExternalLink, Info } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
+import {
+  maskKiroApiKey,
+  parseKiroApiKeyEntries
+} from '../../../../shared/kiroApiKey'
+import {
+  CONVOY_REGION_PROBE_ORDER,
+  resolveRegionProbeOrder
+} from '../../../../shared/convoyCredentials'
 
 interface AddAccountDialogProps {
   isOpen: boolean
   onClose: () => void
+  /** 打开时直接切到 API Key 分支并预填内容（主界面导入 ksk 列表文件时转交过来）。 */
+  initialKiroApiKeyText?: string
 }
 
 interface BonusData {
@@ -57,11 +67,11 @@ interface VerifiedData {
   expiresAt?: number
 }
 
-type ImportMode = 'oidc' | 'sso' | 'login'
+type ImportMode = 'oidc' | 'sso' | 'login' | 'apikey'
 type LoginType = 'builderid' | 'google' | 'github' | 'iamsso'
 
-export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): React.ReactNode {
-  const { addAccount, accounts, batchImportConcurrency, loginPrivateMode, groups, activeGroupTab } = useAccountsStore()
+export function AddAccountDialog({ isOpen, onClose, initialKiroApiKeyText }: AddAccountDialogProps): React.ReactNode {
+  const { addAccount, accounts, batchImportConcurrency, groups, activeGroupTab } = useAccountsStore()
 
   // 检查账户是否已存在（同userId 或 同邮箱+同provider 才算重复）
   const isAccountExists = (email: string, userId: string, provider?: string): boolean => {
@@ -93,6 +103,13 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   const [ssoToken, setSsoToken] = useState('')
   const [batchImportResult, setBatchImportResult] = useState<{ total: number; success: number; failed: number; errors: string[] } | null>(null)
 
+  // Kiro API Key 导入（每行一个，导入前查询额度完成验活）
+  const [kiroApiKeyText, setKiroApiKeyText] = useState('')
+  // API Key 的默认区域独立于 OIDC/SSO 的 region，避免切 tab 时互相串值；
+  // 单行 ksk_xxx----region 后缀优先于此默认值。留空则按候选区域自动探测。
+  const [apiKeyRegion, setApiKeyRegion] = useState('')
+  const [apiKeyImportResult, setApiKeyImportResult] = useState<{ total: number; success: number; failed: number; errors: string[] } | null>(null)
+
   // OIDC 批量导入
   const [oidcImportMode, setOidcImportMode] = useState<'single' | 'batch'>('single')
   const [oidcBatchData, setOidcBatchData] = useState('')
@@ -111,7 +128,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   // 登录相关状态
   const [loginType, setLoginType] = useState<LoginType>('builderid')
   const [isLoggingIn, setIsLoggingIn] = useState(false)
-  const [usePrivateMode, setUsePrivateMode] = useState(loginPrivateMode) // 临时隐私模式开关，默认跟随全局设置
   const [builderIdLoginData, setBuilderIdLoginData] = useState<{
     userCode: string
     verificationUri: string
@@ -145,6 +161,15 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     const isRealGroup = activeGroupTab !== 'all' && activeGroupTab !== 'ungrouped' && groups.has(activeGroupTab)
     setSelectedGroupId(isRealGroup ? activeGroupTab : undefined)
   }, [isOpen, activeGroupTab, groups])
+
+  // 主界面导入 ksk 列表文件时会带着内容打开：直接切到 API Key 分支并预填
+  useEffect(() => {
+    if (!isOpen || !initialKiroApiKeyText) return
+    setImportMode('apikey')
+    setKiroApiKeyText(initialKiroApiKeyText)
+    setApiKeyImportResult(null)
+    setError(null)
+  }, [isOpen, initialKiroApiKeyText])
 
   // 监听 Social Auth 回调
   useEffect(() => {
@@ -296,8 +321,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           interval: result.interval || 5
         })
 
-        // 打开浏览器（支持隐私模式）
-        window.api.openExternal(result.verificationUri, usePrivateMode)
+        // 在线登录统一使用内置无痕浏览器
+        window.api.openIncognitoBrowser(result.verificationUri)
 
         // 开始轮询
         startPolling(result.interval || 5)
@@ -334,8 +359,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           interval: 3
         })
 
-        // 打开浏览器（支持隐私模式）
-        window.api.openExternal(result.authorizeUrl, usePrivateMode)
+        // 在线登录统一使用内置无痕浏览器
+        window.api.openIncognitoBrowser(result.authorizeUrl)
 
         // 开始轮询（等待服务器回调自动完成 token 交换）
         startIamSsoPolling(3)
@@ -471,7 +496,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     setError(null)
 
     try {
-      const result = await window.api.startSocialLogin(socialProvider, usePrivateMode)
+      const result = await window.api.startSocialLogin(socialProvider)
       
       if (!result.success) {
         setError(result.error || '启动登录失败')
@@ -627,6 +652,149 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     } finally {
       setIsVerifying(false)
     }
+  }
+
+  const handleKiroApiKeyImport = async (): Promise<void> => {
+    // 解析规则与 kiro-login 脚本共用（src/shared/kiroApiKey.ts）：
+    // 每行一个 ksk_xxx 或 ksk_xxx----region，空行与 # 注释忽略，非法行不发网络请求。
+    const parsed = parseKiroApiKeyEntries(kiroApiKeyText)
+    const formatErrors = parsed.errors.map(item => item.reason === 'invalid_region'
+      ? `${isEn ? 'Line' : '第'} ${item.line} ${isEn ? '' : '行'}: ${isEn ? 'invalid region' : '区域格式非法'} (${item.raw})`
+      : `${isEn ? 'Line' : '第'} ${item.line} ${isEn ? '' : '行'}: ${isEn ? 'not a Kiro API Key (ksk_...)' : '不是合法的 Kiro API Key（应以 ksk_ 开头）'}`)
+
+    if (parsed.entries.length === 0) {
+      setApiKeyImportResult(formatErrors.length > 0
+        ? { total: parsed.errors.length, success: 0, failed: parsed.errors.length, errors: formatErrors }
+        : null)
+      setError(formatErrors.length > 0
+        ? (isEn ? 'No valid Kiro API Key found' : '没有解析到合法的 Kiro API Key')
+        : (isEn ? 'Enter at least one Kiro API Key' : '请输入至少一个 Kiro API Key'))
+      return
+    }
+
+    setIsVerifying(true)
+    setError(null)
+    const importResult = {
+      total: parsed.entries.length + parsed.errors.length,
+      success: 0,
+      failed: parsed.errors.length,
+      errors: formatErrors
+    }
+
+    try {
+      for (let offset = 0; offset < parsed.entries.length; offset += batchImportConcurrency) {
+        const batch = parsed.entries.slice(offset, offset + batchImportConcurrency)
+        await Promise.all(batch.map(async (entry) => {
+          const key = entry.key
+          // 区域优先级：行内 ----region > 表单默认区域 > 留空则按候选区域逐个探测
+          const probeRegions = resolveRegionProbeOrder(entry.region || apiKeyRegion || undefined)
+          const masked = maskKiroApiKey(key)
+          try {
+            const duplicate = Array.from(accounts.values()).some(account => account.credentials.kiroApiKey === key)
+            if (duplicate) {
+              importResult.failed++
+              importResult.errors.push(`${masked}: ${isEn ? 'Already exists' : '凭据已存在'}`)
+              return
+            }
+
+            // 探测：哪个区域先验活成功（上游返回 200）就用哪个，命中即停
+            let result: Awaited<ReturnType<typeof window.api.verifyAccountCredentials>> | null = null
+            let keyRegion = probeRegions[0]
+            for (const region of probeRegions) {
+              const attempt = await window.api.verifyAccountCredentials({
+                credentialKind: 'kiro_api_key',
+                kiroApiKey: key,
+                region,
+                provider: 'BuilderId'
+              })
+              result = attempt
+              if (attempt.success && attempt.data) {
+                keyRegion = region
+                break
+              }
+            }
+            if (!result?.success || !result.data) {
+              importResult.failed++
+              const detail = result?.error || (isEn ? 'Validation failed' : '验活失败')
+              importResult.errors.push(probeRegions.length > 1
+                ? `${masked}: ${detail}（${isEn ? 'probed' : '已探测'} ${probeRegions.join(', ')}）`
+                : `${masked}: ${detail}`)
+              return
+            }
+
+            const now = Date.now()
+            const displayName = result.data.email || `Kiro API Key ••••${key.slice(-4)}`
+            addAccount({
+              email: displayName,
+              userId: result.data.userId || undefined,
+              nickname: displayName,
+              idp: 'BuilderId',
+              groupId: selectedGroupId,
+              credentials: {
+                credentialKind: 'kiro_api_key',
+                kiroApiKey: key,
+                region: keyRegion,
+                provider: 'BuilderId'
+              },
+              subscription: {
+                type: result.data.subscriptionType as SubscriptionType,
+                title: result.data.subscriptionTitle,
+                daysRemaining: result.data.daysRemaining,
+                expiresAt: result.data.expiresAt,
+                managementTarget: result.data.subscription?.managementTarget,
+                upgradeCapability: result.data.subscription?.upgradeCapability,
+                overageCapability: result.data.subscription?.overageCapability
+              },
+              usage: {
+                ...result.data.usage,
+                percentUsed: result.data.usage.limit > 0 ? result.data.usage.current / result.data.usage.limit : 0,
+                lastUpdated: now
+              },
+              tags: [],
+              status: 'active',
+              lastUsedAt: now
+            })
+            importResult.success++
+          } catch (error) {
+            importResult.failed++
+            importResult.errors.push(`${masked}: ${error instanceof Error ? error.message : (isEn ? 'Import failed' : '导入失败')}`)
+          }
+        }))
+      }
+
+      setApiKeyImportResult(importResult)
+      if (importResult.failed === 0) {
+        resetForm()
+        onClose()
+      } else {
+        setError(isEn
+          ? `Imported ${importResult.success}, failed ${importResult.failed}`
+          : `成功导入 ${importResult.success} 个，失败 ${importResult.failed} 个`)
+      }
+    } finally {
+      setIsVerifying(false)
+    }
+  }
+
+  // 从 txt 文件读取 ksk 列表，追加到输入框（等价 kiro-login 的 --file）
+  const handleKiroApiKeyFile = async (): Promise<void> => {
+    const fileData = await window.api.importFromFile()
+    if (!fileData) return
+    setApiKeyImportResult(null)
+    setError(null)
+    const merged = kiroApiKeyText.trim()
+      ? `${kiroApiKeyText.replace(/\n+$/, '')}\n${fileData.content}`
+      : fileData.content
+    const parsed = parseKiroApiKeyEntries(merged)
+    if (parsed.entries.length === 0) {
+      setKiroApiKeyText(merged)
+      setError(isEn ? 'No valid Kiro API Key in file' : '文件中没有解析到合法的 Kiro API Key')
+      return
+    }
+    // 归一化回文本框：去重后按 ksk_xxx----region 形式回写，方便用户核对
+    setKiroApiKeyText(parsed.entries
+      .map(entry => entry.region ? `${entry.key}----${entry.region}` : entry.key)
+      .join('\n'))
   }
 
   // OIDC 批量导入
@@ -960,6 +1128,9 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     setAuthMethod('IdC')
     setProvider('BuilderId')
     setSsoToken('')
+    setKiroApiKeyText('')
+    setApiKeyRegion('')
+    setApiKeyImportResult(null)
     setVerifiedData(null)
     setError(null)
     // 清理登录状态
@@ -974,6 +1145,9 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
   }
 
   if (!isOpen) return null
+
+  // 待导入的合法 key 数，用于按钮文案（解析规则与提交时一致）
+  const pendingApiKeyCount = importMode === 'apikey' ? parseKiroApiKeyEntries(kiroApiKeyText).entries.length : 0
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -1007,7 +1181,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             </div>
           )}
           {/* 导入模式切换 */}
-          <div className="grid grid-cols-3 gap-1 p-1 bg-muted/50 rounded-xl border">
+          <div className="grid grid-cols-4 gap-1 p-1 bg-muted/50 rounded-xl border">
             <button
               className={`py-2 px-3 text-sm rounded-lg transition-all duration-200 font-medium ${
                 importMode === 'login' 
@@ -1040,6 +1214,17 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               disabled={!!verifiedData || isLoggingIn}
             >
               SSO Token
+            </button>
+            <button
+              className={`py-2 px-3 text-sm rounded-lg transition-all duration-200 font-medium ${
+                importMode === 'apikey'
+                  ? 'bg-background text-foreground shadow-sm ring-1 ring-black/5'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+              }`}
+              onClick={() => { setImportMode('apikey'); setError(null) }}
+              disabled={!!verifiedData || isLoggingIn}
+            >
+              API Key
             </button>
           </div>
 
@@ -1076,7 +1261,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                     <Button 
                       variant="outline" 
                       className="flex-1"
-                      onClick={() => window.api.openExternal(builderIdLoginData.verificationUri, usePrivateMode)}
+                      onClick={() => window.api.openIncognitoBrowser(builderIdLoginData.verificationUri)}
                     >
                       <ExternalLink className="h-4 w-4 mr-2" />
                       {isEn ? 'Open Browser' : '重新打开浏览器'}
@@ -1118,47 +1303,6 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               {/* 未登录状态 - 显示登录选项 */}
               {!isLoggingIn && (
                 <div className="space-y-4 py-2">
-                  <div className="text-center mb-6">
-                    <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-3">
-                      <Check className="w-6 h-6 text-primary" />
-                    </div>
-                    <h3 className="text-lg font-semibold">{isEn ? 'Choose Login Method' : '选择登录方式'}</h3>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {isEn ? 'Multiple quick login options' : '支持多种方式快捷登录'}
-                    </p>
-                  </div>
-
-                  {/* 隐私模式选项 */}
-                  <div className="px-2">
-                    <button
-                      type="button"
-                      onClick={() => setUsePrivateMode(!usePrivateMode)}
-                      className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border transition-all duration-200 ${
-                        usePrivateMode 
-                          ? 'bg-primary/5 border-primary/30 hover:bg-primary/10' 
-                          : 'bg-muted/30 border-transparent hover:bg-muted/50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
-                          usePrivateMode ? 'bg-primary/20' : 'bg-muted'
-                        }`}>
-                          <EyeOff className={`w-4 h-4 ${usePrivateMode ? 'text-primary' : 'text-muted-foreground'}`} />
-                        </div>
-                        <span className={`text-sm font-medium ${usePrivateMode ? 'text-foreground' : 'text-muted-foreground'}`}>
-                          {isEn ? 'Private/Incognito Mode' : '隐私/无痕模式'}
-                        </span>
-                      </div>
-                      <div className={`w-10 h-6 rounded-full p-1 transition-colors ${
-                        usePrivateMode ? 'bg-primary' : 'bg-muted-foreground/30'
-                      }`}>
-                        <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
-                          usePrivateMode ? 'translate-x-4' : 'translate-x-0'
-                        }`} />
-                      </div>
-                    </button>
-                  </div>
-                  
                   <div className="space-y-3 px-2">
                     {/* Google */}
                     <button 
@@ -1372,7 +1516,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                       <ol className="text-xs text-primary/90 list-decimal list-inside space-y-1.5">
                         <li>{isEn ? 'Visit and login:' : '在浏览器中访问并登录:'} <a href="https://view.awsapps.com/start/#/device?user_code=PQCF-FCCN/start/#/device?user_code=PQCF-FCCN" target="_blank" className="underline hover:text-primary/80 font-medium">view.awsapps.com/start/#/device?user_code=PQCF-FCCN</a></li>
                         <li>{isEn ? 'Press F12 → Application → Cookies' : '按 F12 打开开发者工具 → Application → Cookies'}</li>
-                        <li>{isEn ? 'Find and copy' : '找到并复制'} <code className="px-1 py-0.5 bg-primary/15 rounded font-mono text-[10px]">x-amz-sso_authn</code> {isEn ? 'value' : '的值'}</li>
+                        <li>{isEn ? 'Find and copy' : '找到并复制'} <code className="px-1 py-0.5 bg-primary/15 rounded font-mono text-2xs">x-amz-sso_authn</code> {isEn ? 'value' : '的值'}</li>
                       </ol>
                    </div>
                 </div>
@@ -1483,6 +1627,64 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
                     ? (isEn ? `Batch import ${ssoToken.split('\n').filter(t => t.trim()).length} accounts` : `批量导入 ${ssoToken.split('\n').filter(t => t.trim()).length} 个账号`)
                     : (isEn ? 'Import & Verify' : '导入并验证')
                 )}
+              </Button>
+            </div>
+          )}
+
+          {importMode === 'apikey' && !verifiedData && (
+            <div className="space-y-4">
+              <div className="p-3 bg-primary/[0.04] rounded-xl border border-primary/15 text-xs text-primary space-y-1">
+                <p>{isEn
+                  ? 'One Kiro API Key per line. Each key is queried for quota before it is saved.'
+                  : '每行一个 Kiro API Key；保存前会查询额度完成真实验活，失败凭据不会入库。'}</p>
+                <p className="text-primary/80">{isEn
+                  ? `Blank lines and # comments are ignored. Append ----region to a key to override the default region. Leave the region blank to probe ${CONVOY_REGION_PROBE_ORDER.join(' / ')} and keep whichever returns 200.`
+                  : `空行与 # 注释忽略；单个 key 可写成 ksk_xxx----region 覆盖默认区域。区域留空时会依次探测 ${CONVOY_REGION_PROBE_ORDER.join(' / ')}，哪个返回 200 就用哪个。`}</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <Label className="text-sm whitespace-nowrap">
+                  {isEn ? 'Default region' : '默认区域'}
+                  <span className="ml-1 text-muted-foreground">({isEn ? 'optional' : '非必填'})</span>
+                </Label>
+                <input
+                  type="text"
+                  value={apiKeyRegion}
+                  onChange={(event) => setApiKeyRegion(event.target.value.trim())}
+                  placeholder={isEn ? 'leave blank to auto-detect' : '留空自动探测'}
+                  className="flex-1 h-10 px-3 text-sm rounded-xl border border-input bg-background/50 font-mono"
+                />
+                <Button type="button" variant="outline" className="h-10 rounded-xl" onClick={handleKiroApiKeyFile} disabled={isVerifying}>
+                  {isEn ? 'From file' : '从文件导入'}
+                </Button>
+              </div>
+              <textarea
+                className="w-full min-h-[150px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 resize-none font-mono"
+                placeholder={'ksk_...\nksk_...----eu-central-1\n# 注释行会被忽略'}
+                value={kiroApiKeyText}
+                onChange={(event) => { setKiroApiKeyText(event.target.value); setApiKeyImportResult(null) }}
+              />
+              {apiKeyImportResult && (
+                <div className={`p-3 rounded-lg text-sm ${apiKeyImportResult.failed > 0 ? 'bg-warning/10 border border-warning/30' : 'bg-success/10 border border-success/30'}`}>
+                  <p>{isEn
+                    ? `${apiKeyImportResult.success}/${apiKeyImportResult.total} imported`
+                    : `导入结果：成功 ${apiKeyImportResult.success}/${apiKeyImportResult.total}`}</p>
+                  {apiKeyImportResult.errors.length > 0 && (
+                    <ul className="mt-2 text-xs text-warning/90 space-y-0.5 max-h-20 overflow-y-auto">
+                      {apiKeyImportResult.errors.map((message, index) => <li key={index}>{message}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <Button
+                type="button"
+                className="w-full h-11 text-sm font-medium rounded-xl shadow-sm"
+                onClick={handleKiroApiKeyImport}
+                disabled={isVerifying || !kiroApiKeyText.trim()}
+              >
+                {isVerifying && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                {pendingApiKeyCount > 1
+                  ? (isEn ? `Validate & import ${pendingApiKeyCount} keys` : `验活并导入 ${pendingApiKeyCount} 个 Key`)
+                  : (isEn ? 'Validate & Import' : '验活并导入')}
               </Button>
             </div>
           )}

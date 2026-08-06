@@ -31,6 +31,13 @@ import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
 import { registerProxyPoolIpcHandlers, validateProxyEntry } from './ipc/proxyPool'
+import { ConvoySyncManager } from './convoy/syncManager'
+import { loadConvoyState } from './convoy/configStore'
+import { registerConvoyIpcHandlers, sendConvoyStatus } from './convoy/ipc-handlers'
+import {
+  CONVOY_ACCOUNT_ID_PREFIX,
+  CONVOY_MANUAL_ACCOUNT_ID_PREFIX
+} from '../shared/convoyCredentials'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import type { ProxyEntry } from '../shared/proxyPool'
 import { LocalNotificationService, LocalNoticeKind, type LocalNoticeLanguage } from './localNotifications'
@@ -464,6 +471,10 @@ function initProxyServer(): ProxyServer {
   if (savedTotalRequests > 0 || savedSuccessRequests > 0 || savedFailedRequests > 0) {
     proxyServer.setRequestStats(savedTotalRequests, savedSuccessRequests, savedFailedRequests)
   }
+
+  // 同步器可能在反代初始化之前就已经拉到凭证（applyConvoyAccountsToPool 当时无池可注），
+  // 这里补注一次，避免那批凭证一直闲置到下一轮拉取
+  applyConvoyAccountsToPool()
 
   return proxyServer
 }
@@ -1657,6 +1668,109 @@ const proxyPoolScheduler = new ProxyPoolScheduler({
   log: (message) => console.log(message)
 })
 
+// ============ 自动车凭证同步 ============
+/**
+ * 自动车拉回来的凭证 + 手填的上游 Key，都以 ProxyAccount 形式注入反代账号池。
+ *
+ * 这些账号不落盘（用户明确要求）：只活在内存里，进程重启后由同步器重新拉取。
+ * 因为不落盘，凡是会 pool.clear() 的路径（渲染进程 proxy-sync-accounts、
+ * 自启动时的 syncAccountsToPool）之后都必须重新注入一次，否则会被抹掉。
+ */
+let convoyPoolAccounts: ProxyAccount[] = []
+
+function applyConvoyAccountsToPool(): void {
+  if (!proxyServer) return
+  const pool = proxyServer.getAccountPool()
+  const desired = new Map(convoyPoolAccounts.map(account => [account.id, account]))
+
+  // 摘掉已不在快照里的（凭证过期、下车、用户清除）
+  for (const account of pool.getAllAccounts()) {
+    const isConvoyAccount =
+      account.id.startsWith(CONVOY_ACCOUNT_ID_PREFIX) ||
+      account.id.startsWith(CONVOY_MANUAL_ACCOUNT_ID_PREFIX)
+    if (isConvoyAccount && !desired.has(account.id)) {
+      pool.removeAccount(account.id)
+    }
+  }
+
+  // 已在池里的只更新凭证字段：addAccount 会重置 errorCount/requestCount，
+  // 每轮重加等于每分钟清空断路器状态，失败账号将永远不被熔断
+  let added = 0
+  for (const [id, account] of desired) {
+    if (pool.getAccount(id)) {
+      pool.updateAccount(id, {
+        kiroApiKey: account.kiroApiKey,
+        accessToken: account.accessToken,
+        credentialKind: account.credentialKind,
+        region: account.region,
+        expiresAt: account.expiresAt,
+        email: account.email
+      })
+    } else {
+      pool.addAccount({ ...account })
+      added++
+    }
+  }
+  if (added > 0) {
+    console.log(`[ConvoySync] 新注入 ${added} 个上游凭证到反代账号池（共 ${desired.size} 个）`)
+  }
+}
+
+const convoySyncManager = new ConvoySyncManager({
+  readConfig: async () => (await loadConvoyState()).config,
+  readConvoyKey: async () => (await loadConvoyState()).convoyKey,
+  fetchImpl: (url, init) =>
+    fetchWithAppProxy(url, { method: init.method, headers: init.headers, signal: init.signal }),
+  verifyKeyRegion: async ({ apiKey, region }) => {
+    try {
+      const usage = await getUsageAndLimits(
+        { credentialKind: 'kiro_api_key', kiroApiKey: apiKey, idp: 'BuilderId' },
+        'BuilderId',
+        undefined,
+        region
+      )
+      return { ok: true, email: usage.userInfo?.email }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  },
+  applyToAccountPool: ({ credentials, manualKeys }) => {
+    const accounts: ProxyAccount[] = []
+    for (const credential of credentials) {
+      // OAuth 凭证没有 refreshToken，过期只能靠下一轮重新拉取，不能标成可刷新
+      const isApiKey = Boolean(credential.apiKey)
+      accounts.push({
+        id: `${CONVOY_ACCOUNT_ID_PREFIX}${credential.id}`,
+        email: `convoy-${credential.id}`,
+        status: 'active',
+        isActive: true,
+        credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
+        kiroApiKey: credential.apiKey,
+        accessToken: credential.accessToken,
+        region: credential.region || 'us-east-1',
+        provider: 'BuilderId',
+        expiresAt: credential.expiresAt
+      })
+    }
+    for (const manual of manualKeys) {
+      accounts.push({
+        id: `${CONVOY_MANUAL_ACCOUNT_ID_PREFIX}${manual.id}`,
+        email: manual.email || `manual-key-${manual.id}`,
+        status: 'active',
+        isActive: true,
+        credentialKind: 'kiro_api_key',
+        kiroApiKey: manual.apiKey,
+        region: manual.region,
+        provider: 'BuilderId'
+      })
+    }
+    convoyPoolAccounts = accounts
+    applyConvoyAccountsToPool()
+  },
+  notifyStatus: (status) => sendConvoyStatus(() => mainWindow, status),
+  log: (message) => console.log(message)
+})
+
 async function initStoreInternal(): Promise<void> {
   const Store = (await import('electron-store')).default
   const path = await import('path')
@@ -2197,6 +2311,8 @@ function attemptConfiguredProxyAutoStart(): Promise<void> {
           const pool = server.getAccountPool()
           pool.clear()
           proxyAccounts.forEach(account => pool.addAccount(account))
+          // clear 会抹掉内存里的自动车凭证，补回来
+          applyConvoyAccountsToPool()
         }
         return proxyAccounts.length
       }
@@ -2446,6 +2562,16 @@ app.whenReady().then(async () => {
   // 代理池定时验活：读盘自启，不依赖渲染进程是否打开过代理池页面
   void proxyPoolScheduler.start().catch(err => {
     console.warn('[ProxyPoolScheduler] Failed to start:', err)
+  })
+
+  // ============ 自动车凭证同步 IPC ============
+  registerConvoyIpcHandlers({
+    getManager: () => convoySyncManager,
+    getMainWindow: () => mainWindow
+  })
+  // 同步器读盘自启：enabled=false 或未配 Key 时只进 idle，不发请求
+  void convoySyncManager.start().catch(err => {
+    console.warn('[ConvoySync] Failed to start:', err)
   })
 
   // ============ 托盘相关 IPC ============
@@ -5564,6 +5690,8 @@ app.whenReady().then(async () => {
       for (const account of normalizedAccounts) {
         pool.addAccount(account)
       }
+      // 自动车凭证不落盘、也不在渲染进程的账号列表里，clear 会把它们抹掉，必须补回
+      applyConvoyAccountsToPool()
       return { success: true, accountCount: pool.size }
     } catch (error) {
       console.error('[ProxyServer] Sync accounts failed:', error)
@@ -5898,6 +6026,8 @@ app.on('will-quit', async (event) => {
   stopMainPoolTokenRefresh()
   // 停止代理池定时验活调度器
   proxyPoolScheduler.stop()
+  // 停止自动车凭证同步轮询
+  convoySyncManager.stop()
 
   // 防止应用立即退出，先保存数据
   if (lastSavedData && store) {

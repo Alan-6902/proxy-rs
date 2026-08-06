@@ -1,11 +1,12 @@
-import { Home, Users, Settings, Info, ChevronRight, Server, UserPlus, CreditCard, ScrollText, Network, Stethoscope, Archive } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Home, Users, Settings, Info, ChevronRight, Server, UserPlus, ScrollText, Network, Stethoscope, Archive, GripVertical, BadgeCheck, Truck } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import proxyRsIcon from '@/assets/proxy-rs-icon.svg'
 import { APP_NAME } from '../../../../shared/appIdentity'
 import { useTranslation } from '@/hooks/useTranslation'
 
-export type PageType = 'home' | 'accounts' | 'proxy' | 'proxyPool' | 'register' | 'subscription' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
+export type PageType = 'home' | 'accounts' | 'proxy' | 'proxyPool' | 'register' | 'seats' | 'convoy' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
 
 interface SidebarProps {
   currentPage: PageType
@@ -20,7 +21,8 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'proxy', labelKey: 'nav.proxy', icon: Server },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
   { id: 'register', labelKey: 'nav.register', icon: UserPlus },
-  { id: 'subscription', labelKey: 'nav.subscription', icon: CreditCard },
+  { id: 'seats', labelKey: 'nav.seats', icon: BadgeCheck },
+  { id: 'convoy', labelKey: 'nav.convoy', icon: Truck },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
@@ -28,9 +30,57 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'about', labelKey: 'nav.about', icon: Info },
 ]
 
+const SIDEBAR_ORDER_STORAGE_KEY = 'proxy-rs.sidebar-order'
+
+function getInitialMenuItems(): typeof menuItemsConfig {
+  try {
+    const storedOrder = JSON.parse(localStorage.getItem(SIDEBAR_ORDER_STORAGE_KEY) || '[]')
+    if (!Array.isArray(storedOrder)) return menuItemsConfig
+
+    const itemsById = new Map(menuItemsConfig.map((item) => [item.id, item]))
+    const orderedItems = storedOrder
+      .map((id) => itemsById.get(id as PageType))
+      .filter((item): item is (typeof menuItemsConfig)[number] => Boolean(item))
+    const orderedIds = new Set(orderedItems.map((item) => item.id))
+    return [...orderedItems, ...menuItemsConfig.filter((item) => !orderedIds.has(item.id))]
+  } catch {
+    return menuItemsConfig
+  }
+}
+
 export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse }: SidebarProps) {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+  const [menuItems, setMenuItems] = useState(getInitialMenuItems)
+  const [draggedPage, setDraggedPage] = useState<PageType | null>(null)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_ORDER_STORAGE_KEY, JSON.stringify(menuItems.map((item) => item.id)))
+    } catch {
+      // localStorage 不可用时仍保留当前会话内排序
+    }
+  }, [menuItems])
+
+  const moveMenuItem = (sourceId: PageType, targetId: PageType): void => {
+    if (sourceId === targetId) return
+    setMenuItems((items) => {
+      const sourceIndex = items.findIndex((item) => item.id === sourceId)
+      const targetIndex = items.findIndex((item) => item.id === targetId)
+      if (sourceIndex < 0 || targetIndex < 0) return items
+
+      const nextItems = [...items]
+      const [sourceItem] = nextItems.splice(sourceIndex, 1)
+      nextItems.splice(targetIndex, 0, sourceItem)
+      return nextItems
+    })
+  }
+
+  const moveMenuItemByOffset = (sourceId: PageType, offset: -1 | 1): void => {
+    const sourceIndex = menuItems.findIndex((item) => item.id === sourceId)
+    const targetItem = menuItems[sourceIndex + offset]
+    if (targetItem) moveMenuItem(sourceId, targetItem.id)
+  }
 
   return (
     <motion.aside
@@ -76,23 +126,63 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
       </div>
 
       {/* Menu Items */}
-      <nav className="flex-1 py-3 px-2 space-y-1 overflow-y-auto">
-        {menuItemsConfig.map((item) => {
+      <nav className="flex-1 py-3 px-2 overflow-y-auto" aria-label={isEn ? 'Primary navigation' : '主导航'}>
+        {!collapsed && (
+          <div className="flex items-center justify-between px-2 pb-2 text-2xs font-medium uppercase tracking-[0.16em] text-muted-foreground/70">
+            <span>{isEn ? 'Navigation' : '导航'}</span>
+            <span className="normal-case tracking-normal">{isEn ? 'Drag to sort' : '拖动排序'}</span>
+          </div>
+        )}
+        <div className="space-y-1">
+        {menuItems.map((item) => {
           const Icon = item.icon
           const isActive = currentPage === item.id
           const label = t(item.labelKey)
           return (
+            <motion.div key={item.id} layout="position">
             <button
-              key={item.id}
+              draggable
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', item.id)
+                setDraggedPage(item.id)
+              }}
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                const sourceId = event.dataTransfer.getData('text/plain') as PageType
+                if (menuItems.some((menuItem) => menuItem.id === sourceId)) {
+                  moveMenuItem(sourceId, item.id)
+                }
+                setDraggedPage(null)
+              }}
+              onDragEnd={() => setDraggedPage(null)}
               onClick={() => onPageChange(item.id)}
+              onKeyDown={(event) => {
+                if (!event.altKey) return
+                if (event.key === 'ArrowUp') {
+                  event.preventDefault()
+                  moveMenuItemByOffset(item.id, -1)
+                } else if (event.key === 'ArrowDown') {
+                  event.preventDefault()
+                  moveMenuItemByOffset(item.id, 1)
+                }
+              }}
+              aria-current={isActive ? 'page' : undefined}
+              aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+              aria-label={`${label}，${isEn ? 'drag to reorder or use Alt + arrow keys' : '可拖动排序，也可按 Option + 方向键排序'}`}
               className={cn(
-                'group relative w-full flex items-center rounded-xl text-sm font-medium transition-all overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+                'group relative w-full flex items-center rounded-xl text-sm font-medium transition-[color,background-color,box-shadow,opacity] duration-200 overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 cursor-grab active:cursor-grabbing',
                 isActive
                   ? 'text-primary-foreground shadow-[0_4px_16px_rgba(91,140,255,0.35)]'
                   : 'text-muted-foreground hover:text-foreground hover:bg-white/40 dark:hover:bg-white/5',
-                collapsed ? 'justify-center p-2.5' : 'gap-3 px-3 py-2.5'
+                collapsed ? 'justify-center p-2.5' : 'gap-2.5 px-2.5 py-2.5',
+                draggedPage === item.id && 'opacity-40'
               )}
-              title={collapsed ? label : undefined}
+              title={collapsed ? `${label} · ${isEn ? 'Drag to sort' : '拖动排序'}` : undefined}
             >
               {/* 激活态：渐变背景（主题色随动） */}
               {isActive && (
@@ -104,6 +194,9 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
                   }}
                   transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                 />
+              )}
+              {!collapsed && (
+                <GripVertical className={cn('h-3.5 w-3.5 shrink-0 relative z-10 opacity-30 group-hover:opacity-70 transition-opacity', isActive && 'text-white/80')} />
               )}
               <Icon className={cn('h-5 w-5 shrink-0 relative z-10', isActive ? 'text-white' : '')} />
               <AnimatePresence initial={false}>
@@ -121,8 +214,10 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
                 )}
               </AnimatePresence>
             </button>
+            </motion.div>
           )
         })}
+        </div>
       </nav>
 
       {/* Collapse Toggle */}

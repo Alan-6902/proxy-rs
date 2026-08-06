@@ -11,6 +11,12 @@ import type {
   SeatInventory as IdcSeatInventory,
   SeatProgressEvent as IdcProgressEvent
 } from '../shared/idcSeats'
+import type {
+  ConvoySyncConfig,
+  ConvoySyncStatus,
+  ManualConvoyKey,
+  ManualConvoyKeyResult
+} from '../shared/convoyCredentials'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -1085,6 +1091,47 @@ const api = {
     ipcRenderer.on('idc-progress', handler)
     return () => {
       ipcRenderer.removeListener('idc-progress', handler)
+    }
+  },
+
+  // ============ 自动车凭证同步 ============
+
+  /** 读取同步状态（含脱敏快照与当前配置）。登录 Key 只回传是否已配置与尾 4 位 */
+  convoyStatus: (): Promise<
+    IdcIpcResult<ConvoySyncStatus & { encryptionAvailable: boolean; config: ConvoySyncConfig }>
+  > => ipcRenderer.invoke('convoy-status'),
+
+  /** 保存配置与登录 Key。convoyKey 省略表示保留原值，空串表示清除 */
+  convoySaveConfig: (input: {
+    config: Partial<ConvoySyncConfig>
+    convoyKey?: string
+  }): Promise<IdcIpcResult<{ config: ConvoySyncConfig; hasConvoyKey: boolean }>> =>
+    ipcRenderer.invoke('convoy-save-config', input),
+
+  /** 清除配置与登录 Key */
+  convoyClearConfig: (): Promise<IdcIpcResult<{ cleared: boolean }>> =>
+    ipcRenderer.invoke('convoy-clear-config'),
+
+  /** 立即触发一轮同步。注意可能产生真实计费 */
+  convoySyncNow: (): Promise<IdcIpcResult<{ synced: boolean }>> =>
+    ipcRenderer.invoke('convoy-sync-now'),
+
+  /** 覆盖手填上游 Key 列表，主进程逐条探测区域后注入反代池 */
+  convoySetManualKeys: (keys: ManualConvoyKey[]): Promise<IdcIpcResult<ManualConvoyKeyResult[]>> =>
+    ipcRenderer.invoke('convoy-set-manual-keys', keys),
+
+  /** 清空手填上游 Key */
+  convoyClearManualKeys: (): Promise<IdcIpcResult<{ cleared: boolean }>> =>
+    ipcRenderer.invoke('convoy-clear-manual-keys'),
+
+  /** 监听同步状态变化 */
+  onConvoyStatus: (callback: (status: ConvoySyncStatus) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: ConvoySyncStatus): void => {
+      callback(data)
+    }
+    ipcRenderer.on('convoy-status-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('convoy-status-changed', handler)
     }
   }
 }

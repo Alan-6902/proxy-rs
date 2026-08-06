@@ -29,12 +29,11 @@ POST http://localhost:5580/v1/chat/completions
 ```
 
 请求示例：
+
 ```json
 {
   "model": "claude-3-5-sonnet-20241022",
-  "messages": [
-    {"role": "user", "content": "Hello!"}
-  ],
+  "messages": [{ "role": "user", "content": "Hello!" }],
   "stream": true
 }
 ```
@@ -46,28 +45,27 @@ POST http://localhost:5580/v1/messages
 ```
 
 请求示例：
+
 ```json
 {
   "model": "claude-3-5-sonnet-20241022",
   "max_tokens": 4096,
-  "messages": [
-    {"role": "user", "content": "Hello!"}
-  ],
+  "messages": [{ "role": "user", "content": "Hello!" }],
   "stream": true
 }
 ```
 
 ## 配置选项
 
-| 选项 | 说明 | 默认值 |
-|------|------|--------|
-| 端口 | 服务监听端口 | 5580 |
-| 主机 | 服务监听地址 | 127.0.0.1 |
-| API Key | 可选的认证密钥 | 空 |
-| 多账号轮询 | 启用多账号负载均衡 | 开启 |
-| 记录请求日志 | 记录请求和响应日志 | 关闭 |
-| 首选端点 | CodeWhisperer / AmazonQ | 自动选择 |
-| 最大重试次数 | 请求失败时的重试次数 | 3 |
+| 选项         | 说明                    | 默认值    |
+| ------------ | ----------------------- | --------- |
+| 端口         | 服务监听端口            | 5580      |
+| 主机         | 服务监听地址            | 127.0.0.1 |
+| API Key      | 可选的认证密钥          | 空        |
+| 多账号轮询   | 启用多账号负载均衡      | 开启      |
+| 记录请求日志 | 记录请求和响应日志      | 关闭      |
+| 首选端点     | CodeWhisperer / AmazonQ | 自动选择  |
+| 最大重试次数 | 请求失败时的重试次数    | 3         |
 
 ## 高级功能
 

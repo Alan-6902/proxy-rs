@@ -38,5 +38,5 @@ else
 fi
 
 cd "$PROJECT_ROOT"
-echo "开始构建当前机器架构：$MACHINE_ARCH"
-exec npm run build:mac:current -- "$BUILDER_ARCH_FLAG"
+echo "开始构建当前机器架构的 .app：$MACHINE_ARCH"
+exec npm run build:mac:current -- "$BUILDER_ARCH_FLAG" --dir

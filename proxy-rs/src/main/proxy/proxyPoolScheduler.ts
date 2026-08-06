@@ -39,7 +39,12 @@ export interface ProxyPoolSchedulerDeps {
   /** 只读取当前 accountData 快照，不加写锁 */
   readStore: () => Promise<ProxyPoolStoreSlice | null>
   /** 执行一次真实网络验活 */
-  validate: (params: { url: string; testUrl: string; timeoutMs: number; upstreamProxy?: string }) => Promise<ProxyValidationResult>
+  validate: (params: {
+    url: string
+    testUrl: string
+    timeoutMs: number
+    upstreamProxy?: string
+  }) => Promise<ProxyValidationResult>
   /** 验活结果落盘后通知渲染进程刷新 UI */
   notifyRenderer: (payload: { entries: ProxyEntry[] }) => void
   /** 代理可用性变化后，同步绑定该代理的账号在反代账号池里的 proxyUrl */
@@ -67,7 +72,9 @@ export class ProxyPoolScheduler {
       this.log('Auto-validate disabled')
       return
     }
-    this.timer = setInterval(() => { void this.tick() }, TICK_INTERVAL_MS)
+    this.timer = setInterval(() => {
+      void this.tick()
+    }, TICK_INTERVAL_MS)
     // Electron 主进程里 setInterval 返回 Node Timeout，unref 避免定时器把进程留住
     this.timer.unref?.()
     this.log(`Auto-validate scheduled every ${config.autoValidateIntervalMin} min`)
@@ -111,18 +118,27 @@ export class ProxyPoolScheduler {
   }
 
   /** 立即跑一轮验活（供 tick 与手动触发共用） */
-  async runOnce(configOverride?: ProxyPoolConfig, dataOverride?: ProxyPoolStoreSlice | null): Promise<number> {
+  async runOnce(
+    configOverride?: ProxyPoolConfig,
+    dataOverride?: ProxyPoolStoreSlice | null
+  ): Promise<number> {
     if (this.running) return 0
     this.running = true
     try {
       const data = dataOverride !== undefined ? dataOverride : await this.deps.readStore()
-      const config = configOverride || { ...DEFAULT_PROXY_POOL_CONFIG, ...(data?.proxyPoolConfig || {}) }
+      const config = configOverride || {
+        ...DEFAULT_PROXY_POOL_CONFIG,
+        ...(data?.proxyPoolConfig || {})
+      }
       const pool = data?.proxyPool || {}
       const targets = Object.values(pool).filter((p) => p && p.enabled)
       if (targets.length === 0) return 0
 
       this.log(`Auto-validate ${targets.length} proxies`)
-      const concurrency = Math.max(1, Math.min(config.autoValidateConcurrency || DEFAULT_CONCURRENCY, targets.length))
+      const concurrency = Math.max(
+        1,
+        Math.min(config.autoValidateConcurrency || DEFAULT_CONCURRENCY, targets.length)
+      )
       const results = new Map<string, ProxyValidationResult>()
 
       let cursor = 0
@@ -138,7 +154,10 @@ export class ProxyPoolScheduler {
             })
             results.set(entry.id, result)
           } catch (err) {
-            results.set(entry.id, { success: false, error: err instanceof Error ? err.message : String(err) })
+            results.set(entry.id, {
+              success: false,
+              error: err instanceof Error ? err.message : String(err)
+            })
           }
         }
       }
@@ -156,7 +175,12 @@ export class ProxyPoolScheduler {
         for (const [id, result] of results) {
           const existing = nextPool[id]
           if (!existing) continue // 验活期间被删除，丢弃该结果
-          const next = applyValidationResult(existing, result, currentConfig, Object.values(currentPool))
+          const next = applyValidationResult(
+            existing,
+            result,
+            currentConfig,
+            Object.values(currentPool)
+          )
           nextPool[id] = next
           updated.push(next)
           changed = true

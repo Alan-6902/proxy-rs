@@ -22,13 +22,7 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
   const [detailAccount, setDetailAccount] = useState<Account | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  const {
-    getFilteredAccounts,
-    tags,
-    groups,
-    selectedIds,
-    checkAccountStatus
-  } = useAccountsStore()
+  const { getFilteredAccounts, tags, groups, selectedIds, checkAccountStatus } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
 
@@ -43,7 +37,7 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
     setIsRefreshing(true)
     try {
       await checkAccountStatus(detailAccount.id)
-      const updated = getFilteredAccounts().find(a => a.id === detailAccount.id)
+      const updated = getFilteredAccounts().find((a) => a.id === detailAccount.id)
       if (updated) setDetailAccount(updated)
     } finally {
       setIsRefreshing(false)
@@ -61,11 +55,7 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
   const items = virtualizer.getVirtualItems()
 
   return (
-    <div
-      ref={parentRef}
-      className="h-full overflow-auto"
-      style={{ contain: 'strict' }}
-    >
+    <div ref={parentRef} className="h-full overflow-auto" style={{ contain: 'strict' }}>
       <div
         style={{
           height: `${virtualizer.getTotalSize() + 80}px`,

@@ -7,9 +7,9 @@ import * as crypto from 'crypto'
 import { APP_NAME } from '../../shared/appIdentity'
 
 export interface ProxySelfSignedCert {
-  cert: string  // PEM 证书
-  key: string   // PEM 私钥
-  fingerprint: string  // SHA-256 指纹（hex）
+  cert: string // PEM 证书
+  key: string // PEM 私钥
+  fingerprint: string // SHA-256 指纹（hex）
   notBefore: number
   notAfter: number
   subject: string
@@ -48,7 +48,7 @@ export function ensureProxySelfSignedCert(
       // SAN 覆盖检查
       const existingAlt = extractAltNames(cert)
       const requested = normalizeAltNames(hostnames)
-      const missing = requested.filter(n => !existingAlt.includes(n))
+      const missing = requested.filter((n) => !existingAlt.includes(n))
       if (now < renewBefore && missing.length === 0) {
         return {
           cert: certPem,
@@ -72,7 +72,7 @@ export function ensureProxySelfSignedCert(
   cert.serialNumber = generateSerialNumber()
   cert.validity.notBefore = new Date()
   cert.validity.notAfter = new Date()
-  cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 2)  // 2 年有效期
+  cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 2) // 2 年有效期
 
   const subject = [
     { name: 'commonName', value: `${APP_NAME} Reverse Proxy` },
@@ -88,9 +88,9 @@ export function ensureProxySelfSignedCert(
   const altList: Array<{ type: number; value?: string; ip?: string }> = []
   for (const name of altNames) {
     if (isIPv4(name) || isIPv6(name)) {
-      altList.push({ type: 7, ip: name })  // type 7 = iPAddress
+      altList.push({ type: 7, ip: name }) // type 7 = iPAddress
     } else {
-      altList.push({ type: 2, value: name })  // type 2 = dNSName
+      altList.push({ type: 2, value: name }) // type 2 = dNSName
     }
   }
 
@@ -111,7 +111,7 @@ export function ensureProxySelfSignedCert(
   const keyPem = forge.pki.privateKeyToPem(keys.privateKey)
 
   fs.writeFileSync(certPath, certPem)
-  fs.writeFileSync(keyPath, keyPem, { mode: 0o600 })  // 私钥仅 owner 可读
+  fs.writeFileSync(keyPath, keyPem, { mode: 0o600 }) // 私钥仅 owner 可读
 
   console.log(`[ProxyTLS] Generated self-signed cert: ${certPath} (SAN=${altNames.join(',')})`)
 
@@ -142,9 +142,11 @@ function normalizeAltNames(extras: string[]): string[] {
 }
 
 function extractAltNames(cert: forge.pki.Certificate): string[] {
-  const ext = cert.getExtension('subjectAltName') as { altNames?: Array<{ type: number; value?: string; ip?: string }> } | null
+  const ext = cert.getExtension('subjectAltName') as {
+    altNames?: Array<{ type: number; value?: string; ip?: string }>
+  } | null
   if (!ext?.altNames) return []
-  return ext.altNames.map(a => a.ip || a.value || '').filter(Boolean)
+  return ext.altNames.map((a) => a.ip || a.value || '').filter(Boolean)
 }
 
 function isIPv4(host: string): boolean {
@@ -164,5 +166,11 @@ function computeFingerprint(certPem: string): string {
   const m = certPem.match(/-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/)
   if (!m) return ''
   const der = Buffer.from(m[1].replace(/\s/g, ''), 'base64')
-  return crypto.createHash('sha256').update(der).digest('hex').match(/.{2}/g)!.join(':').toUpperCase()
+  return crypto
+    .createHash('sha256')
+    .update(der)
+    .digest('hex')
+    .match(/.{2}/g)!
+    .join(':')
+    .toUpperCase()
 }

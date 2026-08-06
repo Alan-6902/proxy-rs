@@ -65,7 +65,8 @@ function buildThinkingFields(
   }
 
   // 客户端没请求 thinking 也没请求 reasoning_effort → 不启用
-  const wantsThinking = !!(clientThinking && clientThinking.type !== 'disabled') || !!clientReasoningEffort
+  const wantsThinking =
+    !!(clientThinking && clientThinking.type !== 'disabled') || !!clientReasoningEffort
   if (!wantsThinking) return undefined
 
   // 映射 effort level（直接使用客户端值，不做强制转换）
@@ -166,14 +167,16 @@ export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAICh
         messages.push({
           role: 'assistant',
           content: '',
-          tool_calls: [{
-            id: item.call_id,
-            type: 'function',
-            function: {
-              name: item.name,
-              arguments: item.arguments
+          tool_calls: [
+            {
+              id: item.call_id,
+              type: 'function',
+              function: {
+                name: item.name,
+                arguments: item.arguments
+              }
             }
-          }]
+          ]
         })
       } else {
         if (itemType !== undefined && itemType !== 'message') {
@@ -183,7 +186,8 @@ export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAICh
           throw new Error('message input item requires content')
         }
         messages.push({
-          role: item.role === 'assistant' ? 'assistant' : item.role === 'system' ? 'system' : 'user',
+          role:
+            item.role === 'assistant' ? 'assistant' : item.role === 'system' ? 'system' : 'user',
           content: convertResponseInputContent(item.content)
         })
       }
@@ -201,19 +205,22 @@ export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAICh
   if (request.tools !== undefined) chatRequest.tools = request.tools
   const toolChoice = convertResponseToolChoice(request.tool_choice)
   if (toolChoice !== undefined) chatRequest.tool_choice = toolChoice
-  if (request.previous_response_id !== undefined) chatRequest.conversation_id = request.previous_response_id
+  if (request.previous_response_id !== undefined)
+    chatRequest.conversation_id = request.previous_response_id
   if (request.metadata !== undefined) chatRequest.metadata = request.metadata
   if (request.kiro_context !== undefined) chatRequest.kiro_context = request.kiro_context
   return chatRequest
 }
 
-function convertResponseInputContent(content: string | OpenAIResponseContentPart[] | undefined): OpenAIMessage['content'] {
+function convertResponseInputContent(
+  content: string | OpenAIResponseContentPart[] | undefined
+): OpenAIMessage['content'] {
   if (typeof content === 'string') return content
   if (content === undefined) return ''
   if (!Array.isArray(content)) {
     throw new Error('message content must be a string or an array')
   }
-  return content.map(part => {
+  return content.map((part) => {
     const partType = part.type as string
     if (partType === 'input_image') {
       if (!part.image_url) {
@@ -243,13 +250,16 @@ function convertResponseInputContent(content: string | OpenAIResponseContentPart
   })
 }
 
-function convertResponseToolChoice(toolChoice: OpenAIResponsesRequest['tool_choice']): OpenAIChatRequest['tool_choice'] {
+function convertResponseToolChoice(
+  toolChoice: OpenAIResponsesRequest['tool_choice']
+): OpenAIChatRequest['tool_choice'] {
   if (!toolChoice || typeof toolChoice === 'string') return toolChoice
   if (toolChoice.type === 'none' || toolChoice.type === 'auto') return toolChoice.type
   if (toolChoice.type === 'function' && toolChoice.name) {
     return { type: 'function', function: { name: toolChoice.name } }
   }
-  if (toolChoice.function?.name) return { type: 'function', function: { name: toolChoice.function.name } }
+  if (toolChoice.function?.name)
+    return { type: 'function', function: { name: toolChoice.function.name } }
   throw new Error('Unsupported responses tool_choice')
 }
 
@@ -257,23 +267,27 @@ export function openAIChatToResponsesResponse(
   response: OpenAIChatResponse,
   previousResponseId?: string
 ): OpenAIResponsesResponse {
-  const output: OpenAIResponseOutputItem[] = response.choices.flatMap<OpenAIResponseOutputItem>(choice => {
-    if (choice.message.tool_calls?.length) {
-      return choice.message.tool_calls.map(toolCall => ({
-        type: 'function_call' as const,
-        id: `fc_${uuidv4()}`,
-        call_id: toolCall.id,
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments
-      }))
+  const output: OpenAIResponseOutputItem[] = response.choices.flatMap<OpenAIResponseOutputItem>(
+    (choice) => {
+      if (choice.message.tool_calls?.length) {
+        return choice.message.tool_calls.map((toolCall) => ({
+          type: 'function_call' as const,
+          id: `fc_${uuidv4()}`,
+          call_id: toolCall.id,
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments
+        }))
+      }
+      return [
+        {
+          type: 'message' as const,
+          id: `msg_${uuidv4()}`,
+          role: 'assistant' as const,
+          content: [{ type: 'output_text' as const, text: choice.message.content || '' }]
+        }
+      ]
     }
-    return [{
-      type: 'message' as const,
-      id: `msg_${uuidv4()}`,
-      role: 'assistant' as const,
-      content: [{ type: 'output_text' as const, text: choice.message.content || '' }]
-    }]
-  })
+  )
 
   const usage: OpenAIResponsesResponse['usage'] = {
     input_tokens: response.usage.prompt_tokens,
@@ -367,11 +381,16 @@ export function openaiToKiro(
     const isLast = i === nonSystemMessages.length - 1
 
     if (msg.role === 'user') {
-      const { content: userContent, images: userImages, documents: userDocuments, cachePoint } = extractOpenAIContent(msg)
-      
+      const {
+        content: userContent,
+        images: userImages,
+        documents: userDocuments,
+        cachePoint
+      } = extractOpenAIContent(msg)
+
       const mergedContent = userContent || 'Continue'
       const messageCachePoint = cachePoint
-      
+
       if (isLast) {
         currentContent = mergedContent
         currentCachePoint = messageCachePoint
@@ -408,7 +427,9 @@ export function openaiToKiro(
             let input = {}
             try {
               input = JSON.parse(tc.function.arguments)
-            } catch { /* ignore */ }
+            } catch {
+              /* ignore */
+            }
             toolUses.push({
               toolUseId: tc.id,
               name: toolNameRegistry.toKiroName(tc.function.name),
@@ -438,7 +459,10 @@ export function openaiToKiro(
               textParts.push(part.text)
             } else if (part.type === 'image_url' && part.image_url?.url) {
               const img = parseImageUrl(part.image_url.url)
-              if (img) { images.push(img); extractedImageCount++ }
+              if (img) {
+                images.push(img)
+                extractedImageCount++
+              }
             }
           }
           rawText = textParts.join('')
@@ -447,7 +471,8 @@ export function openaiToKiro(
             rawText = JSON.stringify(msg.content)
           }
           if (extractedImageCount > 0) {
-            rawText = (rawText ? rawText + '\n\n' : '') +
+            rawText =
+              (rawText ? rawText + '\n\n' : '') +
               `[Tool returned ${extractedImageCount} image${extractedImageCount > 1 ? 's' : ''}, attached to this message]`
           }
         } else {
@@ -459,11 +484,11 @@ export function openaiToKiro(
           status: 'success'
         })
       }
-      
+
       // 检查下一条消息：如果不是 tool 消息或已到末尾，将收集的 toolResults 添加为 user 消息
       const nextMsg = nonSystemMessages[i + 1]
       const shouldFlush = !nextMsg || nextMsg.role !== 'tool'
-      
+
       if (shouldFlush && toolResults.length > 0 && !isLast) {
         // 将 toolResults 作为 user 消息添加到 history
         history.push({
@@ -483,7 +508,11 @@ export function openaiToKiro(
   }
 
   // 如果最后一条是 assistant 消息，自动发送 Continue（参考 Proxycast）
-  if (history.length > 0 && history[history.length - 1].assistantResponseMessage && !currentContent) {
+  if (
+    history.length > 0 &&
+    history[history.length - 1].assistantResponseMessage &&
+    !currentContent
+  ) {
     currentContent = 'Continue.'
   }
 
@@ -547,7 +576,12 @@ export function openaiToKiro(
   )
 }
 
-function extractOpenAIContent(msg: OpenAIMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; cachePoint?: KiroCachePoint } {
+function extractOpenAIContent(msg: OpenAIMessage): {
+  content: string
+  images: KiroImage[]
+  documents: KiroDocument[]
+  cachePoint?: KiroCachePoint
+} {
   const images: KiroImage[] = []
   const documents: KiroDocument[] = []
   let content = ''
@@ -619,7 +653,10 @@ function parseOpenAIFileData(fileData: string, name: string): KiroDocument {
   }
 }
 
-function parseClaudeDocumentSource(source: NonNullable<ClaudeContentBlock['source']>, name: string): KiroDocument {
+function parseClaudeDocumentSource(
+  source: NonNullable<ClaudeContentBlock['source']>,
+  name: string
+): KiroDocument {
   if (source.type === 'base64') {
     return {
       format: normalizeDocumentFormat(source.media_type, name),
@@ -641,11 +678,11 @@ function parseClaudeDocumentSource(source: NonNullable<ClaudeContentBlock['sourc
 function normalizeImageFormat(format: string): string {
   const lower = format.toLowerCase()
   const formatMap: Record<string, string> = {
-    'jpg': 'jpeg',
-    'jpeg': 'jpeg',
-    'png': 'png',
-    'gif': 'gif',
-    'webp': 'webp'
+    jpg: 'jpeg',
+    jpeg: 'jpeg',
+    png: 'png',
+    gif: 'gif',
+    webp: 'webp'
   }
   const normalized = formatMap[lower]
   if (!normalized) {
@@ -669,7 +706,6 @@ function normalizeDocumentFormat(mediaType: string | undefined, name: string): s
   return 'txt'
 }
 
-
 // Kiro API 工具描述最大长度
 const KIRO_MAX_TOOL_DESC_LEN = 10237 // 留出 "..." 的空间
 
@@ -679,7 +715,7 @@ function convertOpenAITools(
 ): KiroToolWrapper[] {
   if (!tools) return []
 
-  return tools.flatMap(tool => {
+  return tools.flatMap((tool) => {
     let description = tool.function.description || `Tool: ${tool.function.name}`
     // 截断过长的描述
     if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
@@ -732,23 +768,28 @@ export function kiroToOpenaiResponse(
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{
-      index: 0,
-      message: {
-        role: 'assistant',
-        content: (restoredToolUses.length > 0 || !content?.trim()) ? null : content,
-        ...(reasoningContent?.text ? { reasoning_content: reasoningContent.text } : {}),
-        tool_calls: restoredToolUses.length > 0 ? restoredToolUses.map(tu => ({
-          id: tu.toolUseId,
-          type: 'function' as const,
-          function: {
-            name: tu.name,
-            arguments: JSON.stringify(tu.input)
-          }
-        })) : undefined
-      },
-      finish_reason: restoredToolUses.length > 0 ? 'tool_calls' : 'stop'
-    }],
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: restoredToolUses.length > 0 || !content?.trim() ? null : content,
+          ...(reasoningContent?.text ? { reasoning_content: reasoningContent.text } : {}),
+          tool_calls:
+            restoredToolUses.length > 0
+              ? restoredToolUses.map((tu) => ({
+                  id: tu.toolUseId,
+                  type: 'function' as const,
+                  function: {
+                    name: tu.name,
+                    arguments: JSON.stringify(tu.input)
+                  }
+                }))
+              : undefined
+        },
+        finish_reason: restoredToolUses.length > 0 ? 'tool_calls' : 'stop'
+      }
+    ],
     usage: openaiUsage
   }
 
@@ -770,7 +811,17 @@ export interface OpenAIUsage {
 export function createOpenaiStreamChunk(
   id: string,
   model: string,
-  delta: { role?: 'assistant'; content?: string; reasoning_content?: string; tool_calls?: { index: number; id?: string; type?: 'function'; function?: { name?: string; arguments?: string } }[] },
+  delta: {
+    role?: 'assistant'
+    content?: string
+    reasoning_content?: string
+    tool_calls?: {
+      index: number
+      id?: string
+      type?: 'function'
+      function?: { name?: string; arguments?: string }
+    }[]
+  },
   finishReason: 'stop' | 'tool_calls' | null = null,
   usage?: OpenAIUsage
 ): OpenAIStreamChunk & { usage?: OpenAIUsage } {
@@ -779,11 +830,13 @@ export function createOpenaiStreamChunk(
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{
-      index: 0,
-      delta: delta as OpenAIStreamChunk['choices'][0]['delta'],
-      finish_reason: finishReason
-    }]
+    choices: [
+      {
+        index: 0,
+        delta: delta as OpenAIStreamChunk['choices'][0]['delta'],
+        finish_reason: finishReason
+      }
+    ]
   }
   if (usage) {
     chunk.usage = usage
@@ -808,10 +861,12 @@ export function claudeToKiro(
   if (typeof request.system === 'string') {
     systemPrompt = request.system
   } else if (Array.isArray(request.system)) {
-    systemPrompt = request.system.map(b => {
-      systemCachePoint = mergeCachePoint(systemCachePoint, toKiroCachePoint(b.cache_control))
-      return b.text
-    }).join('\n')
+    systemPrompt = request.system
+      .map((b) => {
+        systemCachePoint = mergeCachePoint(systemCachePoint, toKiroCachePoint(b.cache_control))
+        return b.text
+      })
+      .join('\n')
   }
 
   // 注入时间戳
@@ -834,7 +889,7 @@ export function claudeToKiro(
 
   // 构建历史消息 - Kiro API 要求严格的 user -> assistant 交替
   const history: KiroHistoryMessage[] = []
-  let currentToolResults: KiroToolResult[] = []  // 只保存最后一条消息的 toolResults
+  let currentToolResults: KiroToolResult[] = [] // 只保存最后一条消息的 toolResults
   let currentContent = ''
   let currentCachePoint: KiroCachePoint | undefined
   const images: KiroImage[] = []
@@ -852,7 +907,13 @@ export function claudeToKiro(
     const isLast = i === request.messages.length - 1
 
     if (msg.role === 'user') {
-      const { content: userContent, images: userImages, documents: userDocuments, toolResults: userToolResults, cachePoint: userCachePoint } = extractClaudeContent(msg)
+      const {
+        content: userContent,
+        images: userImages,
+        documents: userDocuments,
+        toolResults: userToolResults,
+        cachePoint: userCachePoint
+      } = extractClaudeContent(msg)
 
       if (isLast) {
         // 最后一条消息：合并之前的 pending 内容，toolResults 放入 currentMessage
@@ -871,15 +932,24 @@ export function claudeToKiro(
         const nextMsg = request.messages[i + 1]
         if (nextMsg && nextMsg.role === 'assistant') {
           // 下一条是 assistant，可以安全添加到 history
-          const finalUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
+          const finalUserContent = pendingUserContent
+            ? pendingUserContent + '\n' + userContent
+            : userContent
           const finalUserImages = [...pendingUserImages, ...userImages]
           const finalUserDocuments = [...pendingUserDocuments, ...userDocuments]
           const finalToolResults = [...pendingToolResults, ...userToolResults]
           const finalCachePoint = mergeCachePoint(pendingUserCachePoint, userCachePoint)
-          
-          if (finalUserContent.trim() || finalUserImages.length > 0 || finalUserDocuments.length > 0 || finalToolResults.length > 0) {
+
+          if (
+            finalUserContent.trim() ||
+            finalUserImages.length > 0 ||
+            finalUserDocuments.length > 0 ||
+            finalToolResults.length > 0
+          ) {
             const userInputMessage: KiroUserInputMessage = {
-              content: finalUserContent || (finalToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
+              content:
+                finalUserContent ||
+                (finalToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
               modelId,
               origin,
               images: finalUserImages.length > 0 ? finalUserImages : undefined,
@@ -901,7 +971,9 @@ export function claudeToKiro(
           pendingUserCachePoint = undefined
         } else {
           // 下一条不是 assistant（可能是连续 user 或结束），累积内容
-          pendingUserContent = pendingUserContent ? pendingUserContent + '\n' + userContent : userContent
+          pendingUserContent = pendingUserContent
+            ? pendingUserContent + '\n' + userContent
+            : userContent
           pendingUserImages.push(...userImages)
           pendingUserDocuments.push(...userDocuments)
           pendingToolResults.push(...userToolResults)
@@ -913,12 +985,22 @@ export function claudeToKiro(
       // Kiro 后端 schema 仅在响应输出中支持 assistantResponseMessage.reasoningContent，
       // 在请求 history 中传入此字段会触发 400 "Improperly formed request"
       // 当前消息的 thinking 开关由 additionalModelRequestFields.thinking 控制
-      const { content: assistantContent, toolUses } = extractClaudeAssistantContent(msg, toolNameRegistry)
+      const { content: assistantContent, toolUses } = extractClaudeAssistantContent(
+        msg,
+        toolNameRegistry
+      )
 
       // 如果有 pending 的 user 内容但还没添加到 history，先添加
-      if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingUserDocuments.length > 0 || pendingToolResults.length > 0) {
+      if (
+        pendingUserContent.trim() ||
+        pendingUserImages.length > 0 ||
+        pendingUserDocuments.length > 0 ||
+        pendingToolResults.length > 0
+      ) {
         const userInputMessage: KiroUserInputMessage = {
-          content: pendingUserContent || (pendingToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
+          content:
+            pendingUserContent ||
+            (pendingToolResults.length > 0 ? 'Tool results provided.' : 'Continue'),
           modelId,
           origin,
           images: pendingUserImages.length > 0 ? pendingUserImages : undefined,
@@ -947,7 +1029,12 @@ export function claudeToKiro(
   }
 
   // 处理剩余的 pending 内容（如果最后几条都是 user 且不是 isLast）
-  if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingUserDocuments.length > 0 || pendingToolResults.length > 0) {
+  if (
+    pendingUserContent.trim() ||
+    pendingUserImages.length > 0 ||
+    pendingUserDocuments.length > 0 ||
+    pendingToolResults.length > 0
+  ) {
     currentContent = pendingUserContent + (currentContent ? '\n' + currentContent : '')
     images.unshift(...pendingUserImages)
     documents.unshift(...pendingUserDocuments)
@@ -988,7 +1075,8 @@ export function claudeToKiro(
     ]
     history.unshift(...systemMessages)
   }
-  const finalContent = currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue')
+  const finalContent =
+    currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue')
 
   // 转换工具定义
   const kiroTools = convertClaudeTools(request.tools, toolNameRegistry)
@@ -1024,7 +1112,13 @@ export function claudeToKiro(
   )
 }
 
-function extractClaudeContent(msg: ClaudeMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; toolResults: KiroToolResult[]; cachePoint?: KiroCachePoint } {
+function extractClaudeContent(msg: ClaudeMessage): {
+  content: string
+  images: KiroImage[]
+  documents: KiroDocument[]
+  toolResults: KiroToolResult[]
+  cachePoint?: KiroCachePoint
+} {
   const images: KiroImage[] = []
   const documents: KiroDocument[] = []
   const toolResults: KiroToolResult[] = []
@@ -1083,9 +1177,10 @@ function extractClaudeContent(msg: ClaudeMessage): { content: string; images: Ki
           }
           resultContent = textParts.join('')
           if (!resultContent) {
-            resultContent = extractedImageCount > 0
-              ? `(tool returned ${extractedImageCount} image${extractedImageCount > 1 ? 's' : ''}, attached to this message)`
-              : '(no text output)'
+            resultContent =
+              extractedImageCount > 0
+                ? `(tool returned ${extractedImageCount} image${extractedImageCount > 1 ? 's' : ''}, attached to this message)`
+                : '(no text output)'
           } else if (extractedImageCount > 0) {
             // 既有文本又有图片：在文本末尾提示模型有附图
             resultContent += `\n\n[Tool also returned ${extractedImageCount} image${extractedImageCount > 1 ? 's' : ''}, attached to this message]`
@@ -1150,7 +1245,9 @@ function extractClaudeAssistantContent(
   if (thinking || redactedContent) {
     const reasoningContent: KiroReasoningContent = {}
     if (thinking) {
-      reasoningContent.reasoningText = signature ? { text: thinking, signature } : { text: thinking }
+      reasoningContent.reasoningText = signature
+        ? { text: thinking, signature }
+        : { text: thinking }
     }
     if (redactedContent) {
       reasoningContent.redactedContent = redactedContent
@@ -1162,12 +1259,19 @@ function extractClaudeAssistantContent(
 }
 
 function convertClaudeTools(
-  tools: { name: string; description: string; input_schema: unknown; cache_control?: { type: string } }[] | undefined,
+  tools:
+    | {
+        name: string
+        description: string
+        input_schema: unknown
+        cache_control?: { type: string }
+      }[]
+    | undefined,
   toolNameRegistry: ToolNameRegistry
 ): KiroToolWrapper[] {
   if (!tools) return []
 
-  return tools.flatMap(tool => {
+  return tools.flatMap((tool) => {
     let description = tool.description || `Tool: ${tool.name}`
     // 截断过长的描述
     if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
@@ -1199,14 +1303,18 @@ export function kiroToClaudeResponse(
   const restoredToolUses = toolNameRegistry.restoreToolUses(toolUses)
 
   if (reasoningContent?.text) {
-    contentBlocks.push(reasoningContent.signature ? {
-      type: 'thinking',
-      thinking: reasoningContent.text,
-      signature: reasoningContent.signature
-    } : {
-      type: 'thinking',
-      thinking: reasoningContent.text
-    })
+    contentBlocks.push(
+      reasoningContent.signature
+        ? {
+            type: 'thinking',
+            thinking: reasoningContent.text,
+            signature: reasoningContent.signature
+          }
+        : {
+            type: 'thinking',
+            thinking: reasoningContent.text
+          }
+    )
   }
   if (reasoningContent?.redactedContent) {
     contentBlocks.push({

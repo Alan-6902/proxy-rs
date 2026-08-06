@@ -16,12 +16,15 @@ export default {
   title: 'Anthropic 非流式简单对话',
   tags: ['anthropic', 'nonstream', 'basic'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: false,
-      messages: [{ role: 'user', content: '请用一句话告诉我现在大概是什么季节.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: false,
+        messages: [{ role: 'user', content: '请用一句话告诉我现在大概是什么季节.' }]
+      },
+      { base, token }
+    )
     log(`status=${result.status} total=${result.timing?.total}ms`)
     assertHttp200(result, 'nostream.response')
     assertEq(result.json?.type, 'message', 'nostream.json.type')

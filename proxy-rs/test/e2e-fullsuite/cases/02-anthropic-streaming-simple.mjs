@@ -19,14 +19,20 @@ export default {
   title: 'Anthropic 流式简单对话',
   tags: ['anthropic', 'stream', 'basic'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      messages: [{ role: 'user', content: '用一句话简单介绍一下你自己.' }]
-    }, { base, token })
-    log(`status=${result.status} kind=${result.kind} ttfb=${result.timing?.ttfb}ms total=${result.timing?.total}ms`)
-    if (result.kind === 'stream-error') log(`upstream error body: ${result.text?.slice(0, 300) ?? ''}`)
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        messages: [{ role: 'user', content: '用一句话简单介绍一下你自己.' }]
+      },
+      { base, token }
+    )
+    log(
+      `status=${result.status} kind=${result.kind} ttfb=${result.timing?.ttfb}ms total=${result.timing?.total}ms`
+    )
+    if (result.kind === 'stream-error')
+      log(`upstream error body: ${result.text?.slice(0, 300) ?? ''}`)
     assertHttp200(result, 'stream.response')
 
     const c = result.collected
@@ -38,7 +44,10 @@ export default {
 
     const textBlock = (c.message?.content ?? []).find((b) => b.type === 'text')
     assertTrue(textBlock !== undefined, '响应应至少含一个 text content block')
-    assertTrue(typeof textBlock.text === 'string' && textBlock.text.length > 0, 'text block 内容不应为空')
+    assertTrue(
+      typeof textBlock.text === 'string' && textBlock.text.length > 0,
+      'text block 内容不应为空'
+    )
     assertTrue((c.usage?.input_tokens ?? 0) > 0, 'usage.input_tokens 应 > 0')
     log(`text=${textBlock.text.slice(0, 100)}...`)
   }

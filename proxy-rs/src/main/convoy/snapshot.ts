@@ -78,7 +78,9 @@ function canonicalize(value: unknown): unknown {
 }
 
 function sha256(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex')
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalize(value)))
+    .digest('hex')
 }
 
 /**
@@ -108,7 +110,9 @@ function toManagedCredential(
   const apiKey = readStringField(payload, API_KEY_FIELDS)
   const accessToken = readStringField(payload, ACCESS_TOKEN_FIELDS)
   // 类型字段可能缺失，按实际字段推断，避免因上游少给 type 就整份拒绝
-  const type = declaredType || (apiKey ? CONVOY_CREDENTIAL_TYPE.API_KEY : accessToken ? CONVOY_CREDENTIAL_TYPE.OAUTH : '')
+  const type =
+    declaredType ||
+    (apiKey ? CONVOY_CREDENTIAL_TYPE.API_KEY : accessToken ? CONVOY_CREDENTIAL_TYPE.OAUTH : '')
 
   if (type !== CONVOY_CREDENTIAL_TYPE.API_KEY && type !== CONVOY_CREDENTIAL_TYPE.OAUTH) {
     throw new SnapshotContractError(

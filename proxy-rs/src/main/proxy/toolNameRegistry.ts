@@ -25,7 +25,7 @@ export class ToolNameRegistry {
   }
 
   restoreToolUses<T extends { name: string }>(toolUses: T[]): T[] {
-    return toolUses.map(toolUse => this.restoreToolUse(toolUse))
+    return toolUses.map((toolUse) => this.restoreToolUse(toolUse))
   }
 
   private ensureUnique(baseName: string, originalName: string): string {

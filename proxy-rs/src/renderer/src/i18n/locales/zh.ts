@@ -197,7 +197,6 @@ const zh = {
     error: '异常'
   },
 
-
   // 设置页
   settings: {
     title: '设置',
@@ -344,7 +343,7 @@ const zh = {
     settingsSaved: '设置已保存',
     dataCopied: '数据已复制到剪贴板',
     dataExported: '数据导出成功',
-    dataImported: '数据导入成功',
+    dataImported: '数据导入成功'
   },
 
   // 注册页面
@@ -371,7 +370,8 @@ const zh = {
     gptMailDomain: '自建域名池（CF catch-all 转发到接收邮箱）',
     gptMailPrefix: 'GPTmail 固定前缀（可选）',
     gptMailBaseURL: 'GPTmail BaseURL（可选）',
-    gptMailDesc: 'GPTmail (mail.chatgpt.org.uk) 通过 CF Email Routing 转发取码：在 GPTmail 注册一个接收邮箱，Cloudflare 把 *@你的域名 转发到该邮箱，系统轮询 GPTmail API 获取验证码',
+    gptMailDesc:
+      'GPTmail (mail.chatgpt.org.uk) 通过 CF Email Routing 转发取码：在 GPTmail 注册一个接收邮箱，Cloudflare 把 *@你的域名 转发到该邮箱，系统轮询 GPTmail API 获取验证码',
     emailLabel: '邮箱',
     emailPlaceholder: 'your@email.com',
     fullNameLabel: '姓名 (可选)',
@@ -414,7 +414,8 @@ const zh = {
     parentEmailPlaceholder: 'your-name@gmail.com',
     parentEmailHint: '可选。开启匿名邮箱时必填；关闭时留空则在初始化后手动输入。',
     anonymousEmailLabel: '随机匿名邮箱（点号变体）',
-    anonymousEmailHint: '从母邮箱注入 `.` 生成不同变体（Gmail/iCloud 等忽略点号），优先 1 个点 → 2 个点递增。每次生成会查询本地账号库存避免重复。',
+    anonymousEmailHint:
+      '从母邮箱注入 `.` 生成不同变体（Gmail/iCloud 等忽略点号），优先 1 个点 → 2 个点递增。每次生成会查询本地账号库存避免重复。',
     nextVariant: '下一个变体',
     dotCount: '点号数',
     sameRoot: '同根已用',

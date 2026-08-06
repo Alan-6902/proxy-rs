@@ -3,37 +3,110 @@ import crypto from 'crypto'
 const LSUBID_PREFIXES = ['X10', 'X19', 'X42', 'X55', 'X73', 'X81', 'X96']
 
 const GPU_CONFIGS = [
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x000046A6) Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) UHD Graphics 730 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) HD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) HD Graphics 530 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (Intel)', model: 'ANGLE (Intel, Intel(R) Iris(R) Plus Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1070 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (NVIDIA)', model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (AMD)', model: 'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (AMD)', model: 'ANGLE (AMD, AMD Radeon RX 6600 XT Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (AMD)', model: 'ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (AMD)', model: 'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { vendor: 'Google Inc. (AMD)', model: 'ANGLE (AMD, AMD Radeon RX 570 Direct3D11 vs_5_0 ps_5_0, D3D11)' }
+  {
+    vendor: 'Google Inc. (Intel)',
+    model:
+      'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x000046A6) Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) UHD Graphics 730 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) HD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) HD Graphics 530 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (Intel)',
+    model: 'ANGLE (Intel, Intel(R) Iris(R) Plus Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1070 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (NVIDIA)',
+    model: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (AMD)',
+    model: 'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (AMD)',
+    model: 'ANGLE (AMD, AMD Radeon RX 6600 XT Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (AMD)',
+    model: 'ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (AMD)',
+    model: 'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  },
+  {
+    vendor: 'Google Inc. (AMD)',
+    model: 'ANGLE (AMD, AMD Radeon RX 570 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+  }
 ]
 
 const SCREEN_CONFIGS: [number, number, number, number, number][] = [
-  [1920, 1080, 1920, 1040, 24], [2560, 1440, 2560, 1400, 24],
-  [1920, 1200, 1920, 1160, 24], [1366, 768, 1366, 728, 24],
-  [1536, 864, 1536, 824, 24],   [1680, 1050, 1680, 1010, 24],
-  [1440, 900, 1440, 860, 24],   [1600, 900, 1600, 860, 24],
-  [2560, 1080, 2560, 1040, 24], [3440, 1440, 3440, 1400, 24],
-  [3840, 2160, 3840, 2120, 24], [1280, 1024, 1280, 984, 24]
+  [1920, 1080, 1920, 1040, 24],
+  [2560, 1440, 2560, 1400, 24],
+  [1920, 1200, 1920, 1160, 24],
+  [1366, 768, 1366, 728, 24],
+  [1536, 864, 1536, 824, 24],
+  [1680, 1050, 1680, 1010, 24],
+  [1440, 900, 1440, 860, 24],
+  [1600, 900, 1600, 860, 24],
+  [2560, 1080, 2560, 1040, 24],
+  [3440, 1440, 3440, 1400, 24],
+  [3840, 2160, 3840, 2120, 24],
+  [1280, 1024, 1280, 984, 24]
 ]
 
 const MATH_POOL = [
@@ -50,31 +123,66 @@ const MATH_POOL = [
 ]
 
 const WEBGL_EXT_CORE = [
-  'ANGLE_instanced_arrays', 'EXT_blend_minmax', 'EXT_color_buffer_half_float',
-  'EXT_float_blend', 'EXT_frag_depth', 'EXT_shader_texture_lod',
-  'EXT_texture_filter_anisotropic', 'EXT_sRGB', 'KHR_parallel_shader_compile',
-  'OES_element_index_uint', 'OES_fbo_render_mipmap', 'OES_standard_derivatives',
-  'OES_texture_float', 'OES_texture_float_linear', 'OES_texture_half_float',
-  'OES_texture_half_float_linear', 'OES_vertex_array_object',
-  'WEBGL_color_buffer_float', 'WEBGL_compressed_texture_s3tc',
-  'WEBGL_compressed_texture_s3tc_srgb', 'WEBGL_debug_renderer_info',
-  'WEBGL_debug_shaders', 'WEBGL_depth_texture', 'WEBGL_draw_buffers',
-  'WEBGL_lose_context', 'WEBGL_multi_draw'
+  'ANGLE_instanced_arrays',
+  'EXT_blend_minmax',
+  'EXT_color_buffer_half_float',
+  'EXT_float_blend',
+  'EXT_frag_depth',
+  'EXT_shader_texture_lod',
+  'EXT_texture_filter_anisotropic',
+  'EXT_sRGB',
+  'KHR_parallel_shader_compile',
+  'OES_element_index_uint',
+  'OES_fbo_render_mipmap',
+  'OES_standard_derivatives',
+  'OES_texture_float',
+  'OES_texture_float_linear',
+  'OES_texture_half_float',
+  'OES_texture_half_float_linear',
+  'OES_vertex_array_object',
+  'WEBGL_color_buffer_float',
+  'WEBGL_compressed_texture_s3tc',
+  'WEBGL_compressed_texture_s3tc_srgb',
+  'WEBGL_debug_renderer_info',
+  'WEBGL_debug_shaders',
+  'WEBGL_depth_texture',
+  'WEBGL_draw_buffers',
+  'WEBGL_lose_context',
+  'WEBGL_multi_draw'
 ]
 
 const WEBGL_EXT_OPTIONAL = [
-  'EXT_disjoint_timer_query', 'EXT_texture_compression_bptc',
-  'EXT_texture_compression_rgtc', 'WEBGL_compressed_texture_astc',
-  'WEBGL_compressed_texture_etc', 'OES_draw_buffers_indexed',
+  'EXT_disjoint_timer_query',
+  'EXT_texture_compression_bptc',
+  'EXT_texture_compression_rgtc',
+  'WEBGL_compressed_texture_astc',
+  'WEBGL_compressed_texture_etc',
+  'OES_draw_buffers_indexed',
   'EXT_color_buffer_float'
 ]
 
 const PLUGINS_POOL = [
   { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+  {
+    name: 'Chrome PDF Viewer',
+    filename: 'internal-pdf-viewer',
+    description: 'Portable Document Format'
+  },
+  {
+    name: 'Chromium PDF Viewer',
+    filename: 'internal-pdf-viewer',
+    description: 'Portable Document Format'
+  },
+  {
+    name: 'Microsoft Edge PDF Viewer',
+    filename: 'internal-pdf-viewer',
+    description: 'Portable Document Format'
+  },
+  {
+    name: 'WebKit built-in PDF',
+    filename: 'internal-pdf-viewer',
+    description: 'Portable Document Format'
+  }
 ]
 
 function randInt(max: number): number {
@@ -126,10 +234,14 @@ function generateCanvasData(): { hash: number; histogram: number[] } {
   bins[255] = 12000 + randInt(4001)
 
   const colorPeaks: [number, number][] = [
-    [255, 400 + randInt(301)], [165, 200 + randInt(201)],
-    [0, 300 + randInt(301)],   [128, 100 + randInt(201)],
-    [64, 50 + randInt(101)],   [192, 80 + randInt(121)],
-    [32, 30 + randInt(71)],    [224, 60 + randInt(121)]
+    [255, 400 + randInt(301)],
+    [165, 200 + randInt(201)],
+    [0, 300 + randInt(301)],
+    [128, 100 + randInt(201)],
+    [64, 50 + randInt(101)],
+    [192, 80 + randInt(121)],
+    [32, 30 + randInt(71)],
+    [224, 60 + randInt(121)]
   ]
   for (const [idx, val] of colorPeaks) bins[idx] = val
 
@@ -168,7 +280,7 @@ function randomChromeVersion(): string {
     { major: 143, buildMin: 7485, buildMax: 7494 },
     { major: 144, buildMin: 7544, buildMax: 7553 },
     { major: 145, buildMin: 7601, buildMax: 7610 },
-    { major: 146, buildMin: 7660, buildMax: 7669 },
+    { major: 146, buildMin: 7660, buildMax: 7669 }
   ]
   const v = versions[Math.floor(Math.random() * versions.length)]
   const build = v.buildMin + Math.floor(Math.random() * (v.buildMax - v.buildMin + 1))
@@ -208,8 +320,10 @@ export function randomIdentity(): BrowserIdentity {
     mathCos: math.cos,
     plugins,
     screen: {
-      width: scr[0], height: scr[1],
-      availWidth: scr[2], availHeight: scr[3],
+      width: scr[0],
+      height: scr[1],
+      availWidth: scr[2],
+      availHeight: scr[3],
       colorDepth: scr[4]
     },
     lsubidPrefixSignin: pick(LSUBID_PREFIXES),

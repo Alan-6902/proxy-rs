@@ -68,5 +68,7 @@ export async function shutdownTlsClientPool(): Promise<void> {
       mc.terminate(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('terminate timeout')), 5000))
     ])
-  } catch { /* 超时 / piscina 终止错误均忽略 */ }
+  } catch {
+    /* 超时 / piscina 终止错误均忽略 */
+  }
 }

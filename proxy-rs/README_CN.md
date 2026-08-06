@@ -21,34 +21,41 @@
 ## ✨ 功能特性
 
 ### 🔐 多账号管理
+
 - 添加、编辑、删除多个 Kiro 账号
 - 一键快速切换账号
 - 支持 Builder ID 和社交登录（Google/GitHub）方式
 - 批量导入/导出账号数据
 
 ### 🔄 自动刷新
+
 - Token 过期前自动刷新
 - 刷新后自动更新账号用量和订阅信息
 - 开启自动切换后，定时检查所有账号余额
 
 ### 📁 分组与标签
+
 - 使用分组和标签灵活组织账号
 - 批量设置账号的分组/标签
 
 ### 🔄 自动切换账号
+
 - 余额不足时自动切换到可用账号
 - 可配置余额阈值和检查间隔
 
 ### 🌐 多语言支持
+
 - 完整的中英文双语界面
 - 自动检测系统语言或手动选择
 
 ### 🎨 个性化
+
 - 21 种主题颜色可选
 - 深色/浅色模式切换
 - 隐私模式隐藏敏感信息
 
 ### 📝 账号注册
+
 - 内置 Kiro Builder ID 注册功能
 - 四种模式：手动、Outlook IMAP、自建域名（TempMail.Plus）、混合（加权轮询）
 - 并发批量注册 + 限速 + 退避 + 风控自动暂停
@@ -61,11 +68,13 @@
 - 完整 i18n 支持
 
 ### 🌐 代理支持
+
 - 内置代理池（http/https/socks5/socks4），4 种调度策略 + 自动验活 + 定时刷新
 - 反代账号-代理 N:1 分桶（避免风控关联）
 - 账号绑定代理后，所有该账号请求（含 Token 刷新、后台批量）均走绑定代理
 
 ### 🔔 通知与运维
+
 - 关键账号、反代和注册事件的本机系统通知
 - 统一任务中心（全局进度面板）
 - 一键诊断面板（网络/Kiro/AWS/邮箱/代理连通性）
@@ -109,27 +118,28 @@ npm run typecheck
 #### 🔥 重大功能（4 期累计 19 项新功能）
 
 ##### 注册可用性
+
 - **代理池** — 独立页面，注册时 IP 轮换，支持 4 种调度策略（轮询/随机/最少使用/最快），自动验活 + 失效自动停用，支持 http/https/socks5/socks4 + user:pass@host:port + host:port:user:pass 多种格式导入
 - **失败重试队列** — 错误自动归类（网络/OTP超时/邮箱占用/限流/AWS风控/认证/未知），按桶选择性重试
 - **批量任务暂停/恢复** — 一键暂停启动新任务，恢复时无缝继续
-- **统一任务中心** — TitleBar 实时徽章 + 侧栏抽屉，所有批量任务（注册、订阅、超额、Token 刷新、代理验活）集中显示，支持「全部取消」
+- **统一任务中心** — TitleBar 实时徽章 + 侧栏抽屉，批量任务（注册、Token 刷新、代理验活）集中显示，支持「全部取消」
 
 ##### 运营效率
+
 - **限速 + 退避策略** — 令牌桶限速（每分钟最大启动数）+ 连续失败指数退避（基础时长 → 上限可配）+ 风控自动暂停
 - **风控信号检测** — 实时面板：吞吐率、成功率、窗口内失败数、连续失败、退避剩余，支持可选自动暂停
-- **订阅升级前预检** — 自动分类账号阻塞原因（已订阅/无 Token/已封禁/不可升级/状态未知）
-- **订阅取消/降级** — 新增「订阅管理」Tab：批量打开门户、批量关闭超额、卡片视图账号管理
 - **指纹摘要** — 注册成功后保存 chromeVer/UA/GPU/CanvasHash/Screen + 脱敏代理 URL，注册历史显示徽章
 
 ##### 自动化
+
 - **多邮箱服务混合并发** — 新增 Mixed 模式，Outlook + TempMail.Plus 平滑加权轮询（SWRR 算法）
 - **邮箱预校验** — 经验型黑名单，注册失败为 email_used 自动加入，可视化管理面板
 - **定时任务 + 每日配额** — 每日某时自动启动 + 按星期掩码过滤（周一到周日任选）+ 每日配额上限（手动重置）
 
 ##### 体验增强
+
 - **注册策略模板** — 保存当前完整配置为命名模板，一键加载，支持导入/导出 JSON
 - **注册结果分析报表** — 圆环图（成功率）+ 24 小时平滑曲线（Catmull-Rom 双曲线）+ 7 日趋势叠加柱状图 + 失败原因彩色卡片 + 登录方式对比 + CSV 导出
-- **订阅链接有效期检测** — 15 分钟时间阈值 + HTTP HEAD 真实探测，过期链接一键重新生成
 - **一键诊断面板** — 检测公网/Kiro/AWS/邮箱服务/代理池连通性，含报告导出
 - **配置导入导出** — 多设备同步代理池/注册模板/限速定时配额/App 设置，支持 AES-GCM PBKDF2 密码加密
 
@@ -143,12 +153,14 @@ npm run typecheck
 - 一键自动均分分配（onlyUnbound 模式或重新分配全部）
 
 #### 🔌 网络层
+
 - **SOCKS5/SOCKS4 代理支持** — 通过 socks 库 + undici Agent.connect 钩子建立隧道，HTTPS 自动 TLS 升级
 - **注册响应中文乱码修复** — tls-client 的 latin1 字节流自动 UTF-8 重解码
 - **AWS 风控错误识别** — `AWS-RISK-CONTROL` 自动归类，错误消息含修复建议
 - **Invalid URL protocol 修复** — Windows 多协议代理字符串解析、systemProxy macOS HTTPS 检测、统一 safeCreateProxyAgent 工厂
 
 #### ⚡ 性能优化（4 轮深度优化）
+
 - saveToStorage 500ms 防抖（1000 账号场景：1000 次写盘 → 1 次）
 - createBackup 5 分钟节流（消除双倍写盘）
 - 后台刷新结果 120ms 缓冲批量化（N 次 Map 复制 → 1 次）
@@ -159,9 +171,11 @@ npm run typecheck
 - importAccounts/importFromExportData O(n²) → O(n) 批量化
 
 #### 🗑️ 移除
+
 - MoEmail 邮箱模式从 UI 彻底移除（保留底层 service 代码作为可恢复实现）
 
 #### 🔧 边缘情况修复（22 项）
+
 - 代理变更/删除时自动同步绑定账号到主进程账号池
 - 任务中心持久化 200 条已完成任务到 localStorage
 - 配置导出支持 PBKDF2 + AES-GCM 加密
@@ -174,6 +188,7 @@ npm run typecheck
 ### v1.6.x
 
 #### 反代 API 增强
+
 - **新增**: Gemini v1beta API 兼容（`/v1beta/models`、`/v1beta/models/{model}:generateContent`、`/v1beta/models/{model}:streamGenerateContent`）
 - **新增**: 一键配置客户端支持 6 种：Claude Code、OpenCode、Codex CLI、Gemini CLI、Hermes、OpenClaw
 - **新增**: AmazonQ CLI 端点隔离 — `amazonq-cli` 首选端点仅使用 SendMessageStreaming，失败不回退
@@ -197,25 +212,25 @@ npm run typecheck
 - **新增**: `additionalModelRequestFields` 支持 — 客户端发送 `thinking` 参数时透传给 Kiro API
 
 #### 账号切换
+
 - **新增**: Kiro CLI 切号支持 — 写入凭证到 `~/.local/share/kiro-cli/data.sqlite3` SQLite 数据库
 - **新增**: 设置中可选择切号目标：「Kiro IDE」/「Kiro CLI」/「两者 (IDE + CLI)」（默认 IDE）
 - **新增**: 手动切号和自动切号均遵循 `switchTarget` 设置
 - **新增**: CLI 切号使用 Read-Merge-Write 策略，保留未知字段，清理过期优先级 key
 
-#### 订阅与超额
-- **新增**: 批量超额设置页面 —「一键超额」（仅未开启）和「全部设置」（所有已订阅）按钮
-- **新增**: 账号超额状态总览表（订阅类型、超额能力、超额状态）
+#### 账号状态
+
 - **修复**: `overageStatus` 字段检测 — 正确将 REST API 的 `"ENABLED"`/`"DISABLED"` 字符串映射为布尔值
 - **修复**: 批量检查和批量刷新现在会返回 `resourceDetail` 和 `overageCapability` 给前端
 
 #### UI & 交互
+
 - **新增**: 注册页面全面重设计 — 使用 Card/Button/Input/Label/Progress/Badge/Switch 组件库
-- **新增**: 订阅页面 Header 重设计 — 渐变色横幅风格
-- **新增**: 两个页面均支持主题色切换和深色模式
 - **修复**: 批量注册进度/历史切页后不再丢失（模块级 React setter refs）
 - **修复**: Windows 开发终端中文乱码（dev 脚本前置 `chcp 65001`）
 
 #### 账号注册
+
 - **新增**: 账号注册功能（手动 / MoEmail / Outlook / 自建域名 模式）
 - **新增**: 自建域名模式 — 用户提供域名（配置 catch-all 转发到 TempMail.Plus），系统自动生成随机英文人名邮箱前缀注册
 - **新增**: 并发批量注册 — 可配置并发数（1-10 个任务同时执行）
@@ -227,6 +242,7 @@ npm run typecheck
 - **新增**: 注册页面完整 i18n 支持（中/英）
 
 #### Bug 修复
+
 - **修复**: 模型别名映射改为精确匹配，`claude-opus-4.7` 等动态模型不再被降级
 - **修复**: 代理测试页加载真实 `/v1/models` 结果，避免选择不可用的静态别名
 - **修复**: 未知模型 ID 原样透传，不再重映射到静态 Claude 默认值

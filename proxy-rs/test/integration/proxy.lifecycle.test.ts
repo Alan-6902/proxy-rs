@@ -5,9 +5,9 @@ import { ProxyServer, type ProxyServerEvents } from '../../src/main/proxy/proxyS
 const LOOPBACK_HOST = '127.0.0.1'
 const runningProxies: ProxyServer[] = []
 
-function createProxy(events: ProxyServerEvents = {}): ProxyServer {
+function createProxy(events: ProxyServerEvents = {}, port = 0): ProxyServer {
   const proxy = new ProxyServer(
-    { autoStart: true, enabled: true, host: LOOPBACK_HOST, port: 0 },
+    { autoStart: true, enabled: true, host: LOOPBACK_HOST, port },
     events
   )
   runningProxies.push(proxy)
@@ -37,6 +37,25 @@ afterEach(async () => {
 })
 
 describe('ProxyServer lifecycle isolation', () => {
+  it('clears failed listen state so the same instance can start after the port is released', async () => {
+    const blocker = net.createServer()
+    await new Promise<void>((resolve) => blocker.listen(0, LOOPBACK_HOST, resolve))
+    const address = blocker.address()
+    if (!address || typeof address === 'string') throw new Error('expected blocker port')
+    const proxy = createProxy({}, address.port)
+
+    await expect(proxy.start()).rejects.toThrow(`Port ${address.port} is already in use`)
+    expect(proxy.isRunning()).toBe(false)
+
+    await new Promise<void>((resolve, reject) => {
+      blocker.close((error) => (error ? reject(error) : resolve()))
+    })
+    await proxy.start()
+
+    expect(proxy.isRunning()).toBe(true)
+    expect(proxy.getListeningPort()).toBe(address.port)
+  })
+
   it('clears a completed stop timer before restart so it cannot reach the replacement server', async () => {
     vi.useFakeTimers()
     vi.clearAllTimers()

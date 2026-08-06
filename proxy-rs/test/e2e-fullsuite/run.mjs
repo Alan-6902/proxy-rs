@@ -6,11 +6,11 @@
  *   node test/e2e-fullsuite/run.mjs                              # 跑全部
  *   node test/e2e-fullsuite/run.mjs --only CASE-07               # 跑指定 ID
  *   node test/e2e-fullsuite/run.mjs --only anthropic,tool        # 跑指定 tag (任意匹配)
- *   node test/e2e-fullsuite/run.mjs --base http://127.0.0.1:8787 # 自定义反代地址
+ *   node test/e2e-fullsuite/run.mjs --base http://127.0.0.1:5580 # 自定义反代地址
  *   node test/e2e-fullsuite/run.mjs --token <token>              # 指定鉴权 token
  *
  * 环境变量:
- *   ZS_BASE   反代地址 (默认 http://127.0.0.1:8787)
+ *   ZS_BASE   反代地址 (默认 http://127.0.0.1:5580)
  *   ZS_TOKEN  鉴权 token (Anthropic x-api-key / OpenAI Bearer)
  *   ZS_ONLY   case 过滤 (等价 --only)
  *   ZS_VERBOSE=1  打印通过 case 的 log
@@ -25,6 +25,7 @@ import { readdir } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { runCases } from './lib/runner.mjs'
+import { DEFAULT_PROXY_BASE_URL } from './lib/fixtures.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -34,7 +35,7 @@ async function main() {
     printHelp()
     process.exit(0)
   }
-  const base = argv.base ?? process.env.ZS_BASE ?? 'http://127.0.0.1:8787'
+  const base = argv.base ?? process.env.ZS_BASE ?? DEFAULT_PROXY_BASE_URL
   const token = argv.token ?? process.env.ZS_TOKEN ?? ''
   const only = argv.only ?? process.env.ZS_ONLY ?? ''
 
@@ -140,7 +141,7 @@ function printHelp() {
   node test/e2e-fullsuite/run.mjs [选项]
 
 选项:
-  --base <url>     反代地址 (默认 http://127.0.0.1:8787, 也可用 ZS_BASE 环境变量)
+  --base <url>     反代地址 (默认 ${DEFAULT_PROXY_BASE_URL}, 也可用 ZS_BASE 环境变量)
   --token <token>  鉴权 token (也可用 ZS_TOKEN 环境变量)
   --only <filter>  只跑指定 case (按 ID 或 tag 匹配, 多个用逗号: --only anthropic,tool)
   --help           显示本帮助

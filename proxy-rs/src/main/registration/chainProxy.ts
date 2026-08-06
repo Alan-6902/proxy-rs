@@ -109,7 +109,11 @@ export class ChainProxyRelay {
       // 强制销毁所有活跃隧道连接：否则 server.close() 会等 DLL Go http.Transport
       // 的 Keep-Alive 连接自然超时（~60s），导致注册结束后 cleanup 卡住一分钟
       for (const sock of this.sockets) {
-        try { sock.destroy() } catch { /* ignore */ }
+        try {
+          sock.destroy()
+        } catch {
+          /* ignore */
+        }
       }
       this.sockets.clear()
       if (!srv) {
@@ -142,7 +146,10 @@ export class ChainProxyRelay {
           tunnel.pipe(client)
           client.on('close', () => tunnel.destroy())
           tunnel.on('close', () => client.destroy())
-          tunnel.on('error', () => { client.destroy(); tunnel.destroy() })
+          tunnel.on('error', () => {
+            client.destroy()
+            tunnel.destroy()
+          })
         })
         .catch((err: unknown) => {
           this.log(`[ProxyChain] 隧道建立失败: ${err instanceof Error ? err.message : String(err)}`)
@@ -177,7 +184,10 @@ export class ChainProxyRelay {
     return new Promise((resolve, reject) => {
       const sock = net.connect(this.upstream.port, this.upstream.host)
       sock.setTimeout(20000)
-      sock.once('timeout', () => { sock.destroy(); reject(new Error('上游中转连接超时')) })
+      sock.once('timeout', () => {
+        sock.destroy()
+        reject(new Error('上游中转连接超时'))
+      })
       sock.once('error', reject)
       sock.once('connect', () => {
         sock.setNoDelay(true)
@@ -185,9 +195,15 @@ export class ChainProxyRelay {
           .then((resp) => {
             sock.setTimeout(0)
             if (resp.status === 200) resolve(sock)
-            else { sock.destroy(); reject(new Error(this.formatConnectError('上游中转', resp))) }
+            else {
+              sock.destroy()
+              reject(new Error(this.formatConnectError('上游中转', resp)))
+            }
           })
-          .catch((err: Error) => { sock.destroy(); reject(err) })
+          .catch((err: Error) => {
+            sock.destroy()
+            reject(err)
+          })
       })
     })
   }
@@ -285,7 +301,11 @@ export class ChainProxyRelay {
           }
           resolve(parsed)
         } else if (viaClose) {
-          reject(new Error(raw ? `代理返回不可解析: ${raw.slice(0, 120)}` : '代理连接被对端关闭（无任何响应）'))
+          reject(
+            new Error(
+              raw ? `代理返回不可解析: ${raw.slice(0, 120)}` : '代理连接被对端关闭（无任何响应）'
+            )
+          )
         }
       }
       const onData = (d: Buffer): void => {
@@ -293,7 +313,10 @@ export class ChainProxyRelay {
         const sep = buf.indexOf('\r\n\r\n')
         if (sep >= 0) finish(buf, false)
       }
-      const onErr = (err: Error): void => { cleanup(); reject(err) }
+      const onErr = (err: Error): void => {
+        cleanup()
+        reject(err)
+      }
       const onEnd = (): void => finish(buf, true)
       sock.on('data', onData)
       sock.once('error', onErr)
@@ -303,7 +326,9 @@ export class ChainProxyRelay {
   }
 
   private formatConnectError(stage: string, resp: ConnectResponse): string {
-    const suffix = resp.bodySnippet ? ` body=${resp.bodySnippet.replace(/[\r\n]/g, ' ').slice(0, 120)}` : ''
+    const suffix = resp.bodySnippet
+      ? ` body=${resp.bodySnippet.replace(/[\r\n]/g, ' ').slice(0, 120)}`
+      : ''
     return `${stage} CONNECT 失败: HTTP ${resp.status} ${resp.statusText}${suffix}`
   }
 
@@ -358,9 +383,19 @@ export class ChainProxyRelay {
   private tcpProbe(host: string, port: number, timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const sock = net.connect(port, host)
-      const timer = setTimeout(() => { sock.destroy(); reject(new Error(`TCP 连接超时 ${host}:${port}`)) }, timeoutMs)
-      sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve() })
-      sock.once('error', (err) => { clearTimeout(timer); reject(err) })
+      const timer = setTimeout(() => {
+        sock.destroy()
+        reject(new Error(`TCP 连接超时 ${host}:${port}`))
+      }, timeoutMs)
+      sock.once('connect', () => {
+        clearTimeout(timer)
+        sock.destroy()
+        resolve()
+      })
+      sock.once('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
     })
   }
 }

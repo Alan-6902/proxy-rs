@@ -31,18 +31,30 @@ import {
 } from './translator'
 import { ToolNameRegistry } from './toolNameRegistry'
 
-
 export interface ProxyServerEvents {
   onRequest?: (info: { path: string; method: string; accountId?: string }) => void
-  onResponse?: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }) => void
+  onResponse?: (info: {
+    path: string
+    model?: string
+    status: number
+    tokens?: number
+    inputTokens?: number
+    outputTokens?: number
+    credits?: number
+    error?: string
+  }) => void
   onError?: (error: Error) => void
-  onConfigChanged?: (config: ProxyConfig) => void  // API Key 用量更新时触发
+  onConfigChanged?: (config: ProxyConfig) => void // API Key 用量更新时触发
   onStatusChange?: (running: boolean, port: number) => void
   onTokenRefresh?: TokenRefreshCallback
   onAccountUpdate?: (account: ProxyAccount) => void
   onCreditsUpdate?: (totalCredits: number) => void
   onTokensUpdate?: (inputTokens: number, outputTokens: number) => void
-  onRequestStatsUpdate?: (totalRequests: number, successRequests: number, failedRequests: number) => void
+  onRequestStatsUpdate?: (
+    totalRequests: number,
+    successRequests: number,
+    failedRequests: number
+  ) => void
   onPoolEmpty?: () => Promise<void> // 账号池为空时触发（冷启动懒加载）
 }
 
@@ -96,7 +108,9 @@ function modelDisplayName(id: string, modelName?: string): string {
   return id
     .split('-')
     .filter(Boolean)
-    .map(part => part === 'gpt' ? 'GPT' : part === 'ai' ? 'AI' : part[0]?.toUpperCase() + part.slice(1))
+    .map((part) =>
+      part === 'gpt' ? 'GPT' : part === 'ai' ? 'AI' : part[0]?.toUpperCase() + part.slice(1)
+    )
     .join(' ')
 }
 
@@ -125,7 +139,8 @@ function modelInputModalities(inputTypes?: string[]): ModelModality[] {
   for (const item of inputTypes ?? []) {
     const lower = item.toLowerCase()
     if (lower.includes('image')) values.add('image')
-    if (lower.includes('pdf') || lower.includes('document') || lower.includes('file')) values.add('pdf')
+    if (lower.includes('pdf') || lower.includes('document') || lower.includes('file'))
+      values.add('pdf')
     if (lower.includes('audio')) values.add('audio')
     if (lower.includes('video')) values.add('video')
   }
@@ -151,8 +166,12 @@ function extractThinkingEfforts(schema?: Record<string, unknown> | null): string
   const typeField = thinkingProps?.type as Record<string, unknown> | undefined
   const enumValues = typeField?.enum as string[] | undefined
   if (enumValues?.includes('adaptive') || enumValues?.includes('disabled')) {
-    const effortField = (props.output_config as Record<string, unknown> | undefined)?.properties as Record<string, unknown> | undefined
-    const effortEnum = (effortField?.effort as Record<string, unknown> | undefined)?.enum as string[] | undefined
+    const effortField = (props.output_config as Record<string, unknown> | undefined)?.properties as
+      | Record<string, unknown>
+      | undefined
+    const effortEnum = (effortField?.effort as Record<string, unknown> | undefined)?.enum as
+      | string[]
+      | undefined
     return effortEnum || undefined
   }
   return undefined
@@ -169,7 +188,11 @@ function buildClientModel(input: {
   maxOutputTokens?: number | null
   rateMultiplier?: number
   rateUnit?: string
-  promptCaching?: { supportsPromptCaching: boolean; maximumCacheCheckpointsPerRequest?: number | null; minimumTokensPerCacheCheckpoint?: number | null } | null
+  promptCaching?: {
+    supportsPromptCaching: boolean
+    maximumCacheCheckpointsPerRequest?: number | null
+    minimumTokensPerCacheCheckpoint?: number | null
+  } | null
   additionalModelRequestFieldsSchema?: Record<string, unknown> | null
   modelProvider?: string | null
 }): ClientModel {
@@ -177,7 +200,10 @@ function buildClientModel(input: {
   const inputModalities = modelInputModalities(input.supportedInputTypes)
   const outputModalities: ModelModality[] = ['text']
   const output = modelOutputLimit(input.id, input.maxOutputTokens)
-  const context = typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? input.maxInputTokens : 200000
+  const context =
+    typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0
+      ? input.maxInputTokens
+      : 200000
   const reasoning = false
   const interleaved = false
 
@@ -191,7 +217,7 @@ function buildClientModel(input: {
     model_name: input.modelName || name,
     family: modelFamily(input.id),
     release_date: '',
-    attachment: inputModalities.some(item => item !== 'text'),
+    attachment: inputModalities.some((item) => item !== 'text'),
     reasoning,
     temperature: true,
     tool_call: true,
@@ -199,14 +225,16 @@ function buildClientModel(input: {
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     limit: {
       context,
-      ...(typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? { input: input.maxInputTokens } : {}),
+      ...(typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0
+        ? { input: input.maxInputTokens }
+        : {}),
       output
     },
     modalities: { input: inputModalities, output: outputModalities },
     capabilities: {
       temperature: true,
       reasoning,
-      attachment: inputModalities.some(item => item !== 'text'),
+      attachment: inputModalities.some((item) => item !== 'text'),
       toolcall: true,
       input: modelCapabilityMap(inputModalities),
       output: modelCapabilityMap(outputModalities),
@@ -214,12 +242,16 @@ function buildClientModel(input: {
     },
     context_length: context,
     max_tokens: output,
-    ...(typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? { max_input_tokens: input.maxInputTokens } : {}),
+    ...(typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0
+      ? { max_input_tokens: input.maxInputTokens }
+      : {}),
     max_output_tokens: output,
     inputTypes: input.supportedInputTypes,
     rateMultiplier: input.rateMultiplier,
     rateUnit: input.rateUnit,
-    supportsThinking: !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking,
+    supportsThinking: !!(
+      input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined
+    )?.thinking,
     thinkingEfforts: extractThinkingEfforts(input.additionalModelRequestFieldsSchema),
     supportsPromptCaching: input.promptCaching?.supportsPromptCaching || false,
     modelProvider: input.modelProvider || undefined,
@@ -234,7 +266,12 @@ export class ProxyServer {
   private accountPool: AccountPool
   private config: ProxyConfig
   private stats: ProxyStats
-  private sessionStats: { totalRequests: number; successRequests: number; failedRequests: number; startTime: number }
+  private sessionStats: {
+    totalRequests: number
+    successRequests: number
+    failedRequests: number
+    startTime: number
+  }
   private events: ProxyServerEvents
   private refreshingTokens: Set<string> = new Set() // 防止并发刷新
   private isHttps: boolean = false
@@ -292,7 +329,7 @@ export class ProxyServer {
 
     return new Promise((resolve, reject) => {
       this.isStopping = false
-      const requestHandler = (req: http.IncomingMessage, res: http.ServerResponse) => 
+      const requestHandler = (req: http.IncomingMessage, res: http.ServerResponse) =>
         this.handleRequest(req, res)
 
       // 检查是否启用 TLS
@@ -333,7 +370,7 @@ export class ProxyServer {
           setTimeout(() => {
             if (!this.isStopping && this.config.autoStart && !this.isRunning()) {
               console.log('[ProxyServer] Auto-restarting...')
-              this.start().catch(err => {
+              this.start().catch((err) => {
                 console.error('[ProxyServer] Auto-restart failed:', err)
               })
             }
@@ -343,7 +380,10 @@ export class ProxyServer {
 
       const protocol = this.isHttps ? 'https' : 'http'
       this.server.listen(this.config.port, this.config.host, () => {
-        proxyLogger.info('ProxyServer', `Started on ${protocol}://${this.config.host}:${this.config.port}`)
+        proxyLogger.info(
+          'ProxyServer',
+          `Started on ${protocol}://${this.config.host}:${this.config.port}`
+        )
         this.stats.startTime = Date.now()
         // 重置会话统计
         this.sessionStats = {
@@ -361,7 +401,7 @@ export class ProxyServer {
   // 获取 TLS 配置选项
   private getTlsOptions(): https.ServerOptions {
     const tls = this.config.tls!
-    
+
     let cert: string
     let key: string
 
@@ -398,8 +438,10 @@ export class ProxyServer {
         this.events.onStatusChange?.(false, this.config.port)
         resolve()
       })
-      this.activeRequests.forEach(controller => controller.abort(new Error('Proxy server stopped')))
-      this.sockets.forEach(socket => socket.destroy())
+      this.activeRequests.forEach((controller) =>
+        controller.abort(new Error('Proxy server stopped'))
+      )
+      this.sockets.forEach((socket) => socket.destroy())
     })
   }
 
@@ -420,9 +462,8 @@ export class ProxyServer {
     }
   }
 
-
   private validateClaudeContentBlocks(blocks: ClaudeContentBlock[]): void {
-    blocks.forEach(block => {
+    blocks.forEach((block) => {
       this.validateCacheControl(block.cache_control)
       if (Array.isArray(block.content)) {
         this.validateClaudeContentBlocks(block.content)
@@ -431,26 +472,26 @@ export class ProxyServer {
   }
 
   private validateOpenAICacheControls(request: OpenAIChatRequest): void {
-    request.messages.forEach(message => {
+    request.messages.forEach((message) => {
       this.validateCacheControl(message.cache_control)
       if (Array.isArray(message.content)) {
-        message.content.forEach(part => this.validateCacheControl(part.cache_control))
+        message.content.forEach((part) => this.validateCacheControl(part.cache_control))
       }
     })
-    request.tools?.forEach(tool => this.validateCacheControl(tool.cache_control))
+    request.tools?.forEach((tool) => this.validateCacheControl(tool.cache_control))
   }
 
   private validateClaudeCacheControls(request: ClaudeRequest): void {
     if (Array.isArray(request.system)) {
-      request.system.forEach(block => this.validateCacheControl(block.cache_control))
+      request.system.forEach((block) => this.validateCacheControl(block.cache_control))
     }
-    request.messages.forEach(message => {
+    request.messages.forEach((message) => {
       this.validateCacheControl(message.cache_control)
       if (Array.isArray(message.content)) {
         this.validateClaudeContentBlocks(message.content)
       }
     })
-    request.tools?.forEach(tool => this.validateCacheControl(tool.cache_control))
+    request.tools?.forEach((tool) => this.validateCacheControl(tool.cache_control))
   }
 
   private async downloadImageDataUrl(url: string, signal?: AbortSignal): Promise<string> {
@@ -461,7 +502,11 @@ export class ProxyServer {
       if (signal?.aborted) throw this.getAbortError(signal)
       signal?.addEventListener('abort', abort, { once: true })
       const agent = (() => {
-        const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
+        const envProxy =
+          process.env.HTTPS_PROXY ||
+          process.env.https_proxy ||
+          process.env.HTTP_PROXY ||
+          process.env.http_proxy
         if (envProxy) {
           const { ProxyAgent } = require('undici')
           return new ProxyAgent({ uri: envProxy, requestTls: { rejectUnauthorized: false } })
@@ -470,13 +515,19 @@ export class ProxyServer {
       })()
       const { fetch: undiciFetch } = require('undici')
       const response = agent
-        ? await undiciFetch(url, { signal: controller.signal, dispatcher: agent }) as unknown as globalThis.Response
+        ? ((await undiciFetch(url, {
+            signal: controller.signal,
+            dispatcher: agent
+          })) as unknown as globalThis.Response)
         : await fetch(url, { signal: controller.signal })
       if (!response.ok) {
         throw new Error(`Failed to download image: HTTP ${response.status}`)
       }
       const contentType = response.headers.get('content-type')?.split(';')[0]?.toLowerCase()
-      if (!contentType || !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(contentType)) {
+      if (
+        !contentType ||
+        !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(contentType)
+      ) {
         throw new Error(`Unsupported image content-type: ${contentType || 'unknown'}`)
       }
       const arrayBuffer = await response.arrayBuffer()
@@ -490,30 +541,44 @@ export class ProxyServer {
     }
   }
 
-  private async resolveOpenAIHttpImages(request: OpenAIChatRequest, signal?: AbortSignal): Promise<OpenAIChatRequest> {
-    await Promise.all(request.messages.map(async message => {
-      if (!Array.isArray(message.content)) return
-      await Promise.all(message.content.map(async part => {
-        if (part.type !== 'image_url' || !part.image_url?.url.startsWith('http')) return
-        part.image_url.url = await this.downloadImageDataUrl(part.image_url.url, signal)
-      }))
-    }))
+  private async resolveOpenAIHttpImages(
+    request: OpenAIChatRequest,
+    signal?: AbortSignal
+  ): Promise<OpenAIChatRequest> {
+    await Promise.all(
+      request.messages.map(async (message) => {
+        if (!Array.isArray(message.content)) return
+        await Promise.all(
+          message.content.map(async (part) => {
+            if (part.type !== 'image_url' || !part.image_url?.url.startsWith('http')) return
+            part.image_url.url = await this.downloadImageDataUrl(part.image_url.url, signal)
+          })
+        )
+      })
+    )
     return request
   }
 
-  private async resolveClaudeHttpImages(request: ClaudeRequest, signal?: AbortSignal): Promise<ClaudeRequest> {
-    await Promise.all(request.messages.map(async message => {
-      if (!Array.isArray(message.content)) return
-      await Promise.all(message.content.map(async block => {
-        if (block.type !== 'image' || block.source?.type !== 'url') return
-        const dataUrl = await this.downloadImageDataUrl(block.source.url, signal)
-        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
-        if (!match) {
-          throw new Error('Downloaded image produced invalid data URL')
-        }
-        block.source = { type: 'base64', media_type: match[1], data: match[2] }
-      }))
-    }))
+  private async resolveClaudeHttpImages(
+    request: ClaudeRequest,
+    signal?: AbortSignal
+  ): Promise<ClaudeRequest> {
+    await Promise.all(
+      request.messages.map(async (message) => {
+        if (!Array.isArray(message.content)) return
+        await Promise.all(
+          message.content.map(async (block) => {
+            if (block.type !== 'image' || block.source?.type !== 'url') return
+            const dataUrl = await this.downloadImageDataUrl(block.source.url, signal)
+            const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
+            if (!match) {
+              throw new Error('Downloaded image produced invalid data URL')
+            }
+            block.source = { type: 'base64', media_type: match[1], data: match[2] }
+          })
+        )
+      })
+    )
     return request
   }
 
@@ -524,18 +589,27 @@ export class ProxyServer {
       return { ...request, tools: undefined, tool_choice: undefined }
     }
 
-    if (request.tool_choice && typeof request.tool_choice === 'object' && request.tool_choice.type === 'function' && !request.tool_choice.function?.name) {
+    if (
+      request.tool_choice &&
+      typeof request.tool_choice === 'object' &&
+      request.tool_choice.type === 'function' &&
+      !request.tool_choice.function?.name
+    ) {
       throw new Error('tool_choice function requires a tool name')
     }
 
-    if (request.tool_choice && typeof request.tool_choice === 'object' && request.tool_choice.function?.name) {
+    if (
+      request.tool_choice &&
+      typeof request.tool_choice === 'object' &&
+      request.tool_choice.function?.name
+    ) {
       const selectedToolName = request.tool_choice.function.name
-      if (!request.tools?.some(tool => tool.function.name === selectedToolName)) {
+      if (!request.tools?.some((tool) => tool.function.name === selectedToolName)) {
         throw new Error(`tool_choice references unknown tool: ${selectedToolName}`)
       }
       return {
         ...request,
-        tools: request.tools?.filter(tool => tool.function.name === selectedToolName)
+        tools: request.tools?.filter((tool) => tool.function.name === selectedToolName)
       }
     }
 
@@ -555,12 +629,12 @@ export class ProxyServer {
 
     if (request.tool_choice?.name) {
       const selectedToolName = request.tool_choice.name
-      if (!request.tools?.some(tool => tool.name === selectedToolName)) {
+      if (!request.tools?.some((tool) => tool.name === selectedToolName)) {
         throw new Error(`tool_choice references unknown tool: ${selectedToolName}`)
       }
       return {
         ...request,
-        tools: request.tools?.filter(tool => tool.name === selectedToolName)
+        tools: request.tools?.filter((tool) => tool.name === selectedToolName)
       }
     }
 
@@ -662,7 +736,12 @@ export class ProxyServer {
   }
 
   // 获取会话统计（当前服务运行期间的统计）
-  getSessionStats(): { totalRequests: number; successRequests: number; failedRequests: number; startTime: number } {
+  getSessionStats(): {
+    totalRequests: number
+    successRequests: number
+    failedRequests: number
+    startTime: number
+  } {
     return { ...this.sessionStats }
   }
 
@@ -678,8 +757,12 @@ export class ProxyServer {
   }
 
   private isAbortError(error: unknown, signal?: AbortSignal): boolean {
-    return signal?.aborted === true
-      || (error instanceof Error && (error.message.includes('Client disconnected') || error.message.includes('Proxy server stopped')))
+    return (
+      signal?.aborted === true ||
+      (error instanceof Error &&
+        (error.message.includes('Client disconnected') ||
+          error.message.includes('Proxy server stopped')))
+    )
   }
 
   private throwIfAborted(signal?: AbortSignal): void {
@@ -743,17 +826,21 @@ export class ProxyServer {
       maxOutputTokens: m.tokenLimits?.maxOutputTokens,
       rateMultiplier: m.rateMultiplier,
       rateUnit: m.rateUnit,
-      supportsThinking: !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking,
+      supportsThinking: !!(
+        m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined
+      )?.thinking,
       thinkingEfforts: extractThinkingEfforts(m.additionalModelRequestFieldsSchema),
       supportsPromptCaching: m.promptCaching?.supportsPromptCaching || false,
       modelProvider: m.modelProvider || undefined
     }
   }
 
-  async getAvailableModels(signal?: AbortSignal): Promise<{ models: ReturnType<typeof ProxyServer.mapKiroModelToApi>[]; fromCache: boolean }> {
+  async getAvailableModels(
+    signal?: AbortSignal
+  ): Promise<{ models: ReturnType<typeof ProxyServer.mapKiroModelToApi>[]; fromCache: boolean }> {
     const now = Date.now()
-    
-    if (this.modelCache && (now - this.modelCache.timestamp) < this.MODEL_CACHE_TTL) {
+
+    if (this.modelCache && now - this.modelCache.timestamp < this.MODEL_CACHE_TTL) {
       return { models: this.modelCache.models.map(ProxyServer.mapKiroModelToApi), fromCache: true }
     }
 
@@ -794,7 +881,9 @@ export class ProxyServer {
 
     // 防止并发刷新
     if (this.refreshingTokens.has(account.id)) {
-      console.log(`[ProxyServer] Token refresh already in progress for ${account.email || account.id}`)
+      console.log(
+        `[ProxyServer] Token refresh already in progress for ${account.email || account.id}`
+      )
       // 等待刷新完成
       await this.waitForRetry(1000, signal)
       return !this.isTokenExpiringSoon(this.accountPool.getAccount(account.id) || account)
@@ -807,7 +896,7 @@ export class ProxyServer {
       // 随机延迟 0-3 秒，避免多账号同时刷新被识别为批量操作
       const jitter = Math.floor(Math.random() * 3000)
       if (jitter > 0) await this.waitForRetry(jitter, signal)
-      
+
       const result = await this.abortable(this.events.onTokenRefresh(account), signal)
       if (result.success && result.accessToken) {
         // 更新账号池中的 Token
@@ -826,7 +915,9 @@ export class ProxyServer {
         console.log(`[ProxyServer] Token refreshed for ${account.email || account.id}`)
         return true
       } else {
-        console.error(`[ProxyServer] Token refresh failed for ${account.email || account.id}: ${result.error}`)
+        console.error(
+          `[ProxyServer] Token refresh failed for ${account.email || account.id}: ${result.error}`
+        )
         this.accountPool.markNeedsRefresh(account.id)
         return false
       }
@@ -851,14 +942,16 @@ export class ProxyServer {
     this.throwIfAborted(signal)
 
     let account: ProxyAccount | null
-    
+
     // 检查是否启用多账号轮询
     if (this.config.enableMultiAccount) {
       account = this.accountPool.getNextAccount()
       if (!account) {
         const status = this.accountPool.getQuotaStatus()
         if (status.exhausted > 0 && status.available === 0) {
-          console.log(`[ProxyServer] All accounts quota exhausted (${status.exhausted}/${status.total}), no available accounts`)
+          console.log(
+            `[ProxyServer] All accounts quota exhausted (${status.exhausted}/${status.total}), no available accounts`
+          )
         }
       }
     } else {
@@ -867,17 +960,25 @@ export class ProxyServer {
         // 使用指定的第一个账号
         account = this.accountPool.getAccount(this.config.selectedAccountIds[0])
         // 检查指定账号是否配额耗尽，若是则尝试自动切换
-        if (account && this.accountPool.isQuotaExhausted(account) && this.config.autoSwitchOnQuotaExhausted) {
+        if (
+          account &&
+          this.accountPool.isQuotaExhausted(account) &&
+          this.config.autoSwitchOnQuotaExhausted
+        ) {
           const nextAccount = this.accountPool.getNextAvailableAccount(account.id)
           if (nextAccount) {
-            console.log(`[ProxyServer] Selected account ${account.email || account.id} quota exhausted, auto-switching to ${nextAccount.email || nextAccount.id}`)
+            console.log(
+              `[ProxyServer] Selected account ${account.email || account.id} quota exhausted, auto-switching to ${nextAccount.email || nextAccount.id}`
+            )
             this.config.selectedAccountIds = [nextAccount.id]
             this.events.onAccountUpdate?.(nextAccount)
             account = nextAccount
           }
         }
         if (!account) {
-          console.log(`[ProxyServer] Selected account ${this.config.selectedAccountIds[0]} not found, using first available`)
+          console.log(
+            `[ProxyServer] Selected account ${this.config.selectedAccountIds[0]} not found, using first available`
+          )
           const allAccounts = this.accountPool.getAllAccounts()
           account = allAccounts.length > 0 ? allAccounts[0] : null
         }
@@ -887,7 +988,7 @@ export class ProxyServer {
         account = allAccounts.length > 0 ? allAccounts[0] : null
       }
     }
-    
+
     if (!account) return null
 
     // 检查是否需要刷新 Token
@@ -930,7 +1031,9 @@ export class ProxyServer {
         lastError = error as Error
         const errMsg = lastError.message || ''
 
-        console.log(`[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): ${errMsg}`)
+        console.log(
+          `[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): ${errMsg}`
+        )
 
         // 401/403: 尝试刷新 Token
         if (errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('Auth')) {
@@ -951,7 +1054,16 @@ export class ProxyServer {
         }
 
         // 402/429: 额度耗尽，切换端点或账号
-        if (errMsg.includes('402') || errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('ThrottlingException') || errMsg.includes('reached the limit') || errMsg.includes('ServiceQuotaExceededException') || errMsg.includes('limit exceeded') || errMsg.includes('rate limit')) {
+        if (
+          errMsg.includes('402') ||
+          errMsg.includes('429') ||
+          errMsg.includes('quota') ||
+          errMsg.includes('ThrottlingException') ||
+          errMsg.includes('reached the limit') ||
+          errMsg.includes('ServiceQuotaExceededException') ||
+          errMsg.includes('limit exceeded') ||
+          errMsg.includes('rate limit')
+        ) {
           console.log('[ProxyServer] Quota/throttle error, switching endpoint or account')
           this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, 429)
           endpointIndex = (endpointIndex + 1) % 2 // 切换端点
@@ -967,7 +1079,9 @@ export class ProxyServer {
               // 单账号模式 + 启用自动切换：切换到下一个可用账号
               const nextAccount = this.accountPool.getNextAvailableAccount(currentAccount.id)
               if (nextAccount && nextAccount.id !== currentAccount.id) {
-                console.log(`[ProxyServer] Auto-switching from ${currentAccount.id} to ${nextAccount.id} due to quota exhausted`)
+                console.log(
+                  `[ProxyServer] Auto-switching from ${currentAccount.id} to ${nextAccount.id} due to quota exhausted`
+                )
                 currentAccount = nextAccount
                 // 更新配置中的选定账号
                 this.config.selectedAccountIds = [nextAccount.id]
@@ -979,7 +1093,12 @@ export class ProxyServer {
         }
 
         // 5xx: 重试
-        if (errMsg.includes('500') || errMsg.includes('502') || errMsg.includes('503') || errMsg.includes('504')) {
+        if (
+          errMsg.includes('500') ||
+          errMsg.includes('502') ||
+          errMsg.includes('503') ||
+          errMsg.includes('504')
+        ) {
           console.log('[ProxyServer] Server error, retrying')
           await this.waitForRetry(retryDelay * (attempt + 1), signal)
           continue
@@ -994,7 +1113,11 @@ export class ProxyServer {
   }
 
   // 验证 API Key 并返回匹配的 Key（用于统计）
-  private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string } {
+  private validateApiKey(req: http.IncomingMessage): {
+    valid: boolean
+    apiKey?: import('./types').ApiKey
+    reason?: string
+  } {
     // 如果没有配置任何 API Key，则跳过验证
     const hasApiKeys = this.config.apiKeys && this.config.apiKeys.length > 0
     const hasLegacyKey = !!this.config.apiKey
@@ -1018,7 +1141,7 @@ export class ProxyServer {
 
     // 检查多 API Key
     if (hasApiKeys) {
-      const matchedKey = this.config.apiKeys!.find(k => k.enabled && k.key === providedKey)
+      const matchedKey = this.config.apiKeys!.find((k) => k.enabled && k.key === providedKey)
       if (matchedKey) {
         // 检查额度限制
         if (matchedKey.creditsLimit && matchedKey.usage.totalCredits >= matchedKey.creditsLimit) {
@@ -1037,14 +1160,21 @@ export class ProxyServer {
   }
 
   // 记录 API Key 用量
-  recordApiKeyUsage(apiKeyId: string, credits: number, inputTokens: number, outputTokens: number, model?: string, path?: string): void {
+  recordApiKeyUsage(
+    apiKeyId: string,
+    credits: number,
+    inputTokens: number,
+    outputTokens: number,
+    model?: string,
+    path?: string
+  ): void {
     if (!this.config.apiKeys) return
-    const apiKey = this.config.apiKeys.find(k => k.id === apiKeyId)
+    const apiKey = this.config.apiKeys.find((k) => k.id === apiKeyId)
     if (!apiKey) return
 
     const today = new Date().toISOString().split('T')[0]
     const now = Date.now()
-    
+
     // 更新总计
     apiKey.usage.totalRequests++
     apiKey.usage.totalCredits += credits
@@ -1118,7 +1248,7 @@ export class ProxyServer {
       if (!regex.test(requestedModel)) continue
 
       // 匹配成功，根据类型选择目标模型
-      const validTargets = rule.targetModels.filter(t => t.trim())
+      const validTargets = rule.targetModels.filter((t) => t.trim())
       if (validTargets.length === 0) continue
 
       let targetModel: string
@@ -1142,7 +1272,10 @@ export class ProxyServer {
         targetModel = validTargets[0]
       }
 
-      proxyLogger.info('ProxyServer', `Model mapping applied: ${requestedModel} -> ${targetModel} (rule: ${rule.name}, type: ${rule.type})`)
+      proxyLogger.info(
+        'ProxyServer',
+        `Model mapping applied: ${requestedModel} -> ${targetModel} (rule: ${rule.name}, type: ${rule.type})`
+      )
       return targetModel
     }
 
@@ -1157,7 +1290,9 @@ export class ProxyServer {
     const abortRequest = () => {
       if (!this.isStopping && res.writableEnded) return
       if (!controller.signal.aborted) {
-        controller.abort(new Error(this.isStopping ? 'Proxy server stopped' : 'Client disconnected'))
+        controller.abort(
+          new Error(this.isStopping ? 'Proxy server stopped' : 'Client disconnected')
+        )
       }
     }
     this.activeRequests.add(controller)
@@ -1184,11 +1319,17 @@ export class ProxyServer {
         if (!authResult.valid) {
           const errorMsg = authResult.reason || 'Invalid or missing API key'
           const statusCode = authResult.reason === 'Credits limit exceeded' ? 429 : 401
-          this.sendError(res, statusCode, errorMsg, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+          this.sendError(
+            res,
+            statusCode,
+            errorMsg,
+            this.isAnthropicPath(path) ? 'anthropic' : 'openai'
+          )
           return
         }
         // 将匹配的 API Key 存储到请求对象中，用于后续统计
-        ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey = authResult.apiKey
+        ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey =
+          authResult.apiKey
       }
 
       // 记录请求
@@ -1198,16 +1339,26 @@ export class ProxyServer {
 
       // 路由（移除查询参数）
       const pathWithoutQuery = path.split('?')[0]
-      
+
       if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
         await this.handleModels(res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/chat/completions' || pathWithoutQuery === '/chat/completions') {
+      } else if (
+        pathWithoutQuery === '/v1/chat/completions' ||
+        pathWithoutQuery === '/chat/completions'
+      ) {
         await this.handleOpenAIChat(req, res, controller.signal)
       } else if (pathWithoutQuery === '/v1/responses' || pathWithoutQuery === '/responses') {
         await this.handleOpenAIResponses(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/messages' || pathWithoutQuery === '/messages' || pathWithoutQuery === '/anthropic/v1/messages') {
+      } else if (
+        pathWithoutQuery === '/v1/messages' ||
+        pathWithoutQuery === '/messages' ||
+        pathWithoutQuery === '/anthropic/v1/messages'
+      ) {
         await this.handleClaudeMessages(req, res, controller.signal)
-      } else if (pathWithoutQuery === '/v1/messages/count_tokens' || pathWithoutQuery === '/messages/count_tokens') {
+      } else if (
+        pathWithoutQuery === '/v1/messages/count_tokens' ||
+        pathWithoutQuery === '/messages/count_tokens'
+      ) {
         // Claude Code token 计数端点 - 返回模拟响应
         await this.handleCountTokens(req, res, controller.signal)
       } else if (pathWithoutQuery === '/api/event_logging/batch') {
@@ -1236,7 +1387,12 @@ export class ProxyServer {
         return
       }
       console.error('[ProxyServer] Request error:', error)
-      this.sendError(res, 500, (error as Error).message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+      this.sendError(
+        res,
+        500,
+        (error as Error).message,
+        this.isAnthropicPath(path) ? 'anthropic' : 'openai'
+      )
       this.events.onError?.(error as Error)
     } finally {
       req.off('aborted', abortRequest)
@@ -1246,7 +1402,12 @@ export class ProxyServer {
   }
 
   // 管理 API 端点
-  private async handleAdminApi(req: http.IncomingMessage, res: http.ServerResponse, path: string, signal?: AbortSignal): Promise<void> {
+  private async handleAdminApi(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<void> {
     const method = req.method || 'GET'
 
     // 管理 API 需要 API Key 验证
@@ -1284,26 +1445,30 @@ export class ProxyServer {
   private handleAdminStats(res: http.ServerResponse): void {
     const stats = this.getStats()
     const accountStats: Record<string, unknown> = {}
-    stats.accountStats.forEach((v, k) => { accountStats[k] = v })
+    stats.accountStats.forEach((v, k) => {
+      accountStats[k] = v
+    })
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      totalRequests: stats.totalRequests,
-      successRequests: stats.successRequests,
-      failedRequests: stats.failedRequests,
-      totalTokens: stats.totalTokens,
-      inputTokens: stats.inputTokens,
-      outputTokens: stats.outputTokens,
-      uptime: Date.now() - stats.startTime,
-      startTime: stats.startTime,
-      accountStats,
-      recentRequests: stats.recentRequests.slice(-50)
-    }))
+    res.end(
+      JSON.stringify({
+        totalRequests: stats.totalRequests,
+        successRequests: stats.successRequests,
+        failedRequests: stats.failedRequests,
+        totalTokens: stats.totalTokens,
+        inputTokens: stats.inputTokens,
+        outputTokens: stats.outputTokens,
+        uptime: Date.now() - stats.startTime,
+        startTime: stats.startTime,
+        accountStats,
+        recentRequests: stats.recentRequests.slice(-50)
+      })
+    )
   }
 
   // 管理 API - 账号列表
   private handleAdminAccounts(res: http.ServerResponse): void {
-    const accounts = this.accountPool.getAllAccounts().map(acc => ({
+    const accounts = this.accountPool.getAllAccounts().map((acc) => ({
       id: acc.id,
       email: acc.email,
       isAvailable: acc.isAvailable !== false,
@@ -1315,11 +1480,13 @@ export class ProxyServer {
     }))
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      total: accounts.length,
-      available: accounts.filter(a => a.isAvailable).length,
-      accounts
-    }))
+    res.end(
+      JSON.stringify({
+        total: accounts.length,
+        available: accounts.filter((a) => a.isAvailable).length,
+        accounts
+      })
+    )
   }
 
   // 管理 API - 配置
@@ -1339,26 +1506,36 @@ export class ProxyServer {
   // 管理 API - 日志
   private handleAdminLogs(res: http.ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      recentRequests: this.stats.recentRequests.slice(-100)
-    }))
+    res.end(
+      JSON.stringify({
+        recentRequests: this.stats.recentRequests.slice(-100)
+      })
+    )
   }
 
   // 设置 CORS 头
   private setCorsHeaders(res: http.ServerResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch')
-    res.setHeader('Access-Control-Expose-Headers', 'x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens')
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch'
+    )
+    res.setHeader(
+      'Access-Control-Expose-Headers',
+      'x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens'
+    )
   }
 
   private isAnthropicPath(path: string): boolean {
     const pathWithoutQuery = path.split('?')[0]
-    return pathWithoutQuery === '/v1/messages'
-      || pathWithoutQuery === '/messages'
-      || pathWithoutQuery === '/anthropic/v1/messages'
-      || pathWithoutQuery === '/v1/messages/count_tokens'
-      || pathWithoutQuery === '/messages/count_tokens'
+    return (
+      pathWithoutQuery === '/v1/messages' ||
+      pathWithoutQuery === '/messages' ||
+      pathWithoutQuery === '/anthropic/v1/messages' ||
+      pathWithoutQuery === '/v1/messages/count_tokens' ||
+      pathWithoutQuery === '/messages/count_tokens'
+    )
   }
 
   private getAnthropicErrorType(status: number): string {
@@ -1370,7 +1547,17 @@ export class ProxyServer {
     return 'api_error'
   }
 
-  private buildClaudeUsage(usage: { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number }): { input_tokens?: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } {
+  private buildClaudeUsage(usage: {
+    inputTokens: number
+    outputTokens: number
+    cacheWriteTokens?: number
+    cacheReadTokens?: number
+  }): {
+    input_tokens?: number
+    output_tokens: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  } {
     const claudeUsage = {
       input_tokens: usage.inputTokens,
       output_tokens: usage.outputTokens
@@ -1391,39 +1578,69 @@ export class ProxyServer {
     }
     if (typeof value !== 'object') return 0
     const record = value as Record<string, unknown>
-    if (record.type === 'text' || record.type === 'input_text' || record.type === 'output_text') return this.estimateTokenCount(record.text) + 4
-    if (record.type === 'thinking') return this.estimateTokenCount(record.thinking) + this.estimateTokenCount(record.signature) + 4
+    if (record.type === 'text' || record.type === 'input_text' || record.type === 'output_text')
+      return this.estimateTokenCount(record.text) + 4
+    if (record.type === 'thinking')
+      return (
+        this.estimateTokenCount(record.thinking) + this.estimateTokenCount(record.signature) + 4
+      )
     if (record.type === 'redacted_thinking') return 8
     if (record.type === 'image' || record.type === 'input_image') return 170
-    if (record.type === 'document' || record.type === 'input_file') return this.estimateTokenCount(record.title) + this.estimateTokenCount(record.name) + this.estimateTokenCount(record.filename) + this.estimateTokenCount(record.source) + this.estimateTokenCount(record.file_data) + 120
-    if (record.type === 'tool_use') return this.estimateTokenCount(record.name) + this.estimateTokenCount(record.input) + 12
+    if (record.type === 'document' || record.type === 'input_file')
+      return (
+        this.estimateTokenCount(record.title) +
+        this.estimateTokenCount(record.name) +
+        this.estimateTokenCount(record.filename) +
+        this.estimateTokenCount(record.source) +
+        this.estimateTokenCount(record.file_data) +
+        120
+      )
+    if (record.type === 'tool_use')
+      return this.estimateTokenCount(record.name) + this.estimateTokenCount(record.input) + 12
     if (record.type === 'tool_result') return this.estimateTokenCount(record.content) + 8
-    if (typeof record.role === 'string' && 'content' in record) return this.estimateTokenCount(record.content) + 4
-    if (typeof record.name === 'string' && 'input_schema' in record) return this.estimateTokenCount(record.name) + this.estimateTokenCount(record.description) + this.estimateTokenCount(record.input_schema) + 32
-    return Object.entries(record).reduce<number>((total, [key, item]) => key === 'cache_control' ? total : total + this.estimateTokenCount(item), 0)
+    if (typeof record.role === 'string' && 'content' in record)
+      return this.estimateTokenCount(record.content) + 4
+    if (typeof record.name === 'string' && 'input_schema' in record)
+      return (
+        this.estimateTokenCount(record.name) +
+        this.estimateTokenCount(record.description) +
+        this.estimateTokenCount(record.input_schema) +
+        32
+      )
+    return Object.entries(record).reduce<number>(
+      (total, [key, item]) =>
+        key === 'cache_control' ? total : total + this.estimateTokenCount(item),
+      0
+    )
   }
 
   // 健康检查
   private handleHealth(res: http.ServerResponse): void {
     const stats = this.getStats()
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      status: 'ok',
-      version: '1.0.0',
-      accounts: this.accountPool.size,
-      availableAccounts: this.accountPool.availableCount,
-      stats: {
-        totalRequests: stats.totalRequests,
-        successRequests: stats.successRequests,
-        failedRequests: stats.failedRequests,
-        totalTokens: stats.totalTokens,
-        uptime: Date.now() - stats.startTime
-      }
-    }))
+    res.end(
+      JSON.stringify({
+        status: 'ok',
+        version: '1.0.0',
+        accounts: this.accountPool.size,
+        availableAccounts: this.accountPool.availableCount,
+        stats: {
+          totalRequests: stats.totalRequests,
+          successRequests: stats.successRequests,
+          failedRequests: stats.failedRequests,
+          totalTokens: stats.totalTokens,
+          uptime: Date.now() - stats.startTime
+        }
+      })
+    )
   }
 
   // Claude Code token 计数（模拟响应）
-  private async handleCountTokens(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
+  private async handleCountTokens(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    signal?: AbortSignal
+  ): Promise<void> {
     try {
       this.throwIfAborted(signal)
       const body = await this.readBody(req, signal)
@@ -1432,20 +1649,30 @@ export class ProxyServer {
       if (!Array.isArray(request.messages)) {
         throw new Error('count_tokens requires messages')
       }
-      const estimatedTokens = Math.max(1, this.estimateTokenCount(request.system) + this.estimateTokenCount(request.messages) + this.estimateTokenCount(request.tools))
-      
+      const estimatedTokens = Math.max(
+        1,
+        this.estimateTokenCount(request.system) +
+          this.estimateTokenCount(request.messages) +
+          this.estimateTokenCount(request.tools)
+      )
+
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ input_tokens: estimatedTokens }))
     } catch (error) {
       if (this.isAbortError(error, signal)) return
-      this.sendError(res, 400, error instanceof Error ? error.message : 'Invalid request body', 'anthropic')
+      this.sendError(
+        res,
+        400,
+        error instanceof Error ? error.message : 'Invalid request body',
+        'anthropic'
+      )
     }
   }
 
   // Gemini v1beta 模型列表
   private async handleGeminiModels(res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
     const result = await this.getAvailableModels(signal)
-    const geminiModels = result.models.map(m => ({
+    const geminiModels = result.models.map((m) => ({
       name: `models/${m.id}`,
       version: '001',
       displayName: m.name || m.id,
@@ -1460,11 +1687,17 @@ export class ProxyServer {
   }
 
   // Gemini v1beta generateContent / streamGenerateContent
-  private async handleGeminiRequest(req: http.IncomingMessage, res: http.ServerResponse, path: string, signal?: AbortSignal): Promise<void> {
+  private async handleGeminiRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<void> {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
     const geminiReq = JSON.parse(body)
-    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey })
+      .matchedApiKey
 
     // 解析路径: /v1beta/models/{model}:{method}
     const match = path.match(/\/v1beta\/models\/([^:]+):(\w+)/)
@@ -1478,7 +1711,9 @@ export class ProxyServer {
     // 将 Gemini 请求转为 OpenAI 格式
     const messages: OpenAIMessage[] = []
     if (geminiReq.systemInstruction?.parts) {
-      const sysText = geminiReq.systemInstruction.parts.map((p: { text?: string }) => p.text || '').join('\n')
+      const sysText = geminiReq.systemInstruction.parts
+        .map((p: { text?: string }) => p.text || '')
+        .join('\n')
       if (sysText) messages.push({ role: 'system', content: sysText })
     }
     for (const content of geminiReq.contents || []) {
@@ -1516,7 +1751,11 @@ export class ProxyServer {
 
       if (isStream) {
         // SSE 流式
-        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive'
+        })
         return new Promise<void>((resolve) => {
           callKiroApiStream(
             account as ProxyAccount,
@@ -1524,7 +1763,11 @@ export class ProxyServer {
             (text) => {
               if (signal?.aborted || this.isResponseClosed(res)) return
               if (text) {
-                const chunk = { candidates: [{ content: { parts: [{ text }], role: 'model' }, finishReason: null }] }
+                const chunk = {
+                  candidates: [
+                    { content: { parts: [{ text }], role: 'model' }, finishReason: null }
+                  ]
+                }
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`)
               }
             },
@@ -1533,7 +1776,16 @@ export class ProxyServer {
                 resolve()
                 return
               }
-              const finalChunk = { candidates: [{ content: { parts: [{ text: '' }], role: 'model' }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: usage.inputTokens, candidatesTokenCount: usage.outputTokens, totalTokenCount: usage.inputTokens + usage.outputTokens } }
+              const finalChunk = {
+                candidates: [
+                  { content: { parts: [{ text: '' }], role: 'model' }, finishReason: 'STOP' }
+                ],
+                usageMetadata: {
+                  promptTokenCount: usage.inputTokens,
+                  candidatesTokenCount: usage.outputTokens,
+                  totalTokenCount: usage.inputTokens + usage.outputTokens
+                }
+              }
               res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
               res.end()
               this.recordRequestSuccess()
@@ -1556,7 +1808,7 @@ export class ProxyServer {
             },
             signal,
             this.config.preferredEndpoint
-          ).catch(error => {
+          ).catch((error) => {
             if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
               res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`)
               res.end()
@@ -1572,10 +1824,21 @@ export class ProxyServer {
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({
-          candidates: [{ content: { parts: [{ text: result.content }], role: 'model' }, finishReason: 'STOP' }],
-          usageMetadata: { promptTokenCount: result.usage.inputTokens, candidatesTokenCount: result.usage.outputTokens, totalTokenCount: result.usage.inputTokens + result.usage.outputTokens }
-        }))
+        res.end(
+          JSON.stringify({
+            candidates: [
+              {
+                content: { parts: [{ text: result.content }], role: 'model' },
+                finishReason: 'STOP'
+              }
+            ],
+            usageMetadata: {
+              promptTokenCount: result.usage.inputTokens,
+              candidatesTokenCount: result.usage.outputTokens,
+              totalTokenCount: result.usage.inputTokens + result.usage.outputTokens
+            }
+          })
+        )
       }
     } catch (error) {
       this.handleApiError(res, account, error as Error, '/v1beta', modelId, startTime, signal)
@@ -1589,34 +1852,88 @@ export class ProxyServer {
   // 模型列表
   private async handleModels(res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
     const now = Date.now()
-    
+
     // Kiro 官方模型（与 UI 保持一致）
     const kiroOfficialModels = [
-      buildClientModel({ id: 'auto', created: now, ownedBy: 'kiro-api', description: 'Auto select best model' }),
-      buildClientModel({ id: 'claude-sonnet-4.5', created: now, ownedBy: 'kiro-api', description: 'The latest Claude Sonnet model' }),
-      buildClientModel({ id: 'claude-sonnet-4', created: now, ownedBy: 'kiro-api', description: 'Hybrid reasoning and coding' }),
-      buildClientModel({ id: 'claude-haiku-4.5', created: now, ownedBy: 'kiro-api', description: 'The latest Claude Haiku model' }),
-      buildClientModel({ id: 'claude-opus-4.5', created: now, ownedBy: 'kiro-api', description: 'The most powerful model' })
+      buildClientModel({
+        id: 'auto',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'Auto select best model'
+      }),
+      buildClientModel({
+        id: 'claude-sonnet-4.5',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'The latest Claude Sonnet model'
+      }),
+      buildClientModel({
+        id: 'claude-sonnet-4',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'Hybrid reasoning and coding'
+      }),
+      buildClientModel({
+        id: 'claude-haiku-4.5',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'The latest Claude Haiku model'
+      }),
+      buildClientModel({
+        id: 'claude-opus-4.5',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'The most powerful model'
+      })
     ]
 
     // 隐藏模型（未在官方 ListAvailableModels 中返回，但后端可能支持）
     const hiddenModels = [
-      buildClientModel({ id: 'claude-3.7-sonnet', created: now, ownedBy: 'kiro-api', description: 'Claude 3.7 Sonnet (hidden)', modelName: 'Claude 3.7 Sonnet', supportedInputTypes: ['TEXT', 'IMAGE'], maxInputTokens: 200000, maxOutputTokens: 64000 })
+      buildClientModel({
+        id: 'claude-3.7-sonnet',
+        created: now,
+        ownedBy: 'kiro-api',
+        description: 'Claude 3.7 Sonnet (hidden)',
+        modelName: 'Claude 3.7 Sonnet',
+        supportedInputTypes: ['TEXT', 'IMAGE'],
+        maxInputTokens: 200000,
+        maxOutputTokens: 64000
+      })
     ]
 
     // 预设模型（GPT 兼容别名）
     const presetModels = [
-      buildClientModel({ id: 'gpt-4o', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-4', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-4-turbo', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' }),
-      buildClientModel({ id: 'gpt-3.5-turbo', created: now, ownedBy: 'kiro-proxy', description: 'GPT-compatible alias for Kiro' })
+      buildClientModel({
+        id: 'gpt-4o',
+        created: now,
+        ownedBy: 'kiro-proxy',
+        description: 'GPT-compatible alias for Kiro'
+      }),
+      buildClientModel({
+        id: 'gpt-4',
+        created: now,
+        ownedBy: 'kiro-proxy',
+        description: 'GPT-compatible alias for Kiro'
+      }),
+      buildClientModel({
+        id: 'gpt-4-turbo',
+        created: now,
+        ownedBy: 'kiro-proxy',
+        description: 'GPT-compatible alias for Kiro'
+      }),
+      buildClientModel({
+        id: 'gpt-3.5-turbo',
+        created: now,
+        ownedBy: 'kiro-proxy',
+        description: 'GPT-compatible alias for Kiro'
+      })
     ]
 
     // 尝试从 Kiro API 获取动态模型
     let kiroModels: KiroModel[] = []
-    
+
     // 检查缓存
-    if (this.modelCache && (now - this.modelCache.timestamp) < this.MODEL_CACHE_TTL) {
+    if (this.modelCache && now - this.modelCache.timestamp < this.MODEL_CACHE_TTL) {
       kiroModels = this.modelCache.models
     } else {
       // 获取一个可用账号来请求模型列表
@@ -1636,26 +1953,28 @@ export class ProxyServer {
     }
 
     // 转换 Kiro 模型为 OpenAI 格式（保持原始 modelId）
-    const dynamicModels = kiroModels.map(m => buildClientModel({
-      id: m.modelId,
-      created: now,
-      ownedBy: 'kiro-api',
-      description: m.description,
-      modelName: m.modelName,
-      supportedInputTypes: m.supportedInputTypes,
-      maxInputTokens: m.tokenLimits?.maxInputTokens,
-      maxOutputTokens: m.tokenLimits?.maxOutputTokens,
-      rateMultiplier: m.rateMultiplier,
-      rateUnit: m.rateUnit,
-      promptCaching: m.promptCaching,
-      additionalModelRequestFieldsSchema: m.additionalModelRequestFieldsSchema,
-      modelProvider: m.modelProvider
-    }))
+    const dynamicModels = kiroModels.map((m) =>
+      buildClientModel({
+        id: m.modelId,
+        created: now,
+        ownedBy: 'kiro-api',
+        description: m.description,
+        modelName: m.modelName,
+        supportedInputTypes: m.supportedInputTypes,
+        maxInputTokens: m.tokenLimits?.maxInputTokens,
+        maxOutputTokens: m.tokenLimits?.maxOutputTokens,
+        rateMultiplier: m.rateMultiplier,
+        rateUnit: m.rateUnit,
+        promptCaching: m.promptCaching,
+        additionalModelRequestFieldsSchema: m.additionalModelRequestFieldsSchema,
+        modelProvider: m.modelProvider
+      })
+    )
 
     // 合并模型列表，去重
     const modelIds = new Set<string>()
     const allModels: ClientModel[] = []
-    
+
     // 1. 优先添加动态模型（从 API 获取的，包含真实 token limit / input types）
     for (const m of dynamicModels) {
       if (!modelIds.has(m.id)) {
@@ -1663,7 +1982,7 @@ export class ProxyServer {
         allModels.push(m)
       }
     }
-    
+
     // 2. 添加隐藏模型（未在官方 ListAvailableModels 中返回，但后端可能支持）
     for (const m of hiddenModels) {
       if (!modelIds.has(m.id)) {
@@ -1671,7 +1990,7 @@ export class ProxyServer {
         allModels.push(m)
       }
     }
-    
+
     // 3. 动态模型缺失时才添加静态兜底
     if (dynamicModels.length === 0) {
       for (const m of [...kiroOfficialModels, ...presetModels]) {
@@ -1688,11 +2007,16 @@ export class ProxyServer {
   }
 
   // 处理 OpenAI Chat Completions 请求
-  private async handleOpenAIChat(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
+  private async handleOpenAIChat(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    signal?: AbortSignal
+  ): Promise<void> {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
     const request: OpenAIChatRequest = JSON.parse(body)
-    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey })
+      .matchedApiKey
 
     // 应用模型映射
     request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
@@ -1704,14 +2028,28 @@ export class ProxyServer {
 
     let processedRequest: OpenAIChatRequest
     try {
-      processedRequest = await this.resolveOpenAIHttpImages(this.prepareOpenAIRequest(request), signal)
+      processedRequest = await this.resolveOpenAIHttpImages(
+        this.prepareOpenAIRequest(request),
+        signal
+      )
     } catch (error) {
       if (this.isAbortError(error, signal)) return
       this.recordRequestFailed()
       const message = error instanceof Error ? error.message : 'Invalid request'
       this.sendError(res, 400, message)
-      this.events.onResponse?.({ path: '/v1/chat/completions', model: request.model, status: 400, error: message })
-      this.recordRequest({ path: '/v1/chat/completions', model: request.model, responseTime: Date.now() - startTime, success: false, error: message })
+      this.events.onResponse?.({
+        path: '/v1/chat/completions',
+        model: request.model,
+        status: 400,
+        error: message
+      })
+      this.recordRequest({
+        path: '/v1/chat/completions',
+        model: request.model,
+        responseTime: Date.now() - startTime,
+        success: false,
+        error: message
+      })
       return
     }
 
@@ -1722,12 +2060,23 @@ export class ProxyServer {
     if (!account) {
       this.recordRequestFailed()
       const quotaStatus = this.accountPool.getQuotaStatus()
-      const errorMsg = quotaStatus.exhausted > 0 && quotaStatus.available === 0
-        ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
-        : 'No available accounts'
+      const errorMsg =
+        quotaStatus.exhausted > 0 && quotaStatus.available === 0
+          ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
+          : 'No available accounts'
       this.sendError(res, 503, errorMsg)
-      this.events.onResponse?.({ path: '/v1/chat/completions', model: request.model, status: 503, error: errorMsg })
-      this.recordRequest({ path: '/v1/chat/completions', model: request.model, success: false, error: errorMsg })
+      this.events.onResponse?.({
+        path: '/v1/chat/completions',
+        model: request.model,
+        status: 503,
+        error: errorMsg
+      })
+      this.recordRequest({
+        path: '/v1/chat/completions',
+        model: request.model,
+        success: false,
+        error: errorMsg
+      })
       return
     }
 
@@ -1746,7 +2095,7 @@ export class ProxyServer {
         const toolsCount = userInput?.userInputMessageContext?.tools?.length || 0
         const historyLength = kiroPayload.conversationState.history?.length || 0
         const hasImages = (userInput?.images?.length || 0) > 0
-        
+
         proxyLogger.info('ProxyServer', `OpenAI API: ${request.model}`, {
           model: request.model,
           stream: request.stream,
@@ -1760,7 +2109,19 @@ export class ProxyServer {
 
       if (request.stream) {
         // 流式响应（流式不使用重试机制，错误由流处理）
-        await this.handleOpenAIStream(res, account, kiroPayload, request.model, startTime, 0, undefined, false, matchedApiKey, toolNameRegistry, signal)
+        await this.handleOpenAIStream(
+          res,
+          account,
+          kiroPayload,
+          request.model,
+          startTime,
+          0,
+          undefined,
+          false,
+          matchedApiKey,
+          toolNameRegistry,
+          signal
+        )
       } else {
         // 非流式响应（带重试机制）
         const { result, account: usedAccount } = await this.callWithRetry(
@@ -1772,33 +2133,78 @@ export class ProxyServer {
           '/v1/chat/completions',
           signal
         )
-        const response = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
+        const response = kiroToOpenaiResponse(
+          result.content,
+          result.toolUses,
+          result.usage,
+          request.model,
+          toolNameRegistry,
+          result.reasoningContent
+        )
 
         this.throwIfResponseClosed(res, signal)
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
         this.stats.inputTokens += result.usage.inputTokens
         this.stats.outputTokens += result.usage.outputTokens
-        this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
+        this.accountPool.recordSuccess(
+          usedAccount.id,
+          result.usage.inputTokens + result.usage.outputTokens
+        )
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
-        this.events.onResponse?.({ path: '/v1/chat/completions', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
-        this.recordRequest({ path: '/v1/chat/completions', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
+        this.events.onResponse?.({
+          path: '/v1/chat/completions',
+          model: request.model,
+          status: 200,
+          tokens: result.usage.inputTokens + result.usage.outputTokens,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens
+        })
+        this.recordRequest({
+          path: '/v1/chat/completions',
+          model: request.model,
+          accountId: usedAccount.id,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          responseTime: Date.now() - startTime,
+          success: true
+        })
         // 记录 API Key 用量
         if (matchedApiKey) {
-          this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, request.model, '/v1/chat/completions')
+          this.recordApiKeyUsage(
+            matchedApiKey.id,
+            result.usage.credits || 0,
+            result.usage.inputTokens,
+            result.usage.outputTokens,
+            request.model,
+            '/v1/chat/completions'
+          )
         }
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/chat/completions', request.model, startTime, signal)
+      this.handleApiError(
+        res,
+        account,
+        error as Error,
+        '/v1/chat/completions',
+        request.model,
+        startTime,
+        signal
+      )
     }
   }
 
-  private async handleOpenAIResponses(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
+  private async handleOpenAIResponses(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    signal?: AbortSignal
+  ): Promise<void> {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
-    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey })
+      .matchedApiKey
     const startTime = Date.now()
 
     this.recordNewRequest()
@@ -1811,14 +2217,22 @@ export class ProxyServer {
       responseRequest = JSON.parse(body)
       chatRequest = responsesToOpenAIChat(responseRequest)
       chatRequest.model = this.applyModelMapping(chatRequest.model, matchedApiKey?.id)
-      processedRequest = await this.resolveOpenAIHttpImages(this.prepareOpenAIRequest(chatRequest), signal)
+      processedRequest = await this.resolveOpenAIHttpImages(
+        this.prepareOpenAIRequest(chatRequest),
+        signal
+      )
     } catch (error) {
       if (this.isAbortError(error, signal)) return
       this.recordRequestFailed()
       const message = error instanceof Error ? error.message : 'Invalid request'
       this.sendError(res, 400, message)
       this.events.onResponse?.({ path: '/v1/responses', status: 400, error: message })
-      this.recordRequest({ path: '/v1/responses', responseTime: Date.now() - startTime, success: false, error: message })
+      this.recordRequest({
+        path: '/v1/responses',
+        responseTime: Date.now() - startTime,
+        success: false,
+        error: message
+      })
       return
     }
 
@@ -1828,12 +2242,23 @@ export class ProxyServer {
     if (!account) {
       this.recordRequestFailed()
       const quotaStatus = this.accountPool.getQuotaStatus()
-      const errorMsg = quotaStatus.exhausted > 0 && quotaStatus.available === 0
-        ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
-        : 'No available accounts'
+      const errorMsg =
+        quotaStatus.exhausted > 0 && quotaStatus.available === 0
+          ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
+          : 'No available accounts'
       this.sendError(res, 503, errorMsg)
-      this.events.onResponse?.({ path: '/v1/responses', model: chatRequest.model, status: 503, error: errorMsg })
-      this.recordRequest({ path: '/v1/responses', model: chatRequest.model, success: false, error: 'No available accounts' })
+      this.events.onResponse?.({
+        path: '/v1/responses',
+        model: chatRequest.model,
+        status: 503,
+        error: errorMsg
+      })
+      this.recordRequest({
+        path: '/v1/responses',
+        model: chatRequest.model,
+        success: false,
+        error: 'No available accounts'
+      })
       return
     }
 
@@ -1845,10 +2270,12 @@ export class ProxyServer {
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive'
+          Connection: 'keep-alive'
         })
         const responseId = `resp_${uuidv4()}`
-        res.write(`event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: chatRequest.model, output: [] } })}\n\n`)
+        res.write(
+          `event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: chatRequest.model, output: [] } })}\n\n`
+        )
         const { result, account: usedAccount } = await this.callWithRetry(
           account,
           async (acc) => {
@@ -1858,44 +2285,97 @@ export class ProxyServer {
           '/v1/responses',
           signal
         )
-        const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
+        const chatResponse = kiroToOpenaiResponse(
+          result.content,
+          result.toolUses,
+          result.usage,
+          chatRequest.model,
+          toolNameRegistry,
+          result.reasoningContent
+        )
         this.throwIfResponseClosed(res, signal)
-        const response = openAIChatToResponsesResponse(chatResponse, responseRequest.previous_response_id)
+        const response = openAIChatToResponsesResponse(
+          chatResponse,
+          responseRequest.previous_response_id
+        )
         const streamedResponse = { ...response, id: responseId }
         streamedResponse.output.forEach((item, outputIndex) => {
           this.throwIfResponseClosed(res, signal)
-          res.write(`event: response.output_item.added\ndata: ${JSON.stringify({ type: 'response.output_item.added', output_index: outputIndex, item })}\n\n`)
+          res.write(
+            `event: response.output_item.added\ndata: ${JSON.stringify({ type: 'response.output_item.added', output_index: outputIndex, item })}\n\n`
+          )
           if (item.type === 'message') {
             item.content.forEach((part, contentIndex) => {
               this.throwIfResponseClosed(res, signal)
-              res.write(`event: response.content_part.added\ndata: ${JSON.stringify({ type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part: { type: part.type, text: '' } })}\n\n`)
+              res.write(
+                `event: response.content_part.added\ndata: ${JSON.stringify({ type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part: { type: part.type, text: '' } })}\n\n`
+              )
               if (part.text) {
-                res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.text })}\n\n`)
+                res.write(
+                  `event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.text })}\n\n`
+                )
               }
-              res.write(`event: response.output_text.done\ndata: ${JSON.stringify({ type: 'response.output_text.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, text: part.text })}\n\n`)
-              res.write(`event: response.content_part.done\ndata: ${JSON.stringify({ type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part })}\n\n`)
+              res.write(
+                `event: response.output_text.done\ndata: ${JSON.stringify({ type: 'response.output_text.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, text: part.text })}\n\n`
+              )
+              res.write(
+                `event: response.content_part.done\ndata: ${JSON.stringify({ type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part })}\n\n`
+              )
             })
           } else {
             if (item.arguments) {
-              res.write(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.delta', item_id: item.id, output_index: outputIndex, delta: item.arguments })}\n\n`)
+              res.write(
+                `event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.delta', item_id: item.id, output_index: outputIndex, delta: item.arguments })}\n\n`
+              )
             }
-            res.write(`event: response.function_call_arguments.done\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.done', item_id: item.id, output_index: outputIndex, arguments: item.arguments })}\n\n`)
+            res.write(
+              `event: response.function_call_arguments.done\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.done', item_id: item.id, output_index: outputIndex, arguments: item.arguments })}\n\n`
+            )
           }
           this.throwIfResponseClosed(res, signal)
-          res.write(`event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', output_index: outputIndex, item })}\n\n`)
+          res.write(
+            `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', output_index: outputIndex, item })}\n\n`
+          )
         })
         this.throwIfResponseClosed(res, signal)
-        res.write(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: streamedResponse })}\n\n`)
+        res.write(
+          `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: streamedResponse })}\n\n`
+        )
         res.end()
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
         this.stats.inputTokens += result.usage.inputTokens
         this.stats.outputTokens += result.usage.outputTokens
-        this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
-        this.events.onResponse?.({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
-        this.recordRequest({ path: '/v1/responses', model: chatRequest.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
+        this.accountPool.recordSuccess(
+          usedAccount.id,
+          result.usage.inputTokens + result.usage.outputTokens
+        )
+        this.events.onResponse?.({
+          path: '/v1/responses',
+          model: chatRequest.model,
+          status: 200,
+          tokens: result.usage.inputTokens + result.usage.outputTokens,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens
+        })
+        this.recordRequest({
+          path: '/v1/responses',
+          model: chatRequest.model,
+          accountId: usedAccount.id,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          responseTime: Date.now() - startTime,
+          success: true
+        })
         if (matchedApiKey) {
-          this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, chatRequest.model, '/v1/responses')
+          this.recordApiKeyUsage(
+            matchedApiKey.id,
+            result.usage.credits || 0,
+            result.usage.inputTokens,
+            result.usage.outputTokens,
+            chatRequest.model,
+            '/v1/responses'
+          )
         }
         return
       }
@@ -1909,25 +2389,68 @@ export class ProxyServer {
         '/v1/responses',
         signal
       )
-      const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
+      const chatResponse = kiroToOpenaiResponse(
+        result.content,
+        result.toolUses,
+        result.usage,
+        chatRequest.model,
+        toolNameRegistry,
+        result.reasoningContent
+      )
       this.throwIfResponseClosed(res, signal)
-      const response = openAIChatToResponsesResponse(chatResponse, responseRequest.previous_response_id)
+      const response = openAIChatToResponsesResponse(
+        chatResponse,
+        responseRequest.previous_response_id
+      )
 
       this.recordRequestSuccess()
       this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
       this.stats.inputTokens += result.usage.inputTokens
       this.stats.outputTokens += result.usage.outputTokens
-      this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
+      this.accountPool.recordSuccess(
+        usedAccount.id,
+        result.usage.inputTokens + result.usage.outputTokens
+      )
 
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(response))
-      this.events.onResponse?.({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
-      this.recordRequest({ path: '/v1/responses', model: chatRequest.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
+      this.events.onResponse?.({
+        path: '/v1/responses',
+        model: chatRequest.model,
+        status: 200,
+        tokens: result.usage.inputTokens + result.usage.outputTokens,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens
+      })
+      this.recordRequest({
+        path: '/v1/responses',
+        model: chatRequest.model,
+        accountId: usedAccount.id,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        responseTime: Date.now() - startTime,
+        success: true
+      })
       if (matchedApiKey) {
-        this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, chatRequest.model, '/v1/responses')
+        this.recordApiKeyUsage(
+          matchedApiKey.id,
+          result.usage.credits || 0,
+          result.usage.inputTokens,
+          result.usage.outputTokens,
+          chatRequest.model,
+          '/v1/responses'
+        )
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/responses', chatRequest.model, startTime, signal)
+      this.handleApiError(
+        res,
+        account,
+        error as Error,
+        '/v1/responses',
+        chatRequest.model,
+        startTime,
+        signal
+      )
     }
   }
 
@@ -1949,13 +2472,14 @@ export class ProxyServer {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        Connection: 'keep-alive'
       })
     }
 
     const id = streamId || `chatcmpl-${uuidv4()}`
     let toolCallIndex = 0
-    const pendingToolCalls: Map<string, { index: number; name: string; arguments: string }> = new Map()
+    const pendingToolCalls: Map<string, { index: number; name: string; arguments: string }> =
+      new Map()
     let collectedContent = ''
     // 发送初始 chunk（仅首轮）
     if (currentRound === 0) {
@@ -1990,15 +2514,17 @@ export class ProxyServer {
               arguments: JSON.stringify(toolUse.input)
             })
             const toolChunk = createOpenaiStreamChunk(id, model, {
-              tool_calls: [{
-                index: idx,
-                id: toolUse.toolUseId,
-                type: 'function',
-                function: {
-                  name: restoredToolUse.name,
-                  arguments: JSON.stringify(toolUse.input)
+              tool_calls: [
+                {
+                  index: idx,
+                  id: toolUse.toolUseId,
+                  type: 'function',
+                  function: {
+                    name: restoredToolUse.name,
+                    arguments: JSON.stringify(toolUse.input)
+                  }
                 }
-              }]
+              ]
             })
             res.write(`data: ${JSON.stringify(toolChunk)}\n\n`)
           }
@@ -2008,7 +2534,7 @@ export class ProxyServer {
             resolve()
             return
           }
-          
+
           this.recordRequestSuccess()
           this.stats.totalTokens += usage.inputTokens + usage.outputTokens
           this.stats.inputTokens += usage.inputTokens
@@ -2017,21 +2543,50 @@ export class ProxyServer {
           this.events.onCreditsUpdate?.(this.stats.totalCredits)
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
-          this.events.onResponse?.({ path: '/v1/chat/completions', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits })
-          this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: Date.now() - startTime, success: true })
+          this.events.onResponse?.({
+            path: '/v1/chat/completions',
+            model,
+            status: 200,
+            tokens: usage.inputTokens + usage.outputTokens,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            credits: usage.credits
+          })
+          this.recordRequest({
+            path: '/v1/chat/completions',
+            model,
+            accountId: account.id,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            credits: usage.credits,
+            responseTime: Date.now() - startTime,
+            success: true
+          })
           // 记录 API Key 用量
           if (matchedApiKey) {
-            this.recordApiKeyUsage(matchedApiKey.id, usage.credits || 0, usage.inputTokens, usage.outputTokens, model, '/v1/chat/completions')
+            this.recordApiKeyUsage(
+              matchedApiKey.id,
+              usage.credits || 0,
+              usage.inputTokens,
+              usage.outputTokens,
+              model,
+              '/v1/chat/completions'
+            )
           }
 
           // 检查是否需要自动继续
           const maxRounds = this.config.autoContinueRounds || 0
           const hasToolCalls = pendingToolCalls.size > 0
-          const shouldContinue = this.config.clientDrivenToolExecution !== true && this.config.enableServerSideToolAutoContinue === true && hasToolCalls && maxRounds > 0 && currentRound < maxRounds
+          const shouldContinue =
+            this.config.clientDrivenToolExecution !== true &&
+            this.config.enableServerSideToolAutoContinue === true &&
+            hasToolCalls &&
+            maxRounds > 0 &&
+            currentRound < maxRounds
 
           if (shouldContinue) {
             console.log(`[ProxyServer] Auto-continue round ${currentRound + 1}/${maxRounds}`)
-            
+
             // 构造继续请求：添加 assistant 响应、工具结果和继续消息
             const toolResults = Array.from(pendingToolCalls.entries()).map(([toolId]) => ({
               toolUseId: toolId,
@@ -2062,33 +2617,53 @@ export class ProxyServer {
                   {
                     assistantResponseMessage: {
                       content: collectedContent || 'I will continue with the task.',
-                      ...(pendingToolCalls.size > 0 ? {
-                        toolUses: Array.from(pendingToolCalls.entries()).map(([toolId, toolData]) => ({
-                          toolUseId: toolId,
-                          name: toolData.name,
-                          input: JSON.parse(toolData.arguments)
-                        }))
-                      } : {})
+                      ...(pendingToolCalls.size > 0
+                        ? {
+                            toolUses: Array.from(pendingToolCalls.entries()).map(
+                              ([toolId, toolData]) => ({
+                                toolUseId: toolId,
+                                name: toolData.name,
+                                input: JSON.parse(toolData.arguments)
+                              })
+                            )
+                          }
+                        : {})
                     }
                   },
                   // 添加工具结果（作为 user 消息）
-                  ...(toolResults.length > 0 ? [{
-                    userInputMessage: {
-                      content: 'Tool results provided.',
-                      modelId,
-                      origin,
-                      userInputMessageContext: {
-                        toolResults
-                      }
-                    }
-                  }] : [])
+                  ...(toolResults.length > 0
+                    ? [
+                        {
+                          userInputMessage: {
+                            content: 'Tool results provided.',
+                            modelId,
+                            origin,
+                            userInputMessageContext: {
+                              toolResults
+                            }
+                          }
+                        }
+                      ]
+                    : [])
                 ]
               }
             } as typeof kiroPayload
 
             // 递归调用继续流式输出
             try {
-              await this.handleOpenAIStream(res, account, continuePayload, model, startTime, currentRound + 1, id, true, matchedApiKey, toolNameRegistry, signal)
+              await this.handleOpenAIStream(
+                res,
+                account,
+                continuePayload,
+                model,
+                startTime,
+                currentRound + 1,
+                id,
+                true,
+                matchedApiKey,
+                toolNameRegistry,
+                signal
+              )
             } catch (error) {
               if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
                 resolve()
@@ -2137,14 +2712,30 @@ export class ProxyServer {
 
           this.recordRequestFailed()
           const errStatusCode = error.message.match(/(\d{3})/)?.[1]
-          this.accountPool.recordError(account.id, errStatusCode ? classifyError(parseInt(errStatusCode)) : ErrorType.RECOVERABLE, errStatusCode ? parseInt(errStatusCode) : undefined)
-          this.events.onResponse?.({ path: '/v1/chat/completions', model, status: 500, error: error.message })
-          this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
+          this.accountPool.recordError(
+            account.id,
+            errStatusCode ? classifyError(parseInt(errStatusCode)) : ErrorType.RECOVERABLE,
+            errStatusCode ? parseInt(errStatusCode) : undefined
+          )
+          this.events.onResponse?.({
+            path: '/v1/chat/completions',
+            model,
+            status: 500,
+            error: error.message
+          })
+          this.recordRequest({
+            path: '/v1/chat/completions',
+            model,
+            accountId: account.id,
+            responseTime: Date.now() - startTime,
+            success: false,
+            error: error.message
+          })
           resolve()
         },
         signal,
         this.config.preferredEndpoint
-      ).catch(error => {
+      ).catch((error) => {
         if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
           res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`)
           res.end()
@@ -2156,11 +2747,16 @@ export class ProxyServer {
   }
 
   // 处理 Claude Messages 请求
-  private async handleClaudeMessages(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
+  private async handleClaudeMessages(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    signal?: AbortSignal
+  ): Promise<void> {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
     const request: ClaudeRequest = JSON.parse(body)
-    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
+    const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey })
+      .matchedApiKey
 
     // 应用模型映射
     request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
@@ -2172,14 +2768,28 @@ export class ProxyServer {
 
     let processedRequest: ClaudeRequest
     try {
-      processedRequest = await this.resolveClaudeHttpImages(this.prepareClaudeRequest(request), signal)
+      processedRequest = await this.resolveClaudeHttpImages(
+        this.prepareClaudeRequest(request),
+        signal
+      )
     } catch (error) {
       if (this.isAbortError(error, signal)) return
       this.recordRequestFailed()
       const message = error instanceof Error ? error.message : 'Invalid request'
       this.sendError(res, 400, message, 'anthropic')
-      this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 400, error: message })
-      this.recordRequest({ path: '/v1/messages', model: request.model, responseTime: Date.now() - startTime, success: false, error: message })
+      this.events.onResponse?.({
+        path: '/v1/messages',
+        model: request.model,
+        status: 400,
+        error: message
+      })
+      this.recordRequest({
+        path: '/v1/messages',
+        model: request.model,
+        responseTime: Date.now() - startTime,
+        success: false,
+        error: message
+      })
       return
     }
 
@@ -2190,12 +2800,23 @@ export class ProxyServer {
     if (!account) {
       this.recordRequestFailed()
       const quotaStatus = this.accountPool.getQuotaStatus()
-      const errorMsg = quotaStatus.exhausted > 0 && quotaStatus.available === 0
-        ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
-        : 'No available accounts'
+      const errorMsg =
+        quotaStatus.exhausted > 0 && quotaStatus.available === 0
+          ? `All accounts quota exhausted (${quotaStatus.exhausted}/${quotaStatus.total} exhausted, ${quotaStatus.cooldown} in cooldown)`
+          : 'No available accounts'
       this.sendError(res, 503, errorMsg, 'anthropic')
-      this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 503, error: errorMsg })
-      this.recordRequest({ path: '/v1/messages', model: request.model, success: false, error: errorMsg })
+      this.events.onResponse?.({
+        path: '/v1/messages',
+        model: request.model,
+        status: 503,
+        error: errorMsg
+      })
+      this.recordRequest({
+        path: '/v1/messages',
+        model: request.model,
+        success: false,
+        error: errorMsg
+      })
       return
     }
 
@@ -2213,7 +2834,7 @@ export class ProxyServer {
         const toolsCount = userInput?.userInputMessageContext?.tools?.length || 0
         const historyLength = kiroPayload.conversationState.history?.length || 0
         const hasImages = (userInput?.images?.length || 0) > 0
-        
+
         proxyLogger.info('ProxyServer', `Claude API: ${request.model}`, {
           model: request.model,
           stream: request.stream,
@@ -2227,7 +2848,20 @@ export class ProxyServer {
 
       if (request.stream) {
         // 流式响应（流式不使用重试机制，错误由流处理）
-        await this.handleClaudeStream(res, account, kiroPayload, request.model, startTime, 0, undefined, false, 0, matchedApiKey, toolNameRegistry, signal)
+        await this.handleClaudeStream(
+          res,
+          account,
+          kiroPayload,
+          request.model,
+          startTime,
+          0,
+          undefined,
+          false,
+          0,
+          matchedApiKey,
+          toolNameRegistry,
+          signal
+        )
       } else {
         // 非流式响应（带重试机制）
         const { result, account: usedAccount } = await this.callWithRetry(
@@ -2239,22 +2873,55 @@ export class ProxyServer {
           '/v1/messages',
           signal
         )
-        const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
+        const response = kiroToClaudeResponse(
+          result.content,
+          result.toolUses,
+          result.usage,
+          request.model,
+          toolNameRegistry,
+          result.reasoningContent
+        )
 
         this.throwIfResponseClosed(res, signal)
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
         this.stats.inputTokens += result.usage.inputTokens
         this.stats.outputTokens += result.usage.outputTokens
-        this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
+        this.accountPool.recordSuccess(
+          usedAccount.id,
+          result.usage.inputTokens + result.usage.outputTokens
+        )
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
-        this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens })
-        this.recordRequest({ path: '/v1/messages', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, responseTime: Date.now() - startTime, success: true })
+        this.events.onResponse?.({
+          path: '/v1/messages',
+          model: request.model,
+          status: 200,
+          tokens: result.usage.inputTokens + result.usage.outputTokens,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens
+        })
+        this.recordRequest({
+          path: '/v1/messages',
+          model: request.model,
+          accountId: usedAccount.id,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          responseTime: Date.now() - startTime,
+          success: true
+        })
       }
     } catch (error) {
-      this.handleApiError(res, account, error as Error, '/v1/messages', request.model, startTime, signal)
+      this.handleApiError(
+        res,
+        account,
+        error as Error,
+        '/v1/messages',
+        request.model,
+        startTime,
+        signal
+      )
     }
   }
 
@@ -2277,7 +2944,7 @@ export class ProxyServer {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        Connection: 'keep-alive'
       })
     }
 
@@ -2287,7 +2954,8 @@ export class ProxyServer {
     let hasStartedThinkingBlock = false
     let pendingThinkingSignature: string | undefined
     let collectedContent = ''
-    const pendingToolCalls: Map<string, { name: string; input: Record<string, unknown> }> = new Map()
+    const pendingToolCalls: Map<string, { name: string; input: Record<string, unknown> }> =
+      new Map()
 
     const flushThinkingSignature = () => {
       if (!pendingThinkingSignature) return
@@ -2301,7 +2969,7 @@ export class ProxyServer {
 
     // 估算输入 tokens（基于 payload 大小）
     const estimatedInputTokens = Math.max(1, Math.round(JSON.stringify(kiroPayload).length / 3))
-    
+
     // 发送 message_start（仅首轮）
     if (currentRound === 0) {
       const messageStart = createClaudeStreamEvent('message_start', {
@@ -2329,7 +2997,9 @@ export class ProxyServer {
             if (isThinking) {
               // 原生 thinking 内容 → 输出为 Anthropic thinking block
               if (hasStartedTextBlock) {
-                const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+                const blockStop = createClaudeStreamEvent('content_block_stop', {
+                  index: currentBlockIndex
+                })
                 res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
                 currentBlockIndex++
                 hasStartedTextBlock = false
@@ -2354,7 +3024,9 @@ export class ProxyServer {
               // 普通文本内容
               if (hasStartedThinkingBlock) {
                 flushThinkingSignature()
-                const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+                const blockStop = createClaudeStreamEvent('content_block_stop', {
+                  index: currentBlockIndex
+                })
                 res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
                 currentBlockIndex++
                 hasStartedThinkingBlock = false
@@ -2389,14 +3061,18 @@ export class ProxyServer {
             const restoredToolUse = toolNameRegistry.restoreToolUse(toolUse)
             if (hasStartedThinkingBlock) {
               flushThinkingSignature()
-              const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+              const blockStop = createClaudeStreamEvent('content_block_stop', {
+                index: currentBlockIndex
+              })
               res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedThinkingBlock = false
             }
             // 结束之前的文本块
             if (hasStartedTextBlock) {
-              const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+              const blockStop = createClaudeStreamEvent('content_block_stop', {
+                index: currentBlockIndex
+              })
               res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
               currentBlockIndex++
               hasStartedTextBlock = false
@@ -2406,17 +3082,27 @@ export class ProxyServer {
             // 开始工具块
             const toolBlockStart = createClaudeStreamEvent('content_block_start', {
               index: currentBlockIndex,
-              content_block: { type: 'tool_use', id: toolUse.toolUseId, name: restoredToolUse.name, input: {} }
+              content_block: {
+                type: 'tool_use',
+                id: toolUse.toolUseId,
+                name: restoredToolUse.name,
+                input: {}
+              }
             })
             res.write(`event: content_block_start\ndata: ${JSON.stringify(toolBlockStart)}\n\n`)
             // 发送工具输入
             const toolDelta = createClaudeStreamEvent('content_block_delta', {
               index: currentBlockIndex,
-              delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUse.input) } as any
+              delta: {
+                type: 'input_json_delta',
+                partial_json: JSON.stringify(toolUse.input)
+              } as any
             })
             res.write(`event: content_block_delta\ndata: ${JSON.stringify(toolDelta)}\n\n`)
             // 结束工具块
-            const toolBlockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+            const toolBlockStop = createClaudeStreamEvent('content_block_stop', {
+              index: currentBlockIndex
+            })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(toolBlockStop)}\n\n`)
             currentBlockIndex++
           }
@@ -2428,7 +3114,9 @@ export class ProxyServer {
           }
           if (hasStartedThinkingBlock) {
             flushThinkingSignature()
-            const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+            const blockStop = createClaudeStreamEvent('content_block_stop', {
+              index: currentBlockIndex
+            })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
             hasStartedThinkingBlock = false
@@ -2436,7 +3124,9 @@ export class ProxyServer {
 
           // 结束最后的文本块
           if (hasStartedTextBlock) {
-            const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
+            const blockStop = createClaudeStreamEvent('content_block_stop', {
+              index: currentBlockIndex
+            })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
           }
@@ -2449,21 +3139,50 @@ export class ProxyServer {
           this.events.onCreditsUpdate?.(this.stats.totalCredits)
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
-          this.events.onResponse?.({ path: '/v1/messages', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits })
-          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: Date.now() - startTime, success: true })
+          this.events.onResponse?.({
+            path: '/v1/messages',
+            model,
+            status: 200,
+            tokens: usage.inputTokens + usage.outputTokens,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            credits: usage.credits
+          })
+          this.recordRequest({
+            path: '/v1/messages',
+            model,
+            accountId: account.id,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            credits: usage.credits,
+            responseTime: Date.now() - startTime,
+            success: true
+          })
           // 记录 API Key 用量
           if (matchedApiKey) {
-            this.recordApiKeyUsage(matchedApiKey.id, usage.credits || 0, usage.inputTokens, usage.outputTokens, model, '/v1/messages')
+            this.recordApiKeyUsage(
+              matchedApiKey.id,
+              usage.credits || 0,
+              usage.inputTokens,
+              usage.outputTokens,
+              model,
+              '/v1/messages'
+            )
           }
 
           // 检查是否需要自动继续
           const maxRounds = this.config.autoContinueRounds || 0
           const hasToolCalls = pendingToolCalls.size > 0
-          const shouldContinue = this.config.clientDrivenToolExecution !== true && this.config.enableServerSideToolAutoContinue === true && hasToolCalls && maxRounds > 0 && currentRound < maxRounds
+          const shouldContinue =
+            this.config.clientDrivenToolExecution !== true &&
+            this.config.enableServerSideToolAutoContinue === true &&
+            hasToolCalls &&
+            maxRounds > 0 &&
+            currentRound < maxRounds
 
           if (shouldContinue) {
             console.log(`[ProxyServer] Claude auto-continue round ${currentRound + 1}/${maxRounds}`)
-            
+
             // 构造继续请求
             const toolResults = Array.from(pendingToolCalls.entries()).map(([toolId]) => ({
               toolUseId: toolId,
@@ -2494,13 +3213,17 @@ export class ProxyServer {
                   {
                     assistantResponseMessage: {
                       content: collectedContent || 'I will continue with the task.',
-                      ...(pendingToolCalls.size > 0 ? {
-                        toolUses: Array.from(pendingToolCalls.entries()).map(([toolId, toolData]) => ({
-                          toolUseId: toolId,
-                          name: toolData.name,
-                          input: toolData.input
-                        }))
-                      } : {})
+                      ...(pendingToolCalls.size > 0
+                        ? {
+                            toolUses: Array.from(pendingToolCalls.entries()).map(
+                              ([toolId, toolData]) => ({
+                                toolUseId: toolId,
+                                name: toolData.name,
+                                input: toolData.input
+                              })
+                            )
+                          }
+                        : {})
                     }
                   }
                 ]
@@ -2508,7 +3231,20 @@ export class ProxyServer {
             } as typeof kiroPayload
 
             try {
-              await this.handleClaudeStream(res, account, continuePayload, model, startTime, currentRound + 1, id, true, currentBlockIndex, matchedApiKey, toolNameRegistry, signal)
+              await this.handleClaudeStream(
+                res,
+                account,
+                continuePayload,
+                model,
+                startTime,
+                currentRound + 1,
+                id,
+                true,
+                currentBlockIndex,
+                matchedApiKey,
+                toolNameRegistry,
+                signal
+              )
             } catch (error) {
               if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
                 resolve()
@@ -2546,14 +3282,30 @@ export class ProxyServer {
 
           this.recordRequestFailed()
           const errStatusCode2 = error.message.match(/(\d{3})/)?.[1]
-          this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
-          this.events.onResponse?.({ path: '/v1/messages', model, status: 500, error: error.message })
-          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
+          this.accountPool.recordError(
+            account.id,
+            errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE,
+            errStatusCode2 ? parseInt(errStatusCode2) : undefined
+          )
+          this.events.onResponse?.({
+            path: '/v1/messages',
+            model,
+            status: 500,
+            error: error.message
+          })
+          this.recordRequest({
+            path: '/v1/messages',
+            model,
+            accountId: account.id,
+            responseTime: Date.now() - startTime,
+            success: false,
+            error: error.message
+          })
           resolve()
         },
         signal,
         this.config.preferredEndpoint
-      ).catch(error => {
+      ).catch((error) => {
         if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
           const errorEvent = createClaudeStreamEvent('error', {
             error: { type: 'api_error', message: error.message }
@@ -2568,13 +3320,24 @@ export class ProxyServer {
   }
 
   // 处理 API 错误
-  private handleApiError(res: http.ServerResponse, account: { id: string }, error: Error, path: string, model?: string, startTime?: number, signal?: AbortSignal): void {
+  private handleApiError(
+    res: http.ServerResponse,
+    account: { id: string },
+    error: Error,
+    path: string,
+    model?: string,
+    startTime?: number,
+    signal?: AbortSignal
+  ): void {
     if (this.isAbortError(error, signal) || this.isResponseClosed(res)) return
     this.recordRequestFailed()
     const errCode = error.message.match(/(\d{3})/)?.[1]
     const parsedCode = errCode ? parseInt(errCode) : 500
     const errorType = classifyError(parsedCode)
-    const isAuthError = error.message.includes('401') || error.message.includes('403') || error.message.includes('Auth')
+    const isAuthError =
+      error.message.includes('401') ||
+      error.message.includes('403') ||
+      error.message.includes('Auth')
 
     this.accountPool.recordError(account.id, errorType, parsedCode)
 
@@ -2584,18 +3347,39 @@ export class ProxyServer {
     if (res.headersSent) {
       if (!this.isResponseClosed(res)) {
         if (path === '/v1/responses' || path === '/responses') {
-          res.write(`event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', error: { type: 'api_error', message: error.message } })}\n\n`)
+          res.write(
+            `event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', error: { type: 'api_error', message: error.message } })}\n\n`
+          )
         }
         res.end()
       }
       this.events.onResponse?.({ path, status: statusCode, error: error.message })
-      this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: error.message })
+      this.recordRequest({
+        path,
+        model,
+        accountId: account.id,
+        responseTime: startTime ? Date.now() - startTime : 0,
+        success: false,
+        error: error.message
+      })
       return
     }
 
-    this.sendError(res, statusCode, error.message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+    this.sendError(
+      res,
+      statusCode,
+      error.message,
+      this.isAnthropicPath(path) ? 'anthropic' : 'openai'
+    )
     this.events.onResponse?.({ path, status: statusCode, error: error.message })
-    this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: error.message })
+    this.recordRequest({
+      path,
+      model,
+      accountId: account.id,
+      responseTime: startTime ? Date.now() - startTime : 0,
+      success: false,
+      error: error.message
+    })
   }
 
   // 读取请求体
@@ -2609,7 +3393,7 @@ export class ProxyServer {
         req.off('aborted', onAborted)
         signal?.removeEventListener('abort', onAbort)
       }
-      const onData = (chunk: Buffer) => body += chunk
+      const onData = (chunk: Buffer) => (body += chunk)
       const onEnd = () => {
         cleanup()
         resolve(body)
@@ -2639,17 +3423,24 @@ export class ProxyServer {
   }
 
   // 发送错误响应
-  private sendError(res: http.ServerResponse, status: number, message: string, format: 'openai' | 'anthropic' = 'openai'): void {
+  private sendError(
+    res: http.ServerResponse,
+    status: number,
+    message: string,
+    format: 'openai' | 'anthropic' = 'openai'
+  ): void {
     if (res.writableEnded || res.destroyed) return
     res.writeHead(status, { 'Content-Type': 'application/json' })
     if (format === 'anthropic') {
-      res.end(JSON.stringify({
-        type: 'error',
-        error: {
-          type: this.getAnthropicErrorType(status),
-          message
-        }
-      }))
+      res.end(
+        JSON.stringify({
+          type: 'error',
+          error: {
+            type: this.getAnthropicErrorType(status),
+            message
+          }
+        })
+      )
       return
     }
     res.end(JSON.stringify({ error: { message, type: 'error', code: status } }))

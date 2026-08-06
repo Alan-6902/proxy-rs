@@ -61,24 +61,31 @@ export function sendConvoyStatus(
 }
 
 export function registerConvoyIpcHandlers(deps: ConvoyIpcDeps): void {
-  ipcMain.handle(CONVOY_CHANNEL.status, async (): Promise<IpcResult<ConvoySyncStatus & {
-    encryptionAvailable: boolean
-    config: ConvoySyncConfig
-  }>> => {
-    try {
-      const [status, persisted] = await Promise.all([
-        deps.getManager().buildStatus(),
-        loadConvoyState()
-      ])
-      return ok({
-        ...status,
-        encryptionAvailable: isConvoyStoreAvailable(),
-        config: persisted.config
-      })
-    } catch (err) {
-      return fail(err)
+  ipcMain.handle(
+    CONVOY_CHANNEL.status,
+    async (): Promise<
+      IpcResult<
+        ConvoySyncStatus & {
+          encryptionAvailable: boolean
+          config: ConvoySyncConfig
+        }
+      >
+    > => {
+      try {
+        const [status, persisted] = await Promise.all([
+          deps.getManager().buildStatus(),
+          loadConvoyState()
+        ])
+        return ok({
+          ...status,
+          encryptionAvailable: isConvoyStoreAvailable(),
+          config: persisted.config
+        })
+      } catch (err) {
+        return fail(err)
+      }
     }
-  })
+  )
 
   /**
    * 保存配置与登录 Key。convoyKey 省略表示保留原值；传空串表示清除。

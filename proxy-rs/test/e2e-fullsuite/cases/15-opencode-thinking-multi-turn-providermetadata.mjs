@@ -27,35 +27,38 @@ export default {
   title: 'opencode: 多轮 assistant.providerOptions.openaiCompatible 回传不报 schema 错',
   tags: ['openai', 'opencode', 'reasoning', 'multi-turn', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postOpenAI({
-      model: DEFAULT_OPENAI_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      providerOptions: {
-        openaiCompatible: {
-          reasoningEffort: 'low'
-        }
-      },
-      messages: [
-        { role: 'user', content: '请简单告诉我什么是质数.' },
-        {
-          role: 'assistant',
-          // opencode transform.ts 注入: 上一轮的 reasoning 文本走 providerOptions.openaiCompatible
-          // 而不是 message.reasoning_content / reasoning_text 顶层字段
-          providerOptions: {
-            openaiCompatible: {
-              reasoning_content: '用户问质数定义. 我应该用通俗语言解释.',
-              // 这两个字段是 ZephyrSail 上一轮 emitReasoningEnd 下发的, opencode 反注
-              signature: 'sig_e2e_test_truncated_for_validation',
-              thinking: 'sig_e2e_test_truncated_for_validation',
-              provider: 'anthropic'
-            }
-          },
-          content: '质数是只能被 1 和自身整除的自然数.'
+    const result = await postOpenAI(
+      {
+        model: DEFAULT_OPENAI_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        providerOptions: {
+          openaiCompatible: {
+            reasoningEffort: 'low'
+          }
         },
-        { role: 'user', content: '那 1 是不是质数?' }
-      ]
-    }, { base, token })
+        messages: [
+          { role: 'user', content: '请简单告诉我什么是质数.' },
+          {
+            role: 'assistant',
+            // opencode transform.ts 注入: 上一轮的 reasoning 文本走 providerOptions.openaiCompatible
+            // 而不是 message.reasoning_content / reasoning_text 顶层字段
+            providerOptions: {
+              openaiCompatible: {
+                reasoning_content: '用户问质数定义. 我应该用通俗语言解释.',
+                // 这两个字段是 ZephyrSail 上一轮 emitReasoningEnd 下发的, opencode 反注
+                signature: 'sig_e2e_test_truncated_for_validation',
+                thinking: 'sig_e2e_test_truncated_for_validation',
+                provider: 'anthropic'
+              }
+            },
+            content: '质数是只能被 1 和自身整除的自然数.'
+          },
+          { role: 'user', content: '那 1 是不是质数?' }
+        ]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'opencode-multi-turn-pm.response')

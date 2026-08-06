@@ -39,7 +39,7 @@ class ProxyLogger {
 
   configure(config: Partial<LoggerConfig>): void {
     this.config = { ...this.config, ...config }
-    
+
     if (this.config.enabled && !this.config.logDir) {
       // 默认日志目录
       this.config.logDir = path.join(app.getPath('userData'), 'logs', 'proxy')
@@ -85,9 +85,10 @@ class ProxyLogger {
     if (!this.config.logDir || !this.config.maxFiles) return
 
     try {
-      const files = fs.readdirSync(this.config.logDir)
-        .filter(f => f.startsWith('proxy-') && f.endsWith('.log'))
-        .map(f => ({
+      const files = fs
+        .readdirSync(this.config.logDir)
+        .filter((f) => f.startsWith('proxy-') && f.endsWith('.log'))
+        .map((f) => ({
           name: f,
           path: path.join(this.config.logDir!, f),
           time: fs.statSync(path.join(this.config.logDir!, f)).mtime.getTime()
@@ -140,7 +141,9 @@ class ProxyLogger {
     proxyLogStore.add(entry)
   }
 
-  get _isWriting(): boolean { return this.isWriting }
+  get _isWriting(): boolean {
+    return this.isWriting
+  }
 
   debug(category: string, message: string, data?: unknown): void {
     this.write({
@@ -183,12 +186,7 @@ class ProxyLogger {
   }
 
   // 记录请求
-  request(info: {
-    path: string
-    method: string
-    model?: string
-    accountId?: string
-  }): void {
+  request(info: { path: string; method: string; model?: string; accountId?: string }): void {
     this.info('Request', `${info.method} ${info.path}`, info)
   }
 
@@ -257,11 +255,13 @@ class ProxyLogStore {
         const data = fs.readFileSync(this.storePath, 'utf-8')
         const parsed = JSON.parse(data)
         // 验证并过滤有效的日志条目
-        const filtered = Array.isArray(parsed) ? parsed.filter((log: LogEntry) => {
-          if (!log.timestamp || isNaN(new Date(log.timestamp).getTime())) return false
-          if (!log.level || !log.category) return false
-          return true
-        }) : []
+        const filtered = Array.isArray(parsed)
+          ? parsed.filter((log: LogEntry) => {
+              if (!log.timestamp || isNaN(new Date(log.timestamp).getTime())) return false
+              if (!log.level || !log.category) return false
+              return true
+            })
+          : []
         // 加载时也施加上限，避免旧版本遗留的超大日志文件导致首次启动卡顿
         this.logs = filtered.length > this.maxLogs ? filtered.slice(-this.maxLogs) : filtered
         console.log(`[ProxyLogStore] Loaded ${this.logs.length} valid logs`)
@@ -294,7 +294,9 @@ class ProxyLogStore {
       if (this.writePending) {
         this.writePending = false
         // 用 microtask 而不是立即递归，避免栈深问题
-        queueMicrotask(() => { void this.save() })
+        queueMicrotask(() => {
+          void this.save()
+        })
       }
     }
   }
@@ -311,7 +313,11 @@ class ProxyLogStore {
 
     // 通知监听器（异常隔离）
     for (const listener of this.listeners) {
-      try { listener(entry) } catch { /* ignore */ }
+      try {
+        listener(entry)
+      } catch {
+        /* ignore */
+      }
     }
 
     // 节流调度异步保存
@@ -319,7 +325,7 @@ class ProxyLogStore {
   }
 
   private scheduleSave(): void {
-    if (this.saveTimer) return  // 已调度，等待 flush
+    if (this.saveTimer) return // 已调度，等待 flush
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null
       void this.save()
@@ -402,7 +408,7 @@ export function interceptConsole(): void {
       data = rest[0]
     } else if (rest.length > 1) {
       // 如果全是字符串，拼成一个；否则保持数组
-      const allStrings = rest.every(r => typeof r === 'string')
+      const allStrings = rest.every((r) => typeof r === 'string')
       data = allStrings ? (rest as string[]).join(' ') : rest
     }
     return { timestamp: new Date().toISOString(), level, category, message, data }

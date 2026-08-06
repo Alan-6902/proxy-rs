@@ -23,20 +23,63 @@ interface LocalNoticeInput {
   batchId?: string
 }
 
-const NOTICE_TEMPLATES: Record<LocalNoticeLanguage, Record<LocalNoticeKind, LocalNoticeTemplate>> = {
+const NOTICE_TEMPLATES: Record<
+  LocalNoticeLanguage,
+  Record<LocalNoticeKind, LocalNoticeTemplate>
+> = {
   zh: {
-    [LocalNoticeKind.AccountSuspended]: { title: '账号需要处理', body: '检测到一个账号已被暂停，请在账号管理中查看。', target: 'accounts' },
-    [LocalNoticeKind.ProxyAllAccountsExhausted]: { title: '反代账号暂不可用', body: '账号池当前没有可用账号，请在反代页面查看。', target: 'proxy' },
-    [LocalNoticeKind.TokenRefreshFailed]: { title: '账号刷新失败', body: '一个账号的后台凭据刷新失败，请在账号管理中查看。', target: 'accounts' },
-    [LocalNoticeKind.RegistrationRiskPaused]: { title: '注册任务已暂停', body: '检测到严重风控信号，批量注册已自动暂停。', target: 'register' },
-    [LocalNoticeKind.RegistrationBatchCompleted]: { title: '批量注册已完成', body: '一批注册任务已结束，请在注册页面查看结果。', target: 'register' }
+    [LocalNoticeKind.AccountSuspended]: {
+      title: '账号需要处理',
+      body: '检测到一个账号已被暂停，请在账号管理中查看。',
+      target: 'accounts'
+    },
+    [LocalNoticeKind.ProxyAllAccountsExhausted]: {
+      title: '反代账号暂不可用',
+      body: '账号池当前没有可用账号，请在反代页面查看。',
+      target: 'proxy'
+    },
+    [LocalNoticeKind.TokenRefreshFailed]: {
+      title: '账号刷新失败',
+      body: '一个账号的后台凭据刷新失败，请在账号管理中查看。',
+      target: 'accounts'
+    },
+    [LocalNoticeKind.RegistrationRiskPaused]: {
+      title: '注册任务已暂停',
+      body: '检测到严重风控信号，批量注册已自动暂停。',
+      target: 'register'
+    },
+    [LocalNoticeKind.RegistrationBatchCompleted]: {
+      title: '批量注册已完成',
+      body: '一批注册任务已结束，请在注册页面查看结果。',
+      target: 'register'
+    }
   },
   en: {
-    [LocalNoticeKind.AccountSuspended]: { title: 'Account needs attention', body: 'An account was suspended. Review it in Account Manager.', target: 'accounts' },
-    [LocalNoticeKind.ProxyAllAccountsExhausted]: { title: 'Proxy accounts unavailable', body: 'No proxy account is currently available. Review the proxy page.', target: 'proxy' },
-    [LocalNoticeKind.TokenRefreshFailed]: { title: 'Account refresh failed', body: 'A background credential refresh failed. Review it in Account Manager.', target: 'accounts' },
-    [LocalNoticeKind.RegistrationRiskPaused]: { title: 'Registration paused', body: 'A serious risk signal paused the registration batch.', target: 'register' },
-    [LocalNoticeKind.RegistrationBatchCompleted]: { title: 'Registration batch completed', body: 'A registration batch finished. Review the results on the registration page.', target: 'register' }
+    [LocalNoticeKind.AccountSuspended]: {
+      title: 'Account needs attention',
+      body: 'An account was suspended. Review it in Account Manager.',
+      target: 'accounts'
+    },
+    [LocalNoticeKind.ProxyAllAccountsExhausted]: {
+      title: 'Proxy accounts unavailable',
+      body: 'No proxy account is currently available. Review the proxy page.',
+      target: 'proxy'
+    },
+    [LocalNoticeKind.TokenRefreshFailed]: {
+      title: 'Account refresh failed',
+      body: 'A background credential refresh failed. Review it in Account Manager.',
+      target: 'accounts'
+    },
+    [LocalNoticeKind.RegistrationRiskPaused]: {
+      title: 'Registration paused',
+      body: 'A serious risk signal paused the registration batch.',
+      target: 'register'
+    },
+    [LocalNoticeKind.RegistrationBatchCompleted]: {
+      title: 'Registration batch completed',
+      body: 'A registration batch finished. Review the results on the registration page.',
+      target: 'register'
+    }
   }
 }
 
@@ -76,12 +119,18 @@ export class LocalNotificationService {
       const template = NOTICE_TEMPLATES[this.getLanguage()][kind]
       const notification = new Notification({ title: template.title, body: template.body })
       notification.on('click', () => {
-        try { this.onClick(template.target) } catch { /* notification clicks must not affect app flow */ }
+        try {
+          this.onClick(template.target)
+        } catch {
+          /* notification clicks must not affect app flow */
+        }
       })
       notification.show()
       this.lastSentAt.set(dedupKey, now)
       this.recentNoticeTimes.push(now)
-    } catch { /* system notification support can change at runtime */ }
+    } catch {
+      /* system notification support can change at runtime */
+    }
   }
 
   private getDedupKey(kind: LocalNoticeKind, input: LocalNoticeInput): string {

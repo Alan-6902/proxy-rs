@@ -6,6 +6,8 @@
 
 /** 默认 Anthropic 模型 — 与日志里 Claude Code 真实请求一致 */
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-4.7'
+/** Proxy RS 默认监听地址 */
+export const DEFAULT_PROXY_BASE_URL = 'http://127.0.0.1:5580'
 /** OpenAI 端点默认模型 — Cascade 内部 enum */
 export const DEFAULT_OPENAI_MODEL = 'claude-opus-4.7'
 
@@ -97,10 +99,13 @@ export const TOOL_SKILL = {
 
 /** 复刻 last-anthropic-request.json 的 system 片段 (3 个 text block + cache_control) */
 export const SYSTEM_CLAUDECODE_STYLE = [
-  { type: 'text', text: 'x-anthropic-billing-header: cc_version=test; cc_entrypoint=cli; cch=test;' },
   {
     type: 'text',
-    text: 'You are Claude Code, Anthropic\'s official CLI for Claude.',
+    text: 'x-anthropic-billing-header: cc_version=test; cc_entrypoint=cli; cch=test;'
+  },
+  {
+    type: 'text',
+    text: "You are Claude Code, Anthropic's official CLI for Claude.",
     cache_control: { type: 'ephemeral' }
   },
   {

@@ -1,6 +1,6 @@
 import { memo, useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import { Card, CardContent, Badge, Button } from '../ui'
+import { Card, CardContent, Badge, Button, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import type { Account, AccountTag, AccountGroup } from '@/types/account'
@@ -23,9 +23,11 @@ import {
   ExternalLink,
   CreditCard,
   Sparkles,
-  RotateCcw
+  RotateCcw,
+  Download
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ExportDialog } from './ExportDialog'
 
 // 解析 ARGB 颜色转换为 CSS rgba
 function toRgba(argbColor: string): string {
@@ -46,7 +48,7 @@ function toRgba(argbColor: string): string {
 // 生成标签光环样式
 function generateGlowStyle(tagColors: string[]): React.CSSProperties {
   if (tagColors.length === 0) return {}
-  
+
   if (tagColors.length === 1) {
     const color = toRgba(tagColors[0])
     const colorTransparent = color.replace('1)', '0.15)') // 降低阴影透明度
@@ -54,14 +56,16 @@ function generateGlowStyle(tagColors: string[]): React.CSSProperties {
       boxShadow: `0 0 0 1px ${color}, 0 4px 12px -2px ${colorTransparent}`
     }
   }
-  
+
   // 多个标签时，使用渐变边框效果
-  const gradientColors = tagColors.map((c, i) => {
-    const percent = (i / tagColors.length) * 100
-    const nextPercent = ((i + 1) / tagColors.length) * 100
-    return `${toRgba(c)} ${percent}%, ${toRgba(c)} ${nextPercent}%`
-  }).join(', ')
-  
+  const gradientColors = tagColors
+    .map((c, i) => {
+      const percent = (i / tagColors.length) * 100
+      const nextPercent = ((i + 1) / tagColors.length) * 100
+      return `${toRgba(c)} ${percent}%, ${toRgba(c)} ${nextPercent}%`
+    })
+    .join(', ')
+
   return {
     background: `linear-gradient(var(--card-solid), var(--card-solid)) padding-box, linear-gradient(135deg, ${gradientColors}) border-box`,
     border: '1.5px solid transparent',
@@ -82,7 +86,8 @@ interface AccountCardProps {
 const getSubscriptionColor = (type: string, title?: string): string => {
   const text = (title || type).toUpperCase()
   // KIRO PRO+ / PRO_PLUS - 紫色
-  if (text.includes('PRO+') || text.includes('PRO_PLUS') || text.includes('PROPLUS')) return 'bg-purple-500'
+  if (text.includes('PRO+') || text.includes('PRO_PLUS') || text.includes('PROPLUS'))
+    return 'bg-purple-500'
   // KIRO POWER - 金色
   if (text.includes('POWER')) return 'bg-amber-500'
   // KIRO PRO - 蓝色
@@ -119,25 +124,33 @@ function getDisplayName(account: Account): string {
 function formatTokenExpiry(expiresAt: number, isEn: boolean): string {
   const now = Date.now()
   const diff = expiresAt - now
-  
+
   if (diff <= 0) return isEn ? 'Expired' : '已过期'
-  
+
   const minutes = Math.floor(diff / (60 * 1000))
   const hours = Math.floor(diff / (60 * 60 * 1000))
-  
+
   if (minutes < 60) {
     return isEn ? `${minutes}m` : `${minutes} 分钟`
   } else if (hours < 24) {
     const remainingMinutes = minutes % 60
-    return isEn 
-      ? (remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`)
-      : (remainingMinutes > 0 ? `${hours} 小时 ${remainingMinutes} 分` : `${hours} 小时`)
+    return isEn
+      ? remainingMinutes > 0
+        ? `${hours}h ${remainingMinutes}m`
+        : `${hours}h`
+      : remainingMinutes > 0
+        ? `${hours} 小时 ${remainingMinutes} 分`
+        : `${hours} 小时`
   } else {
     const days = Math.floor(hours / 24)
     const remainingHours = hours % 24
     return isEn
-      ? (remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`)
-      : (remainingHours > 0 ? `${days} 天 ${remainingHours} 小时` : `${days} 天`)
+      ? remainingHours > 0
+        ? `${days}d ${remainingHours}h`
+        : `${days}d`
+      : remainingHours > 0
+        ? `${days} 天 ${remainingHours} 小时`
+        : `${days} 天`
   }
 }
 
@@ -180,7 +193,7 @@ export const AccountCard = memo(function AccountCard({
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
 
   // 手动解除封禁标记：调用后端 IPC → 清反代池 suspended + 清前端 lastError
-  const handleClearSuspended = async (e: React.MouseEvent) => {
+  const handleClearSuspended = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
     if (isClearingSuspended) return
     setIsClearingSuspended(true)
@@ -231,10 +244,19 @@ export const AccountCard = memo(function AccountCard({
     }
   }
 
-  const handleDelete = (): void => {
-    if (confirm(isEn ? `Delete account ${getDisplayName(account)}?` : `确定要删除账号 ${getDisplayName(account)} 吗？`)) {
-      removeAccount(account.id)
-    }
+  const handleDelete = async (): Promise<void> => {
+    const confirmed = await askConfirm({
+      title: isEn
+        ? `Delete account ${getDisplayName(account)}?`
+        : `确定要删除账号 ${getDisplayName(account)} 吗？`,
+      description: isEn
+        ? 'The account and its stored credentials are removed from this app. This cannot be undone.'
+        : '该账号及其保存的凭据将从本应用中移除，此操作不可恢复。',
+      confirmText: isEn ? 'Delete' : '删除',
+      cancelText: isEn ? 'Cancel' : '取消',
+      tone: 'danger'
+    })
+    if (confirmed) removeAccount(account.id)
   }
 
   const [copied, setCopied] = useState(false)
@@ -261,12 +283,12 @@ export const AccountCard = memo(function AccountCard({
 
   // 生成光环样式
   const glowStyle = useMemo(() => {
-    const tagColors = accountTags.map(t => t.color)
+    const tagColors = accountTags.map((t) => t.color)
     return generateGlowStyle(tagColors)
   }, [accountTags])
 
-  const isExpiringSoon = account.subscription.daysRemaining !== undefined &&
-                         account.subscription.daysRemaining <= 7
+  const isExpiringSoon =
+    account.subscription.daysRemaining !== undefined && account.subscription.daysRemaining <= 7
 
   // percentUsed 是 0~1 的小数（如 0.85 = 85%），超 1 表示 >100%
   const isHighUsage = account.usage.percentUsed > 0.8
@@ -274,29 +296,39 @@ export const AccountCard = memo(function AccountCard({
 
   // 检测账号是否被封禁/暂停（多种错误格式）
   const lowerError = account.lastError?.toLowerCase()
-  const isUnauthorized = !!lowerError && (
-    lowerError.includes('accountsuspendedexception') ||
-    lowerError.includes('account suspended') ||
-    lowerError.includes('temporarily_suspended') ||
-    lowerError.includes('temporarily suspended') ||
-    (lowerError.includes('user id is') && lowerError.includes('suspended')) ||
-    lowerError.includes('账户已封禁') ||
-    lowerError.includes('已封禁') ||
-    /\b423\b/.test(lowerError)
-  )
-  
+  const isUnauthorized =
+    !!lowerError &&
+    (lowerError.includes('accountsuspendedexception') ||
+      lowerError.includes('account suspended') ||
+      lowerError.includes('temporarily_suspended') ||
+      lowerError.includes('temporarily suspended') ||
+      (lowerError.includes('user id is') && lowerError.includes('suspended')) ||
+      lowerError.includes('账户已封禁') ||
+      lowerError.includes('已封禁') ||
+      /\b423\b/.test(lowerError))
+
   // 封禁详情弹窗状态
   const [showBanDialog, setShowBanDialog] = useState(false)
-  
+
+  // 单账号导出弹窗状态（复用批量导出对话框，格式选项一致）
+  const [showExportDialog, setShowExportDialog] = useState(false)
+
   // 订阅管理弹窗状态
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false)
   const [subscriptionLoading, setSubscriptionLoading] = useState(false)
-  const [subscriptionPlans, setSubscriptionPlans] = useState<Array<{
-    name: string
-    qSubscriptionType: string
-    description: { title: string; billingInterval: string; featureHeader: string; features: string[] }
-    pricing: { amount: number; currency: string }
-  }>>([])
+  const [subscriptionPlans, setSubscriptionPlans] = useState<
+    Array<{
+      name: string
+      qSubscriptionType: string
+      description: {
+        title: string
+        billingInterval: string
+        featureHeader: string
+        features: string[]
+      }
+      pricing: { amount: number; currency: string }
+    }>
+  >([])
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null)
   const [paymentLoading, setPaymentLoading] = useState(false)
 
@@ -311,11 +343,18 @@ export const AccountCard = memo(function AccountCard({
   const handleSubscriptionClick = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
     if (subscriptionLoading || !hasUpstreamKiroCredential(account.credentials)) return
-    
+
     setSubscriptionLoading(true)
     try {
       // 统一先获取可用订阅列表
-      const result = await window.api.accountGetSubscriptions(account.credentials, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptions(
+        account.credentials,
+        account.credentials?.region,
+        account.profileArn,
+        account.credentials?.provider || account.idp,
+        account.credentials?.authMethod,
+        account.id
+      )
       if (result.success && result.plans.length > 0) {
         setSubscriptionPlans(result.plans)
         // 检查是否是首次用户（当前订阅类型为 FREE 或无订阅）
@@ -336,12 +375,20 @@ export const AccountCard = memo(function AccountCard({
   // 选择订阅计划并获取支付链接
   const handleSelectPlan = async (planName: string): Promise<void> => {
     if (paymentLoading || !hasUpstreamKiroCredential(account.credentials)) return
-    
+
     setSelectedPlan(planName)
     setPaymentLoading(true)
     setSubscriptionError(null)
     try {
-      const result = await window.api.accountGetSubscriptionUrl(account.credentials, planName, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptionUrl(
+        account.credentials,
+        planName,
+        account.credentials?.region,
+        account.profileArn,
+        account.credentials?.provider || account.idp,
+        account.credentials?.authMethod,
+        account.id
+      )
       if (result.success && result.url) {
         // 自动复制链接到剪贴板
         await navigator.clipboard.writeText(result.url)
@@ -360,7 +407,7 @@ export const AccountCard = memo(function AccountCard({
         console.error('[AccountCard] Failed to get payment URL:', result.error)
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : (isEn ? 'Unknown error' : '未知错误')
+      const errorMsg = error instanceof Error ? error.message : isEn ? 'Unknown error' : '未知错误'
       setSubscriptionError(errorMsg)
       console.error('[AccountCard] Payment URL error:', error)
     } finally {
@@ -372,22 +419,31 @@ export const AccountCard = memo(function AccountCard({
   // 获取订阅管理链接（已有订阅用户）
   const handleManageSubscription = async (): Promise<void> => {
     if (paymentLoading || !hasUpstreamKiroCredential(account.credentials)) return
-    
+
     setPaymentLoading(true)
     setSubscriptionError(null)
     try {
-      const result = await window.api.accountGetSubscriptionUrl(account.credentials, undefined, account.credentials?.region, account.profileArn, account.credentials?.provider || account.idp, account.credentials?.authMethod, account.id)
+      const result = await window.api.accountGetSubscriptionUrl(
+        account.credentials,
+        undefined,
+        account.credentials?.region,
+        account.profileArn,
+        account.credentials?.provider || account.idp,
+        account.credentials?.authMethod,
+        account.id
+      )
       if (result.success && result.url) {
         setShowSubscriptionDialog(false)
         await window.api.openSubscriptionWindow(result.url)
       } else {
         // 显示错误信息
-        const errorMsg = result.error || (isEn ? 'Failed to get management URL' : '获取管理链接失败')
+        const errorMsg =
+          result.error || (isEn ? 'Failed to get management URL' : '获取管理链接失败')
         setSubscriptionError(errorMsg)
         console.error('[AccountCard] Failed to get management URL:', result.error)
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : (isEn ? 'Unknown error' : '未知错误')
+      const errorMsg = error instanceof Error ? error.message : isEn ? 'Unknown error' : '未知错误'
       setSubscriptionError(errorMsg)
       console.error('[AccountCard] Management URL error:', error)
     } finally {
@@ -396,24 +452,28 @@ export const AccountCard = memo(function AccountCard({
   }
 
   // 封禁状态样式（红色）- 优先级最高
-  const unauthorizedStyle: React.CSSProperties = isUnauthorized ? {
-    backgroundColor: 'var(--card-unauthorized-bg)',
-    borderColor: 'var(--card-unauthorized-border)',
-    boxShadow: `
+  const unauthorizedStyle: React.CSSProperties = isUnauthorized
+    ? {
+        backgroundColor: 'var(--card-unauthorized-bg)',
+        borderColor: 'var(--card-unauthorized-border)',
+        boxShadow: `
       0 0 0 1px var(--card-unauthorized-ring),
       0 4px 20px -2px var(--card-unauthorized-shadow),
       inset 0 0 20px var(--card-unauthorized-glow)
     `
-  } : {}
+      }
+    : {}
 
   // 当前使用的高级感样式 - 流光边框时仅保留外发光
-  const activeGlowStyle: React.CSSProperties = account.isActive ? {
-    boxShadow: '0 8px 24px -4px var(--card-active-shadow)'
-  } : {}
+  const activeGlowStyle: React.CSSProperties = account.isActive
+    ? {
+        boxShadow: '0 8px 24px -4px var(--card-active-shadow)'
+      }
+    : {}
 
   // 最终样式合并逻辑
   let finalStyle: React.CSSProperties = {}
-  
+
   if (account.isActive) {
     // 当前使用（包括封禁+当前使用）：流光边框 + 外发光，封禁通过角标显示
     finalStyle = { ...glowStyle, ...activeGlowStyle }
@@ -454,8 +514,8 @@ export const AccountCard = memo(function AccountCard({
       <CardContent className="p-4 flex-1 flex flex-col gap-3 overflow-hidden">
         {/* Header: Checkbox, Email/Nickname, Group */}
         <div className="flex gap-3 items-start">
-           {/* Checkbox */}
-           <div
+          {/* Checkbox */}
+          <div
             className={cn(
               'w-5 h-5 rounded border-2 flex items-center justify-center transition-colors flex-shrink-0 mt-0.5 cursor-pointer',
               isSelected
@@ -470,245 +530,329 @@ export const AccountCard = memo(function AccountCard({
             {isSelected && <Check className="h-3.5 w-3.5" />}
           </div>
 
-           <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2">
-                 <h3 
-                   className={cn(
-                     "font-semibold text-sm truncate cursor-pointer transition-colors",
-                     emailCopied ? "text-success" : "text-foreground/90 hover:text-primary"
-                   )}
-                   title={`${getDisplayName(account)} (${isEn ? 'Click to copy' : '点击复制'})`}
-                   onClick={(e) => {
-                     e.stopPropagation()
-                     const text = account.email || account.userId || ''
-                     if (text) {
-                       navigator.clipboard.writeText(text)
-                       setEmailCopied(true)
-                       setTimeout(() => setEmailCopied(false), 1500)
-                     }
-                   }}
-                 >{emailCopied ? (isEn ? 'Copied!' : '已复制!') : (account.email ? maskEmail(account.email) : getDisplayName(account))}</h3>
-                 {/* Status Badge */}
-                 <div className={cn(
-                    "text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0",
-                    isUnauthorized ? "text-destructive bg-destructive/10" :
-                    account.status === 'active' ? "text-success bg-success/10" :
-                    account.status === 'error' ? "text-destructive bg-destructive/10" :
-                    account.status === 'expired' ? "text-warning bg-warning/10" :
-                    account.status === 'refreshing' ? "text-primary bg-primary/10" :
-                    "text-muted-foreground bg-muted"
-                 )}>
-                    {account.status === 'refreshing' && <Loader2 className="h-3 w-3 animate-spin" />}
-                    {isUnauthorized && <AlertCircle className="h-3 w-3" />}
-                    {isUnauthorized ? (
-                      <span 
-                        className="cursor-pointer hover:underline" 
-                        onClick={(e) => { e.stopPropagation(); setShowBanDialog(true); }}
-                      >
-                        {isEn ? 'Banned' : '已封禁'}
-                      </span>
-                    ) : (isEn ? StatusLabelsEn : StatusLabelsZh)[account.status]}
-                 </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <h3
+                className={cn(
+                  'font-semibold text-sm truncate cursor-pointer transition-colors',
+                  emailCopied ? 'text-success' : 'text-foreground/90 hover:text-primary'
+                )}
+                title={`${getDisplayName(account)} (${isEn ? 'Click to copy' : '点击复制'})`}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const text = account.email || account.userId || ''
+                  if (text) {
+                    navigator.clipboard.writeText(text)
+                    setEmailCopied(true)
+                    setTimeout(() => setEmailCopied(false), 1500)
+                  }
+                }}
+              >
+                {emailCopied
+                  ? isEn
+                    ? 'Copied!'
+                    : '已复制!'
+                  : account.email
+                    ? maskEmail(account.email)
+                    : getDisplayName(account)}
+              </h3>
+              {/* Status Badge */}
+              <div
+                className={cn(
+                  'text-2xs font-medium px-2 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0',
+                  isUnauthorized
+                    ? 'text-destructive bg-destructive/10'
+                    : account.status === 'active'
+                      ? 'text-success bg-success/10'
+                      : account.status === 'error'
+                        ? 'text-destructive bg-destructive/10'
+                        : account.status === 'expired'
+                          ? 'text-warning bg-warning/10'
+                          : account.status === 'refreshing'
+                            ? 'text-primary bg-primary/10'
+                            : 'text-muted-foreground bg-muted'
+                )}
+              >
+                {account.status === 'refreshing' && <Loader2 className="h-3 w-3 animate-spin" />}
+                {isUnauthorized && <AlertCircle className="h-3 w-3" />}
+                {isUnauthorized ? (
+                  <span
+                    className="cursor-pointer hover:underline"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setShowBanDialog(true)
+                    }}
+                  >
+                    {isEn ? 'Banned' : '已封禁'}
+                  </span>
+                ) : (
+                  (isEn ? StatusLabelsEn : StatusLabelsZh)[account.status]
+                )}
               </div>
-              <div className="flex items-center gap-2 mt-1">
-                  {account.nickname && <span className="text-xs text-muted-foreground truncate">{maskNickname(account.nickname)}</span>}
-                  {accountGroup && (
-                    <span
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground flex items-center gap-1"
-                      style={{ color: accountGroup.color, backgroundColor: accountGroup.color + '15' }}
-                    >
-                      <FolderOpen className="w-3 h-3" /> {accountGroup.name}
-                    </span>
-                  )}
-              </div>
-           </div>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              {account.nickname && (
+                <span className="text-xs text-muted-foreground truncate">
+                  {maskNickname(account.nickname)}
+                </span>
+              )}
+              {accountGroup && (
+                <span
+                  className="text-2xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground flex items-center gap-1"
+                  style={{ color: accountGroup.color, backgroundColor: accountGroup.color + '15' }}
+                >
+                  <FolderOpen className="w-3 h-3" /> {accountGroup.name}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Badges Row */}
         <div className="flex items-center gap-2 flex-wrap">
-            <Badge 
+          <Badge
+            className={cn(
+              'text-white text-2xs h-5 px-2 border-0 cursor-pointer transition-all hover:opacity-80 hover:scale-105',
+              getSubscriptionColor(account.subscription.type, account.subscription.title),
+              subscriptionLoading && 'opacity-60 cursor-wait'
+            )}
+            onClick={handleSubscriptionClick}
+            title={isEn ? 'Click to manage subscription' : '点击管理订阅'}
+          >
+            {subscriptionLoading
+              ? isEn
+                ? 'Loading...'
+                : '加载中...'
+              : account.subscription.title || account.subscription.type}
+          </Badge>
+          <Badge
+            variant="outline"
+            className="text-2xs h-5 px-2 text-muted-foreground font-normal border-muted-foreground/30 bg-muted/30"
+          >
+            {account.idp}
+          </Badge>
+          {/* 代理绑定徽章：可点击解绑 */}
+          {boundProxy && (
+            <Badge
+              variant="outline"
               className={cn(
-                'text-white text-[10px] h-5 px-2 border-0 cursor-pointer transition-all hover:opacity-80 hover:scale-105',
-                getSubscriptionColor(account.subscription.type, account.subscription.title),
-                subscriptionLoading && 'opacity-60 cursor-wait'
+                'text-2xs h-5 px-1.5 font-normal cursor-pointer transition-colors group',
+                boundProxy.enabled && boundProxy.status !== 'dead'
+                  ? 'border-cyan-500/40 text-cyan-700 dark:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20'
+                  : 'border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-500/10'
               )}
-              onClick={handleSubscriptionClick}
-              title={isEn ? 'Click to manage subscription' : '点击管理订阅'}
-            >
-                {subscriptionLoading ? (isEn ? 'Loading...' : '加载中...') : (account.subscription.title || account.subscription.type)}
-            </Badge>
-            <Badge variant="outline" className="text-[10px] h-5 px-2 text-muted-foreground font-normal border-muted-foreground/30 bg-muted/30">
-                {account.idp}
-            </Badge>
-            {/* 代理绑定徽章：可点击解绑 */}
-            {boundProxy && (
-              <Badge
-                variant="outline"
-                className={cn(
-                  'text-[10px] h-5 px-1.5 font-normal cursor-pointer transition-colors group',
-                  boundProxy.enabled && boundProxy.status !== 'dead'
-                    ? 'border-cyan-500/40 text-cyan-700 dark:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20'
-                    : 'border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-500/10'
-                )}
-                title={`${isEn ? 'Bound proxy:' : '绑定代理：'} ${boundProxy.host}:${boundProxy.port}${boundProxy.label ? ` (${boundProxy.label})` : ''}\n${isEn ? 'Click to unbind' : '点击解绑'}`}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (confirm(isEn
+              title={`${isEn ? 'Bound proxy:' : '绑定代理：'} ${boundProxy.host}:${boundProxy.port}${boundProxy.label ? ` (${boundProxy.label})` : ''}\n${isEn ? 'Click to unbind' : '点击解绑'}`}
+              onClick={async (e) => {
+                e.stopPropagation()
+                const confirmed = await askConfirm({
+                  title: isEn
                     ? `Unbind ${account.email} from ${boundProxy.host}:${boundProxy.port}?`
-                    : `解绑 ${account.email} 与 ${boundProxy.host}:${boundProxy.port}？`
-                  )) {
-                    unbindAccountFromProxy(account.id)
-                  }
-                }}
-              >
-                <span className="opacity-70 group-hover:hidden">⇄</span>
-                <span className="hidden group-hover:inline">✕</span>
-                <span className="ml-0.5">{boundProxy.host.length > 15 ? boundProxy.host.slice(0, 12) + '…' : boundProxy.host}</span>
-              </Badge>
-            )}
-            {account.isActive && (
-              <Badge variant="default" className="ml-auto h-5 bg-success text-white border-0 hover:bg-success/90">
-                {isEn ? 'Active' : '当前使用'}
-              </Badge>
-            )}
+                    : `解绑 ${account.email} 与 ${boundProxy.host}:${boundProxy.port}？`,
+                  description: isEn
+                    ? 'Requests for this account will stop using the bound outbound proxy.'
+                    : '该账号的请求将不再经由此出口代理。',
+                  confirmText: isEn ? 'Unbind' : '解绑',
+                  cancelText: isEn ? 'Cancel' : '取消',
+                  tone: 'warning'
+                })
+                if (confirmed) {
+                  unbindAccountFromProxy(account.id)
+                }
+              }}
+            >
+              <span className="opacity-70 group-hover:hidden">⇄</span>
+              <span className="hidden group-hover:inline">✕</span>
+              <span className="ml-0.5">
+                {boundProxy.host.length > 15 ? boundProxy.host.slice(0, 12) + '…' : boundProxy.host}
+              </span>
+            </Badge>
+          )}
+          {account.isActive && (
+            <Badge
+              variant="default"
+              className="ml-auto h-5 bg-success text-white border-0 hover:bg-success/90"
+            >
+              {isEn ? 'Active' : '当前使用'}
+            </Badge>
+          )}
         </div>
 
         {/* Usage Section */}
         <div className="bg-muted/30 p-3 rounded-lg space-y-2 border border-border/50">
-            <div className="flex justify-between items-end text-xs">
-                <span className="text-muted-foreground font-medium">{isEn ? 'Usage' : '使用量'}</span>
-                <span className={cn(
-                  "font-mono font-medium tabular-nums",
-                  isCritical ? "text-destructive" : isHighUsage ? "text-warning" : "text-foreground"
-                )}>
-                   {(account.usage.percentUsed * 100).toFixed(usagePrecision ? 2 : 0)}%
-                   {isCritical && (
-                     <span className="ml-1.5 text-[10px] text-red-600 font-semibold">
-                       (+{((account.usage.percentUsed - 1) * 100).toFixed(usagePrecision ? 2 : 0)}% {isEn ? 'over' : '超'})
-                     </span>
-                   )}
+          <div className="flex justify-between items-end text-xs">
+            <span className="text-muted-foreground font-medium">{isEn ? 'Usage' : '使用量'}</span>
+            <span
+              className={cn(
+                'font-mono font-medium tabular-nums',
+                isCritical ? 'text-destructive' : isHighUsage ? 'text-warning' : 'text-foreground'
+              )}
+            >
+              {(account.usage.percentUsed * 100).toFixed(usagePrecision ? 2 : 0)}%
+              {isCritical && (
+                <span className="ml-1.5 text-2xs text-red-600 font-semibold">
+                  (+{((account.usage.percentUsed - 1) * 100).toFixed(usagePrecision ? 2 : 0)}%{' '}
+                  {isEn ? 'over' : '超'})
                 </span>
-            </div>
-            {/* 自定义双层进度条：超额时分段显示套餐内（amber）+ 超额（red） */}
-            {(() => {
-              const percent = account.usage.percentUsed
-              if (isCritical) {
-                // 套餐部分占总进度的比例 = 1 / percent
-                const planRatioPct = (1 / percent) * 100
-                return (
-                  <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
-                    <div
-                      className="absolute inset-y-0 left-0 bg-warning transition-all duration-300"
-                      style={{ width: `${planRatioPct}%` }}
-                    />
-                    <div
-                      className="absolute inset-y-0 right-0 bg-red-500 transition-all duration-300"
-                      style={{ left: `${planRatioPct}%` }}
-                    />
-                  </div>
-                )
-              }
+              )}
+            </span>
+          </div>
+          {/* 自定义双层进度条：超额时分段显示套餐内（amber）+ 超额（red） */}
+          {(() => {
+            const percent = account.usage.percentUsed
+            if (isCritical) {
+              // 套餐部分占总进度的比例 = 1 / percent
+              const planRatioPct = (1 / percent) * 100
               return (
                 <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
                   <div
-                    className={cn(
-                      "absolute inset-y-0 left-0 transition-all duration-300",
-                      isHighUsage ? "bg-warning" : "bg-primary"
-                    )}
-                    style={{ width: `${Math.min(percent * 100, 100)}%` }}
+                    className="absolute inset-y-0 left-0 bg-warning transition-all duration-300"
+                    style={{ width: `${planRatioPct}%` }}
+                  />
+                  <div
+                    className="absolute inset-y-0 right-0 bg-red-500 transition-all duration-300"
+                    style={{ left: `${planRatioPct}%` }}
                   />
                 </div>
               )
-            })()}
-            <div className="flex justify-between text-[10px] text-muted-foreground pt-0.5">
-                <span className="flex items-center gap-1.5">
-                  <span>{formatUsage(account.usage.current)} / {formatUsage(account.usage.limit)}</span>
-                  {isCritical && (
-                    <span className="text-red-600 font-semibold">
-                      (+{formatUsage(account.usage.current - account.usage.limit)})
-                    </span>
+            }
+            return (
+              <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
+                <div
+                  className={cn(
+                    'absolute inset-y-0 left-0 transition-all duration-300',
+                    isHighUsage ? 'bg-warning' : 'bg-primary'
                   )}
+                  style={{ width: `${Math.min(percent * 100, 100)}%` }}
+                />
+              </div>
+            )
+          })()}
+          <div className="flex justify-between text-2xs text-muted-foreground pt-0.5">
+            <span className="flex items-center gap-1.5">
+              <span>
+                {formatUsage(account.usage.current)} / {formatUsage(account.usage.limit)}
+              </span>
+              {isCritical && (
+                <span className="text-red-600 font-semibold">
+                  (+{formatUsage(account.usage.current - account.usage.limit)})
                 </span>
-                {account.usage.nextResetDate && (
-                  <span className="flex items-center gap-1">
-                    <Calendar className="h-3 w-3" />
-                     {(() => {
-                      const d = account.usage.nextResetDate as unknown
-                      try {
-                         return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0]
-                      } catch { return 'Unknown' }
-                    })()} {isEn ? 'reset' : '重置'}
-                  </span>
-                )}
-            </div>
+              )}
+            </span>
+            {account.usage.nextResetDate && (
+              <span className="flex items-center gap-1">
+                <Calendar className="h-3 w-3" />
+                {(() => {
+                  const d = account.usage.nextResetDate as unknown
+                  try {
+                    return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split(
+                      'T'
+                    )[0]
+                  } catch {
+                    return 'Unknown'
+                  }
+                })()}{' '}
+                {isEn ? 'reset' : '重置'}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Detailed Quotas - Compact list */}
-        <div className="space-y-1.5 min-h-0 overflow-y-auto pr-1 text-[10px] max-h-24">
-           {/* 基础额度 */}
-           {account.usage.baseLimit !== undefined && account.usage.baseLimit > 0 && (
-             <div className="flex items-center gap-2">
-               <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
-               <span className="text-muted-foreground">{isEn ? 'Base:' : '基础:'}</span>
-               <span className="font-medium">{formatUsage(account.usage.baseCurrent ?? 0)}/{formatUsage(account.usage.baseLimit)}</span>
-               {account.usage.nextResetDate && (
-                 <span className="text-muted-foreground/70 ml-auto">
-                   {isEn ? 'to' : '至'} {(() => {
-                      const d = account.usage.nextResetDate as unknown
-                      try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
-                   })()}
-                 </span>
-               )}
-             </div>
-           )}
-           {/* 试用额度 */}
-           {account.usage.freeTrialLimit !== undefined && account.usage.freeTrialLimit > 0 && (
-             <div className="flex items-center gap-2">
-               <div className="w-1.5 h-1.5 rounded-full bg-warning flex-shrink-0" />
-               <span className="text-muted-foreground">{isEn ? 'Trial:' : '试用:'}</span>
-               <span className="font-medium">{formatUsage(account.usage.freeTrialCurrent ?? 0)}/{formatUsage(account.usage.freeTrialLimit)}</span>
-               {account.usage.freeTrialExpiry && (
-                 <span className="text-muted-foreground/70 ml-auto">
-                   {isEn ? 'to' : '至'} {(() => {
-                      const d = account.usage.freeTrialExpiry as unknown
-                      try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
-                   })()}
-                 </span>
-               )}
-             </div>
-           )}
-           {/* 奖励额度 */}
-           {account.usage.bonuses?.map((bonus) => (
-             <div key={bonus.code} className="flex items-center gap-2">
-               <div className="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0" />
-               <span className="text-muted-foreground truncate max-w-[80px]" title={bonus.name}>{bonus.name}:</span>
-               <span className="font-medium">{formatUsage(bonus.current)}/{formatUsage(bonus.limit)}</span>
-               {bonus.expiresAt && (
-                 <span className="text-muted-foreground/70 ml-auto">
-                   {isEn ? 'to' : '至'} {(() => {
-                      const d = bonus.expiresAt as unknown
-                      try { return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0] } catch { return '' }
-                   })()}
-                 </span>
-               )}
-             </div>
-           ))}
+        <div className="space-y-1.5 min-h-0 overflow-y-auto pr-1 text-2xs max-h-24">
+          {/* 基础额度 */}
+          {account.usage.baseLimit !== undefined && account.usage.baseLimit > 0 && (
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
+              <span className="text-muted-foreground">{isEn ? 'Base:' : '基础:'}</span>
+              <span className="font-medium">
+                {formatUsage(account.usage.baseCurrent ?? 0)}/{formatUsage(account.usage.baseLimit)}
+              </span>
+              {account.usage.nextResetDate && (
+                <span className="text-muted-foreground/70 ml-auto">
+                  {isEn ? 'to' : '至'}{' '}
+                  {(() => {
+                    const d = account.usage.nextResetDate as unknown
+                    try {
+                      return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split(
+                        'T'
+                      )[0]
+                    } catch {
+                      return ''
+                    }
+                  })()}
+                </span>
+              )}
+            </div>
+          )}
+          {/* 试用额度 */}
+          {account.usage.freeTrialLimit !== undefined && account.usage.freeTrialLimit > 0 && (
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-warning flex-shrink-0" />
+              <span className="text-muted-foreground">{isEn ? 'Trial:' : '试用:'}</span>
+              <span className="font-medium">
+                {formatUsage(account.usage.freeTrialCurrent ?? 0)}/
+                {formatUsage(account.usage.freeTrialLimit)}
+              </span>
+              {account.usage.freeTrialExpiry && (
+                <span className="text-muted-foreground/70 ml-auto">
+                  {isEn ? 'to' : '至'}{' '}
+                  {(() => {
+                    const d = account.usage.freeTrialExpiry as unknown
+                    try {
+                      return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split(
+                        'T'
+                      )[0]
+                    } catch {
+                      return ''
+                    }
+                  })()}
+                </span>
+              )}
+            </div>
+          )}
+          {/* 奖励额度 */}
+          {account.usage.bonuses?.map((bonus) => (
+            <div key={bonus.code} className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0" />
+              <span className="text-muted-foreground truncate max-w-[80px]" title={bonus.name}>
+                {bonus.name}:
+              </span>
+              <span className="font-medium">
+                {formatUsage(bonus.current)}/{formatUsage(bonus.limit)}
+              </span>
+              {bonus.expiresAt && (
+                <span className="text-muted-foreground/70 ml-auto">
+                  {isEn ? 'to' : '至'}{' '}
+                  {(() => {
+                    const d = bonus.expiresAt as unknown
+                    try {
+                      return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split(
+                        'T'
+                      )[0]
+                    } catch {
+                      return ''
+                    }
+                  })()}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
-        
+
         {/* Tags - placed before footer */}
         {accountTags.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-auto pt-2">
             {accountTags.slice(0, 4).map((tag) => (
               <span
                 key={tag.id}
-                className="px-1.5 py-0.5 text-[10px] rounded-sm text-white font-medium shadow-sm"
+                className="px-1.5 py-0.5 text-2xs rounded-sm text-white font-medium shadow-sm"
                 style={{ backgroundColor: toRgba(tag.color) }}
               >
                 {tag.name}
               </span>
             ))}
-             {accountTags.length > 4 && (
-              <span className="px-1.5 py-0.5 text-[10px] text-muted-foreground bg-muted rounded-sm">
+            {accountTags.length > 4 && (
+              <span className="px-1.5 py-0.5 text-2xs text-muted-foreground bg-muted rounded-sm">
                 +{accountTags.length - 4}
               </span>
             )}
@@ -717,250 +861,449 @@ export const AccountCard = memo(function AccountCard({
 
         {/* Footer Actions */}
         <div className="pt-3 border-t flex items-center justify-between mt-auto gap-2 shrink-0">
-            {/* Left: Token expiry info */}
-            <div className="text-[10px] text-muted-foreground flex flex-col leading-tight gap-0.5">
-                <div className="flex items-center gap-1">
-                   <Clock className="h-3 w-3" />
-                   <span className={isExpiringSoon ? "text-warning font-medium" : ""}>
-                      {account.subscription.daysRemaining !== undefined ? (isEn ? `${account.subscription.daysRemaining}d left` : `剩 ${account.subscription.daysRemaining} 天`) : '-'}
-                   </span>
-                </div>
-                <div className="flex items-center gap-1" title={account.credentials.expiresAt ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN') : (isEn ? 'Unknown' : '未知')}>
-                   <KeyRound className="h-3 w-3" />
-                   <span className={account.credentials.expiresAt && account.credentials.expiresAt - Date.now() < 5 * 60 * 1000 ? "text-red-500 font-medium" : ""}>
-                      Token: {account.credentials.expiresAt ? formatTokenExpiry(account.credentials.expiresAt, isEn) : '-'}
-                   </span>
-                </div>
+          {/* Left: Token expiry info */}
+          <div className="text-2xs text-muted-foreground flex flex-col leading-tight gap-0.5">
+            <div className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              <span className={isExpiringSoon ? 'text-warning font-medium' : ''}>
+                {account.subscription.daysRemaining !== undefined
+                  ? isEn
+                    ? `${account.subscription.daysRemaining}d left`
+                    : `剩 ${account.subscription.daysRemaining} 天`
+                  : '-'}
+              </span>
             </div>
-
-            {/* Right: Actions */}
-            <div className="flex items-center gap-0.5">
-               {!account.isActive && (
-                 <Button
-                   size="icon"
-                   variant="ghost"
-                   className="h-7 w-7 hover:bg-primary/10 hover:text-primary transition-colors"
-                   onClick={(e) => { e.stopPropagation(); handleSwitch() }}
-                   title={isEn ? 'Switch to this account' : '切换到此账号'}
-                 >
-                   <Power className="h-3.5 w-3.5" />
-                 </Button>
-               )}
-               
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleRefresh() }} disabled={account.status === 'refreshing'} title={isEn ? 'Check account info' : '检查账户信息（用量、订阅、封禁状态）'}>
-                  <RefreshCw className={cn("h-3.5 w-3.5", account.status === 'refreshing' && "animate-spin")} />
-               </Button>
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleRefreshToken() }} disabled={isRefreshingToken || !canRefreshUpstreamCredential(account.credentials)} title={isEn ? 'Refresh Token' : '刷新 Token（仅刷新访问令牌）'}>
-                  <KeyRound className={cn("h-3.5 w-3.5", isRefreshingToken && "animate-pulse")} />
-               </Button>
-               
-               <Button size="icon" variant="ghost" className={cn("h-7 w-7 text-muted-foreground hover:text-foreground", copied && "text-success")} onClick={(e) => { e.stopPropagation(); handleCopyCredentials() }} title={isEn ? 'Copy credentials' : '复制凭证'}>
-                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-               </Button>
-
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); onShowDetail() }} title={isEn ? 'Details' : '详情'}>
-                  <Info className="h-3.5 w-3.5" />
-               </Button>
-               
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); onEdit() }} title={isEn ? 'Edit' : '编辑'}>
-                  <Edit className="h-3.5 w-3.5" />
-               </Button>
-               
-               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors" onClick={(e) => { e.stopPropagation(); handleDelete() }} title={isEn ? 'Delete' : '删除'}>
-                  <Trash2 className="h-3.5 w-3.5" />
-               </Button>
+            <div
+              className="flex items-center gap-1"
+              title={
+                account.credentials.expiresAt
+                  ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN')
+                  : isEn
+                    ? 'Unknown'
+                    : '未知'
+              }
+            >
+              <KeyRound className="h-3 w-3" />
+              <span
+                className={
+                  account.credentials.expiresAt &&
+                  account.credentials.expiresAt - Date.now() < 5 * 60 * 1000
+                    ? 'text-red-500 font-medium'
+                    : ''
+                }
+              >
+                Token:{' '}
+                {account.credentials.expiresAt
+                  ? formatTokenExpiry(account.credentials.expiresAt, isEn)
+                  : '-'}
+              </span>
             </div>
+          </div>
+
+          {/* Right: Actions */}
+          <div className="flex items-center gap-0.5">
+            {!account.isActive && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 hover:bg-primary/10 hover:text-primary transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleSwitch()
+                }}
+                title={isEn ? 'Switch to this account' : '切换到此账号'}
+              >
+                <Power className="h-3.5 w-3.5" />
+              </Button>
+            )}
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation()
+                handleRefresh()
+              }}
+              disabled={account.status === 'refreshing'}
+              title={isEn ? 'Check account info' : '检查账户信息（用量、订阅、封禁状态）'}
+            >
+              <RefreshCw
+                className={cn('h-3.5 w-3.5', account.status === 'refreshing' && 'animate-spin')}
+              />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation()
+                handleRefreshToken()
+              }}
+              disabled={isRefreshingToken || !canRefreshUpstreamCredential(account.credentials)}
+              title={isEn ? 'Refresh Token' : '刷新 Token（仅刷新访问令牌）'}
+            >
+              <KeyRound className={cn('h-3.5 w-3.5', isRefreshingToken && 'animate-pulse')} />
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className={cn(
+                'h-7 w-7 text-muted-foreground hover:text-foreground',
+                copied && 'text-success'
+              )}
+              onClick={(e) => {
+                e.stopPropagation()
+                handleCopyCredentials()
+              }}
+              title={isEn ? 'Copy credentials' : '复制凭证'}
+            >
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowExportDialog(true)
+              }}
+              title={isEn ? 'Export this account' : '导出该账号'}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation()
+                onShowDetail()
+              }}
+              title={isEn ? 'Details' : '详情'}
+            >
+              <Info className="h-3.5 w-3.5" />
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation()
+                onEdit()
+              }}
+              title={isEn ? 'Edit' : '编辑'}
+            >
+              <Edit className="h-3.5 w-3.5" />
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors"
+              onClick={(e) => {
+                e.stopPropagation()
+                handleDelete()
+              }}
+              title={isEn ? 'Delete' : '删除'}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
 
         {/* Error Message (Non-banned) */}
         {account.lastError && !isUnauthorized && (
-          <div className="bg-red-50 text-red-600 text-[10px] p-1.5 rounded flex items-center gap-1.5 truncate mt-1" title={account.lastError}>
-             <AlertTriangle className="h-3 w-3 shrink-0" />
-             <span className="truncate">{account.lastError}</span>
+          <div
+            className="bg-red-50 text-red-600 text-2xs p-1.5 rounded flex items-center gap-1.5 truncate mt-1"
+            title={account.lastError}
+          >
+            <AlertTriangle className="h-3 w-3 shrink-0" />
+            <span className="truncate">{account.lastError}</span>
           </div>
         )}
       </CardContent>
 
       {/* 封禁详情弹窗 */}
-      {showBanDialog && isUnauthorized && createPortal(
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setShowBanDialog(false)} />
-          <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-lg m-4 animate-in fade-in zoom-in-95 duration-200 border overflow-hidden">
-            <div className="p-4 border-b flex items-center justify-between bg-red-50 dark:bg-red-900/20">
-              <div className="flex items-center gap-2 text-red-600 dark:text-red-400">
-                <AlertCircle className="h-5 w-5" />
-                <span className="font-bold">{isEn ? 'Account Suspended' : '账户已封禁'}</span>
+      {showBanDialog &&
+        isUnauthorized &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/50" onClick={() => setShowBanDialog(false)} />
+            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-lg m-4 animate-in fade-in zoom-in-95 duration-200 border overflow-hidden">
+              <div className="p-4 border-b flex items-center justify-between bg-red-50 dark:bg-red-900/20">
+                <div className="flex items-center gap-2 text-red-600 dark:text-red-400">
+                  <AlertCircle className="h-5 w-5" />
+                  <span className="font-bold">{isEn ? 'Account Suspended' : '账户已封禁'}</span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors"
+                  onClick={() => setShowBanDialog(false)}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
               </div>
-              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => setShowBanDialog(false)}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-            <div className="p-4 space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">{isEn ? 'Account' : '账户'}</label>
-                <div className="text-sm font-medium">{getDisplayName(account)}</div>
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">{isEn ? 'Error Details' : '错误详情'}</label>
-                <div className="text-xs font-mono bg-muted/50 p-3 rounded-lg border break-all whitespace-pre-wrap max-h-[200px] overflow-y-auto">
-                  {account.lastError}
+              <div className="p-4 space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {isEn ? 'Account' : '账户'}
+                  </label>
+                  <div className="text-sm font-medium">{getDisplayName(account)}</div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {isEn ? 'Error Details' : '错误详情'}
+                  </label>
+                  <div className="text-xs font-mono bg-muted/50 p-3 rounded-lg border break-all whitespace-pre-wrap max-h-[200px] overflow-y-auto">
+                    {account.lastError}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between pt-2 gap-2 flex-wrap">
+                  <a
+                    href="https://support.aws.amazon.com/#/contacts/kiro"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline flex items-center gap-1"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    {isEn ? 'Contact Support' : '联系支持'}
+                  </a>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleClearSuspended}
+                      disabled={isClearingSuspended}
+                      title={
+                        isEn
+                          ? 'Mark as recovered — proxy pool will use this account again'
+                          : '标记为已恢复 — 反代池会重新使用该账号'
+                      }
+                    >
+                      {isClearingSuspended ? (
+                        <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3 mr-1" />
+                      )}
+                      {isEn ? 'Reset Suspended' : '重置封禁状态'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setShowBanDialog(false)}>
+                      {isEn ? 'Close' : '关闭'}
+                    </Button>
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center justify-between pt-2 gap-2 flex-wrap">
-                <a 
-                  href="https://support.aws.amazon.com/#/contacts/kiro" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline flex items-center gap-1"
-                  onClick={(e) => e.stopPropagation()}
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* 订阅管理弹窗 */}
+      {showSubscriptionDialog &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div
+              className="absolute inset-0 bg-black/50"
+              onClick={() => {
+                setShowSubscriptionDialog(false)
+                setIsFirstTimeUser(false)
+                setSubscriptionError(null)
+                setSubscriptionSuccess(null)
+              }}
+            />
+            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl m-4 animate-in fade-in zoom-in-95 duration-200 border overflow-hidden">
+              <div className="p-4 border-b flex items-center justify-between bg-gradient-to-r from-primary/10 to-[var(--gradient-to)]/10">
+                <div className="flex items-center gap-2 text-primary">
+                  <CreditCard className="h-5 w-5" />
+                  <span className="font-bold">
+                    {isEn
+                      ? isFirstTimeUser
+                        ? 'Choose Your Plan'
+                        : 'Subscription Plans'
+                      : isFirstTimeUser
+                        ? '选择订阅计划'
+                        : '订阅计划'}
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors"
+                  onClick={() => {
+                    setShowSubscriptionDialog(false)
+                    setIsFirstTimeUser(false)
+                    setSubscriptionError(null)
+                    setSubscriptionSuccess(null)
+                  }}
                 >
-                  <ExternalLink className="h-3 w-3" />
-                  {isEn ? 'Contact Support' : '联系支持'}
-                </a>
-                <div className="flex items-center gap-2">
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+              <div className="p-4 space-y-4">
+                {isFirstTimeUser ? (
+                  <div className="text-xs text-muted-foreground mb-2 bg-warning/10 text-warning p-2 rounded-lg">
+                    {isEn
+                      ? 'Please select a subscription plan to continue.'
+                      : '请选择一个订阅计划以继续使用。'}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground mb-2">
+                    {isEn ? 'Current subscription: ' : '当前订阅: '}
+                    <span className="font-medium text-foreground">
+                      {account.subscription.title || account.subscription.type}
+                    </span>
+                  </div>
+                )}
+
+                {subscriptionError && (
+                  <div className="text-xs bg-red-500/10 text-red-600 dark:text-red-400 p-2 rounded-lg flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    <span>{subscriptionError}</span>
+                  </div>
+                )}
+
+                {subscriptionSuccess && (
+                  <div className="text-xs bg-success/10 text-success p-2 rounded-lg flex items-center gap-2">
+                    <Check className="h-4 w-4 shrink-0" />
+                    <span>{subscriptionSuccess}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  {subscriptionPlans.map((plan) => {
+                    const isCurrent =
+                      plan.name === account.subscription.type ||
+                      plan.description.title === account.subscription.title
+                    const isLoading = paymentLoading && selectedPlan === plan.qSubscriptionType
+                    return (
+                      <div
+                        key={plan.name}
+                        className={cn(
+                          'relative p-4 rounded-lg border-2 transition-all cursor-pointer hover:shadow-md',
+                          isCurrent
+                            ? 'border-primary bg-primary/5'
+                            : 'border-border hover:border-primary/50',
+                          isLoading && 'opacity-70 cursor-wait'
+                        )}
+                        onClick={() => !isCurrent && handleSelectPlan(plan.qSubscriptionType)}
+                      >
+                        {isCurrent && (
+                          <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-2xs px-2 py-0.5 rounded-full font-medium">
+                            {isEn ? 'Current' : '当前'}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2 mb-2">
+                          <Sparkles
+                            className={cn(
+                              'h-4 w-4',
+                              plan.pricing.amount === 0 ? 'text-green-500' : 'text-amber-500'
+                            )}
+                          />
+                          <span className="font-bold text-sm">{plan.description.title}</span>
+                        </div>
+                        <div className="text-2xl font-bold mb-2">
+                          {plan.pricing.amount === 0
+                            ? isEn
+                              ? 'Free'
+                              : '免费'
+                            : `$${plan.pricing.amount}`}
+                          {plan.pricing.amount > 0 && (
+                            <span className="text-xs font-normal text-muted-foreground">
+                              /{plan.description.billingInterval}
+                            </span>
+                          )}
+                        </div>
+                        <ul className="space-y-1.5">
+                          {plan.description.features.slice(0, 4).map((feature, idx) => (
+                            <li
+                              key={idx}
+                              className="text-xs text-muted-foreground flex items-start gap-1.5"
+                            >
+                              <Check className="h-3 w-3 text-green-500 mt-0.5 shrink-0" />
+                              <span>{feature}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        {!isCurrent && (
+                          <Button
+                            size="sm"
+                            className="w-full mt-3"
+                            variant={plan.pricing.amount === 0 ? 'outline' : 'default'}
+                            disabled={isLoading}
+                          >
+                            {isLoading ? (
+                              <>
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                {isEn ? 'Loading...' : '加载中...'}
+                              </>
+                            ) : isEn ? (
+                              'Select'
+                            ) : (
+                              '选择'
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between pt-3 border-t">
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={handleClearSuspended}
-                    disabled={isClearingSuspended}
-                    title={isEn ? 'Mark as recovered — proxy pool will use this account again' : '标记为已恢复 — 反代池会重新使用该账号'}
+                    onClick={handleManageSubscription}
+                    disabled={paymentLoading}
+                    className="text-xs"
                   >
-                    {isClearingSuspended ? (
-                      <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                    {paymentLoading && !selectedPlan ? (
+                      <>
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        {isEn ? 'Loading...' : '加载中...'}
+                      </>
                     ) : (
-                      <RotateCcw className="h-3 w-3 mr-1" />
+                      <>
+                        <ExternalLink className="h-3 w-3 mr-1" />
+                        {isEn ? 'Manage Billing' : '管理账单'}
+                      </>
                     )}
-                    {isEn ? 'Reset Suspended' : '重置封禁状态'}
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => setShowBanDialog(false)}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setShowSubscriptionDialog(false)
+                      setIsFirstTimeUser(false)
+                      setSubscriptionError(null)
+                      setSubscriptionSuccess(null)
+                    }}
+                  >
                     {isEn ? 'Close' : '关闭'}
                   </Button>
                 </div>
               </div>
             </div>
-          </div>
-        </div>,
-        document.body
-      )}
+          </div>,
+          document.body
+        )}
 
-      {/* 订阅管理弹窗 */}
-      {showSubscriptionDialog && createPortal(
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => { setShowSubscriptionDialog(false); setIsFirstTimeUser(false); setSubscriptionError(null); setSubscriptionSuccess(null) }} />
-          <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl m-4 animate-in fade-in zoom-in-95 duration-200 border overflow-hidden">
-            <div className="p-4 border-b flex items-center justify-between bg-gradient-to-r from-primary/10 to-[var(--gradient-to)]/10">
-              <div className="flex items-center gap-2 text-primary">
-                <CreditCard className="h-5 w-5" />
-                <span className="font-bold">{isEn ? (isFirstTimeUser ? 'Choose Your Plan' : 'Subscription Plans') : (isFirstTimeUser ? '选择订阅计划' : '订阅计划')}</span>
-              </div>
-              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => { setShowSubscriptionDialog(false); setIsFirstTimeUser(false); setSubscriptionError(null); setSubscriptionSuccess(null) }}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-            <div className="p-4 space-y-4">
-              {isFirstTimeUser ? (
-                <div className="text-xs text-muted-foreground mb-2 bg-warning/10 text-warning p-2 rounded-lg">
-                  {isEn ? 'Please select a subscription plan to continue.' : '请选择一个订阅计划以继续使用。'}
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground mb-2">
-                  {isEn ? 'Current subscription: ' : '当前订阅: '}
-                  <span className="font-medium text-foreground">{account.subscription.title || account.subscription.type}</span>
-                </div>
-              )}
-              
-              {subscriptionError && (
-                <div className="text-xs bg-red-500/10 text-red-600 dark:text-red-400 p-2 rounded-lg flex items-center gap-2">
-                  <AlertCircle className="h-4 w-4 shrink-0" />
-                  <span>{subscriptionError}</span>
-                </div>
-              )}
-              
-              {subscriptionSuccess && (
-                <div className="text-xs bg-success/10 text-success p-2 rounded-lg flex items-center gap-2">
-                  <Check className="h-4 w-4 shrink-0" />
-                  <span>{subscriptionSuccess}</span>
-                </div>
-              )}
-              
-              <div className="grid grid-cols-2 gap-3">
-                {subscriptionPlans.map((plan) => {
-                  const isCurrent = plan.name === account.subscription.type || plan.description.title === account.subscription.title
-                  const isLoading = paymentLoading && selectedPlan === plan.qSubscriptionType
-                  return (
-                    <div
-                      key={plan.name}
-                      className={cn(
-                        'relative p-4 rounded-lg border-2 transition-all cursor-pointer hover:shadow-md',
-                        isCurrent ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50',
-                        isLoading && 'opacity-70 cursor-wait'
-                      )}
-                      onClick={() => !isCurrent && handleSelectPlan(plan.qSubscriptionType)}
-                    >
-                      {isCurrent && (
-                        <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-[10px] px-2 py-0.5 rounded-full font-medium">
-                          {isEn ? 'Current' : '当前'}
-                        </div>
-                      )}
-                      <div className="flex items-center gap-2 mb-2">
-                        <Sparkles className={cn('h-4 w-4', plan.pricing.amount === 0 ? 'text-green-500' : 'text-amber-500')} />
-                        <span className="font-bold text-sm">{plan.description.title}</span>
-                      </div>
-                      <div className="text-2xl font-bold mb-2">
-                        {plan.pricing.amount === 0 ? (isEn ? 'Free' : '免费') : `$${plan.pricing.amount}`}
-                        {plan.pricing.amount > 0 && <span className="text-xs font-normal text-muted-foreground">/{plan.description.billingInterval}</span>}
-                      </div>
-                      <ul className="space-y-1.5">
-                        {plan.description.features.slice(0, 4).map((feature, idx) => (
-                          <li key={idx} className="text-xs text-muted-foreground flex items-start gap-1.5">
-                            <Check className="h-3 w-3 text-green-500 mt-0.5 shrink-0" />
-                            <span>{feature}</span>
-                          </li>
-                        ))}
-                      </ul>
-                      {!isCurrent && (
-                        <Button 
-                          size="sm" 
-                          className="w-full mt-3" 
-                          variant={plan.pricing.amount === 0 ? 'outline' : 'default'}
-                          disabled={isLoading}
-                        >
-                          {isLoading ? (
-                            <><Loader2 className="h-3 w-3 mr-1 animate-spin" />{isEn ? 'Loading...' : '加载中...'}</>
-                          ) : (
-                            isEn ? 'Select' : '选择'
-                          )}
-                        </Button>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="flex items-center justify-between pt-3 border-t">
-                <Button 
-                  size="sm" 
-                  variant="outline" 
-                  onClick={handleManageSubscription}
-                  disabled={paymentLoading}
-                  className="text-xs"
-                >
-                  {paymentLoading && !selectedPlan ? (
-                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" />{isEn ? 'Loading...' : '加载中...'}</>
-                  ) : (
-                    <><ExternalLink className="h-3 w-3 mr-1" />{isEn ? 'Manage Billing' : '管理账单'}</>
-                  )}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => { setShowSubscriptionDialog(false); setIsFirstTimeUser(false); setSubscriptionError(null); setSubscriptionSuccess(null) }}>
-                  {isEn ? 'Close' : '关闭'}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      {/* 单账号导出弹窗 —— 走 portal，但 React 合成事件仍沿组件树冒泡，
+          需拦住 click 否则会触发卡片的 toggleSelection */}
+      <div onClick={(e) => e.stopPropagation()}>
+        <ExportDialog
+          open={showExportDialog}
+          onClose={() => setShowExportDialog(false)}
+          accounts={[account]}
+          selectedCount={1}
+        />
+      </div>
     </Card>
   )
 })
-

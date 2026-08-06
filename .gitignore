@@ -38,9 +38,74 @@ docs/Kiro API.md
 kiro_token.json
 Kiro.code-workspace
 Kiro register.code-workspace
-Kiro-account-manager/.kiro
 Kiro register
 
 # 抓包数据（可能含 token/cookie 等敏感信息，不入库）
 docs/mail.chatgpt.org.uk.har
 docs/mail.chatgpt.org.uk/
+
+# Created by .ignore support plugin (hsz.mobi)
+### Java template
+# Compiled class file
+*.class
+
+# Log file
+*.log
+
+# BlueJ files
+*.ctxt
+target/
+# Mobile Tools for Java (J2ME)
+.mtj.tmp/
+
+# Package Files #
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+/target
+
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+
+### Example user template template
+### Example user template
+
+# IntelliJ project files
+.idea/
+.cursor/*
+.omc/*
+.vscode/
+*.iml
+out
+gen
+logs/
+
+### eclipse
+.settings
+.classpath
+.project
+.factorypath
+
+## cat
+*.mark
+*client_cache.xml
+
+**.flattened-pom.xml
+
+logs/*
+
+# Cursor skills config
+skills.json
+/.mybatis/index.json
+
+# Git worktrees (本地隔离工作空间，不入库)
+.worktrees/
+
+# 本地文档目录，不参与版本控制
+/docs/
+
+# super-* 证据矩阵临时声明（不入库）
+.hit-rows-*.txt
+.super-x/

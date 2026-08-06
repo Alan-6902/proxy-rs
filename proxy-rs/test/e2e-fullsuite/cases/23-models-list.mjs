@@ -13,7 +13,7 @@ export default {
     const url = `${base.replace(/\/$/, '')}/v1/models`
     const r = await fetch(url, {
       method: 'GET',
-      headers: { 'authorization': `Bearer ${token}` }
+      headers: { authorization: `Bearer ${token}` }
     })
     const text = await r.text()
     log(`status=${r.status} bytes=${text.length}`)
@@ -22,7 +22,7 @@ export default {
     assertHasField(json, 'data', 'models.json')
     assertTrue(Array.isArray(json.data), 'data 应是数组')
     assertTrue(json.data.length > 0, '模型列表不应为空')
-    const sonnet = json.data.find(m => m.id?.includes('sonnet'))
+    const sonnet = json.data.find((m) => m.id?.includes('sonnet'))
     assertTrue(sonnet !== undefined, '应至少含一个 sonnet 模型')
     log(`models=${json.data.length}, first=${json.data[0].id}`)
   }

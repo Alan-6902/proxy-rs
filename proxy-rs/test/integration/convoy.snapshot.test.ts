@@ -9,7 +9,10 @@ import {
   usableCredentials
 } from '../../src/main/convoy/snapshot'
 import { CONVOY_CREDENTIAL_STATUS } from '../../src/shared/convoyCredentials'
-import type { ConvoyCredentialsResponse, RawConvoyCredentialItem } from '../../src/main/convoy/client'
+import type {
+  ConvoyCredentialsResponse,
+  RawConvoyCredentialItem
+} from '../../src/main/convoy/client'
 
 const FETCHED_AT = 1_800_000_000_000
 
@@ -122,7 +125,9 @@ describe('快照构建', () => {
 
   it('从 payload 读取合法区域，非法区域当作未提供', () => {
     const valid = buildSnapshot(
-      response([item({ credential: { type: 'api_key', apiKey: 'ksk_a1', region: 'EU-CENTRAL-1' } })]),
+      response([
+        item({ credential: { type: 'api_key', apiKey: 'ksk_a1', region: 'EU-CENTRAL-1' } })
+      ]),
       FETCHED_AT
     )
     expect(valid.snapshot.credentials[0].region).toBe('eu-central-1')

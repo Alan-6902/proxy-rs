@@ -12,11 +12,7 @@
  *   - tool_use.input 是合法的 JSON 对象 (含 city 字段)
  */
 import { postAnthropic } from '../lib/http.mjs'
-import {
-  DEFAULT_ANTHROPIC_MODEL,
-  SMALL_MAX_TOKENS,
-  TOOL_GET_WEATHER
-} from '../lib/fixtures.mjs'
+import { DEFAULT_ANTHROPIC_MODEL, SMALL_MAX_TOKENS, TOOL_GET_WEATHER } from '../lib/fixtures.mjs'
 import { assertHttp200, assertTrue, assertEq } from '../lib/assert.mjs'
 
 export default {
@@ -24,14 +20,17 @@ export default {
   title: '强制调用工具 + 验证 PascalCase 工具名反向映射 (client_tool_* → GetWeather)',
   tags: ['anthropic', 'tool', 'name-mapping', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      tools: [TOOL_GET_WEATHER],
-      tool_choice: { type: 'tool', name: 'GetWeather' },
-      messages: [{ role: 'user', content: '帮我查一下北京的天气.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        tools: [TOOL_GET_WEATHER],
+        tool_choice: { type: 'tool', name: 'GetWeather' },
+        messages: [{ role: 'user', content: '帮我查一下北京的天气.' }]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err body=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'tool-forced.response')

@@ -26,28 +26,31 @@ export default {
   title: 'assistant.thinking + signature 多轮回传 (signature 丢弃路径)',
   tags: ['anthropic', 'thinking', 'multi-turn', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      thinking: { type: 'enabled', budget_tokens: 1024 },
-      messages: [
-        { role: 'user', content: '请简单告诉我什么是质数.' },
-        {
-          role: 'assistant',
-          content: [
-            {
-              type: 'thinking',
-              thinking: '用户在问质数的定义. 我应该用通俗的语言解释.',
-              // signature 是 Anthropic 加密验证字段, ZephyrSail 转 Cascade 时会被丢弃
-              signature: 'ErwCClsIDRABGAIqQG2z35XrW7y3r-test-signature-bytes-truncated'
-            },
-            { type: 'text', text: '质数是只能被 1 和自身整除的自然数.' }
-          ]
-        },
-        { role: 'user', content: '那 1 是不是质数?' }
-      ]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        thinking: { type: 'enabled', budget_tokens: 1024 },
+        messages: [
+          { role: 'user', content: '请简单告诉我什么是质数.' },
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: '用户在问质数的定义. 我应该用通俗的语言解释.',
+                // signature 是 Anthropic 加密验证字段, ZephyrSail 转 Cascade 时会被丢弃
+                signature: 'ErwCClsIDRABGAIqQG2z35XrW7y3r-test-signature-bytes-truncated'
+              },
+              { type: 'text', text: '质数是只能被 1 和自身整除的自然数.' }
+            ]
+          },
+          { role: 'user', content: '那 1 是不是质数?' }
+        ]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'thinking-multiturn.response')

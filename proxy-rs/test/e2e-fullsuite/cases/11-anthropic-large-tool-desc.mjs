@@ -11,11 +11,7 @@
  *   - 响应正常返回
  */
 import { postAnthropic } from '../lib/http.mjs'
-import {
-  DEFAULT_ANTHROPIC_MODEL,
-  SMALL_MAX_TOKENS,
-  bigDescription
-} from '../lib/fixtures.mjs'
+import { DEFAULT_ANTHROPIC_MODEL, SMALL_MAX_TOKENS, bigDescription } from '../lib/fixtures.mjs'
 import { assertHttp200, assertTrue } from '../lib/assert.mjs'
 
 const TOOL_HUGE_DESC = {
@@ -35,13 +31,16 @@ export default {
   title: '12KB tool description 触发截断 + tool_documentation 注入',
   tags: ['anthropic', 'tool', 'truncation', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      tools: [TOOL_HUGE_DESC],
-      messages: [{ role: 'user', content: '用一句话告诉我你能做什么.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        tools: [TOOL_HUGE_DESC],
+        messages: [{ role: 'user', content: '用一句话告诉我你能做什么.' }]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'large-desc.response')

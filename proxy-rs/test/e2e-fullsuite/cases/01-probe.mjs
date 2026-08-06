@@ -18,13 +18,16 @@ export default {
   title: 'Claude Code probe 请求 (max_tokens=1)',
   tags: ['anthropic', 'probe', 'basic'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: 1,
-      // ZephyrSail isProbeRequest 严格 stream === false 才命中本地拦截, 必须显式传 false
-      stream: false,
-      messages: [{ role: 'user', content: 'ping' }]
-    }, { base, token, timeoutMs: 10_000 })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 1,
+        // ZephyrSail isProbeRequest 严格 stream === false 才命中本地拦截, 必须显式传 false
+        stream: false,
+        messages: [{ role: 'user', content: 'ping' }]
+      },
+      { base, token, timeoutMs: 10_000 }
+    )
     log(`status=${result.status} ttfb=${result.timing?.ttfb}ms`)
     assertHttp200(result, 'probe.response')
     assertHasField(result.json, 'type', 'probe.json')

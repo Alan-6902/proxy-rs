@@ -17,9 +17,13 @@ export default {
       headers: {
         'content-type': 'application/json',
         'anthropic-version': '2023-06-01',
-        'authorization': 'Bearer sk-deliberately-invalid-token-for-e2e-test'
+        authorization: 'Bearer sk-deliberately-invalid-token-for-e2e-test'
       },
-      body: JSON.stringify({ model: DEFAULT_ANTHROPIC_MODEL, max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] })
+      body: JSON.stringify({
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hi' }]
+      })
     })
     const text = await r.text()
     log(`status=${r.status} body=${text.slice(0, 100)}`)

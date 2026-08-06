@@ -41,29 +41,33 @@ function getActualLanguage(language: Language): 'en' | 'zh' {
 function getNestedValue(obj: Translations, path: string): string {
   const keys = path.split('.')
   let current: Translations | string = obj
-  
+
   for (const key of keys) {
     if (typeof current === 'string') return path
     if (current[key] === undefined) return path
     current = current[key]
   }
-  
+
   return typeof current === 'string' ? current : path
 }
 
 /**
  * 翻译函数
  */
-function translate(key: string, language: 'en' | 'zh', params?: Record<string, string | number>): string {
+function translate(
+  key: string,
+  language: 'en' | 'zh',
+  params?: Record<string, string | number>
+): string {
   let text = getNestedValue(locales[language] || locales.en, key)
-  
+
   // 替换参数
   if (params && text !== key) {
     Object.entries(params).forEach(([paramKey, value]) => {
       text = text.replace(new RegExp(`\\{${paramKey}\\}`, 'g'), String(value))
     })
   }
-  
+
   return text
 }
 
@@ -73,15 +77,15 @@ function translate(key: string, language: 'en' | 'zh', params?: Record<string, s
  */
 export function useTranslation() {
   const language = useAccountsStore((state) => state.language)
-  
+
   const actualLanguage = useMemo(() => getActualLanguage(language), [language])
-  
+
   const t = useMemo(() => {
     return (key: string, params?: Record<string, string | number>) => {
       return translate(key, actualLanguage, params)
     }
   }, [actualLanguage])
-  
+
   return {
     t,
     language,

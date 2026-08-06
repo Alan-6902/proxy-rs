@@ -2,7 +2,14 @@
 // 多账号管理器类型定义
 // ============================================
 
-export type IdpType = 'Google' | 'Github' | 'BuilderId' | 'Enterprise' | 'AWSIdC' | 'Internal' | 'IAM_SSO'
+export type IdpType =
+  | 'Google'
+  | 'Github'
+  | 'BuilderId'
+  | 'Enterprise'
+  | 'AWSIdC'
+  | 'Internal'
+  | 'IAM_SSO'
 
 export type SubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise' | 'Teams'
 
@@ -27,28 +34,44 @@ export interface AccountCredentials {
   profileArn?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
+  /** 该凭据首选的 Kiro 上游端点；为空时使用反代全局配置。 */
+  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+  /** 首选端点不可用时的账号级回退顺序。 */
+  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
+  /** 连续可重试错误达到该次数后，临时熔断当前端点。 */
+  endpointFallbackAfterFailures?: number
 }
 
-
-export function buildAccountsSyncSignature<T extends {
-  id: string
-  groupId?: string
-  isActive?: boolean
-  status: string
-  credentials?: { accessToken?: string; kiroApiKey?: string }
-}>(accounts: Iterable<T>): string {
+export function buildAccountsSyncSignature<
+  T extends {
+    id: string
+    groupId?: string
+    isActive?: boolean
+    status: string
+    credentials?: {
+      accessToken?: string
+      kiroApiKey?: string
+      preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+      endpointFallbackAfterFailures?: number
+    }
+  }
+>(accounts: Iterable<T>): string {
   return Array.from(accounts)
-    .filter(a => a.status === 'active' && a.isActive !== false && hasUpstreamKiroCredential(a.credentials))
-    .map(a => {
+    .filter(
+      (a) =>
+        a.status === 'active' && a.isActive !== false && hasUpstreamKiroCredential(a.credentials)
+    )
+    .map((a) => {
       const keyFingerprint = a.credentials?.kiroApiKey
-        ? Array.from(a.credentials.kiroApiKey).reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0, 0).toString(16)
+        ? Array.from(a.credentials.kiroApiKey)
+            .reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 0)
+            .toString(16)
         : ''
-      return `${a.id}:${a.groupId || ''}:${a.isActive === false ? 1 : 0}:${keyFingerprint}`
+      return `${a.id}:${a.groupId || ''}:${a.isActive === false ? 1 : 0}:${keyFingerprint}:${a.credentials?.preferredEndpoint || ''}:${a.credentials?.endpointFallbackAfterFailures || ''}`
     })
     .sort()
     .join('|')
 }
-
 
 export function hasUpstreamKiroCredential(
   credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
@@ -56,23 +79,24 @@ export function hasUpstreamKiroCredential(
   return Boolean(credentials?.accessToken || credentials?.kiroApiKey)
 }
 
-
 export function canRefreshUpstreamCredential(
   credentials?: Pick<AccountCredentials, 'credentialKind' | 'kiroApiKey' | 'refreshToken'>
 ): boolean {
-  return credentials?.credentialKind !== 'kiro_api_key' && !credentials?.kiroApiKey && Boolean(credentials?.refreshToken)
+  return (
+    credentials?.credentialKind !== 'kiro_api_key' &&
+    !credentials?.kiroApiKey &&
+    Boolean(credentials?.refreshToken)
+  )
 }
-
 
 export function getUpstreamKiroCredentialSignature(
   credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
 ): string {
   const credential = credentials?.kiroApiKey || credentials?.accessToken || ''
   if (!credential) return ''
-  const fingerprint = Array.from(credential).reduce(
-    (hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0,
-    0
-  ).toString(16)
+  const fingerprint = Array.from(credential)
+    .reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 0)
+    .toString(16)
   const kind = credentials?.credentialKind || (credentials?.kiroApiKey ? 'kiro_api_key' : 'oauth')
   return `${kind}:${fingerprint}`
 }
@@ -97,13 +121,13 @@ export interface AccountUsage {
   percentUsed: number
   lastUpdated: number
   // 详细额度分解
-  baseLimit?: number      // 基础额度
-  baseCurrent?: number    // 基础已用
+  baseLimit?: number // 基础额度
+  baseCurrent?: number // 基础已用
   freeTrialLimit?: number // 试用额度
   freeTrialCurrent?: number
   freeTrialExpiry?: string
-  bonuses?: BonusUsage[]  // 奖励额度列表
-  nextResetDate?: string  // 重置日期
+  bonuses?: BonusUsage[] // 奖励额度列表
+  nextResetDate?: string // 重置日期
   resourceDetail?: ResourceDetail // 资源详情
 }
 

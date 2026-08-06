@@ -18,7 +18,12 @@
  */
 
 /** 生成 [0, n) 中选 k 个不重复元素的所有组合（递增序） */
-function* combinations(n: number, k: number, start = 0, prefix: number[] = []): Generator<number[]> {
+function* combinations(
+  n: number,
+  k: number,
+  start = 0,
+  prefix: number[] = []
+): Generator<number[]> {
   if (prefix.length === k) {
     yield [...prefix]
     return
@@ -106,7 +111,10 @@ export function countSameRootVariants(parentEmail: string, usedEmails: Iterable<
     const split = splitEmail(e)
     if (!split) continue
     const [local, domain] = split
-    if (domain.toLowerCase() === baseDomain && local.replace(/\./g, '').toLowerCase() === baseLocal) {
+    if (
+      domain.toLowerCase() === baseDomain &&
+      local.replace(/\./g, '').toLowerCase() === baseLocal
+    ) {
       count++
     }
   }

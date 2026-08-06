@@ -1,12 +1,39 @@
 import { useEffect, useState } from 'react'
-import { Home, Users, Settings, Info, ChevronRight, Server, UserPlus, ScrollText, Network, Stethoscope, Archive, GripVertical, BadgeCheck, Truck } from 'lucide-react'
+import {
+  Home,
+  Users,
+  Settings,
+  Info,
+  ChevronRight,
+  Server,
+  UserPlus,
+  ScrollText,
+  Network,
+  Stethoscope,
+  Archive,
+  GripVertical,
+  BadgeCheck,
+  Truck
+} from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import proxyRsIcon from '@/assets/proxy-rs-icon.svg'
 import { APP_NAME } from '../../../../shared/appIdentity'
 import { useTranslation } from '@/hooks/useTranslation'
 
-export type PageType = 'home' | 'accounts' | 'proxy' | 'proxyPool' | 'register' | 'seats' | 'convoy' | 'diagnose' | 'configSync' | 'logs' | 'settings' | 'about'
+export type PageType =
+  | 'home'
+  | 'accounts'
+  | 'proxy'
+  | 'proxyPool'
+  | 'register'
+  | 'seats'
+  | 'convoy'
+  | 'diagnose'
+  | 'configSync'
+  | 'logs'
+  | 'settings'
+  | 'about'
 
 interface SidebarProps {
   currentPage: PageType
@@ -27,7 +54,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings },
-  { id: 'about', labelKey: 'nav.about', icon: Info },
+  { id: 'about', labelKey: 'nav.about', icon: Info }
 ]
 
 const SIDEBAR_ORDER_STORAGE_KEY = 'proxy-rs.sidebar-order'
@@ -56,7 +83,10 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
 
   useEffect(() => {
     try {
-      localStorage.setItem(SIDEBAR_ORDER_STORAGE_KEY, JSON.stringify(menuItems.map((item) => item.id)))
+      localStorage.setItem(
+        SIDEBAR_ORDER_STORAGE_KEY,
+        JSON.stringify(menuItems.map((item) => item.id))
+      )
     } catch {
       // localStorage 不可用时仍保留当前会话内排序
     }
@@ -112,11 +142,7 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
               transition={{ duration: 0.2 }}
               className="flex items-center gap-2"
             >
-              <img
-                src={proxyRsIcon}
-                alt={APP_NAME}
-                className="h-8 w-8 shrink-0"
-              />
+              <img src={proxyRsIcon} alt={APP_NAME} className="h-8 w-8 shrink-0" />
               <span className="font-semibold text-foreground whitespace-nowrap text-sm">
                 {APP_NAME}
               </span>
@@ -126,97 +152,110 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
       </div>
 
       {/* Menu Items */}
-      <nav className="flex-1 py-3 px-2 overflow-y-auto" aria-label={isEn ? 'Primary navigation' : '主导航'}>
+      <nav
+        className="flex-1 py-3 px-2 overflow-y-auto"
+        aria-label={isEn ? 'Primary navigation' : '主导航'}
+      >
         {!collapsed && (
           <div className="flex items-center justify-between px-2 pb-2 text-2xs font-medium uppercase tracking-[0.16em] text-muted-foreground/70">
             <span>{isEn ? 'Navigation' : '导航'}</span>
-            <span className="normal-case tracking-normal">{isEn ? 'Drag to sort' : '拖动排序'}</span>
+            <span className="normal-case tracking-normal">
+              {isEn ? 'Drag to sort' : '拖动排序'}
+            </span>
           </div>
         )}
         <div className="space-y-1">
-        {menuItems.map((item) => {
-          const Icon = item.icon
-          const isActive = currentPage === item.id
-          const label = t(item.labelKey)
-          return (
-            <motion.div key={item.id} layout="position">
-            <button
-              draggable
-              onDragStart={(event) => {
-                event.dataTransfer.effectAllowed = 'move'
-                event.dataTransfer.setData('text/plain', item.id)
-                setDraggedPage(item.id)
-              }}
-              onDragOver={(event) => {
-                event.preventDefault()
-                event.dataTransfer.dropEffect = 'move'
-              }}
-              onDrop={(event) => {
-                event.preventDefault()
-                const sourceId = event.dataTransfer.getData('text/plain') as PageType
-                if (menuItems.some((menuItem) => menuItem.id === sourceId)) {
-                  moveMenuItem(sourceId, item.id)
-                }
-                setDraggedPage(null)
-              }}
-              onDragEnd={() => setDraggedPage(null)}
-              onClick={() => onPageChange(item.id)}
-              onKeyDown={(event) => {
-                if (!event.altKey) return
-                if (event.key === 'ArrowUp') {
-                  event.preventDefault()
-                  moveMenuItemByOffset(item.id, -1)
-                } else if (event.key === 'ArrowDown') {
-                  event.preventDefault()
-                  moveMenuItemByOffset(item.id, 1)
-                }
-              }}
-              aria-current={isActive ? 'page' : undefined}
-              aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-              aria-label={`${label}，${isEn ? 'drag to reorder or use Alt + arrow keys' : '可拖动排序，也可按 Option + 方向键排序'}`}
-              className={cn(
-                'group relative w-full flex items-center rounded-xl text-sm font-medium transition-[color,background-color,box-shadow,opacity] duration-200 overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 cursor-grab active:cursor-grabbing',
-                isActive
-                  ? 'text-primary-foreground shadow-[0_4px_16px_rgba(91,140,255,0.35)]'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/40 dark:hover:bg-white/5',
-                collapsed ? 'justify-center p-2.5' : 'gap-2.5 px-2.5 py-2.5',
-                draggedPage === item.id && 'opacity-40'
-              )}
-              title={collapsed ? `${label} · ${isEn ? 'Drag to sort' : '拖动排序'}` : undefined}
-            >
-              {/* 激活态：渐变背景（主题色随动） */}
-              {isActive && (
-                <motion.span
-                  layoutId="sidebar-active-pill"
-                  className="absolute inset-0 rounded-xl"
-                  style={{
-                    background: 'linear-gradient(135deg, var(--gradient-from), var(--gradient-to))'
+          {menuItems.map((item) => {
+            const Icon = item.icon
+            const isActive = currentPage === item.id
+            const label = t(item.labelKey)
+            return (
+              <motion.div key={item.id} layout="position">
+                <button
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.dataTransfer.setData('text/plain', item.id)
+                    setDraggedPage(item.id)
                   }}
-                  transition={{ type: 'spring', stiffness: 380, damping: 32 }}
-                />
-              )}
-              {!collapsed && (
-                <GripVertical className={cn('h-3.5 w-3.5 shrink-0 relative z-10 opacity-30 group-hover:opacity-70 transition-opacity', isActive && 'text-white/80')} />
-              )}
-              <Icon className={cn('h-5 w-5 shrink-0 relative z-10', isActive ? 'text-white' : '')} />
-              <AnimatePresence initial={false}>
-                {!collapsed && (
-                  <motion.span
-                    key="label"
-                    initial={{ opacity: 0, x: -8 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -8 }}
-                    transition={{ duration: 0.15 }}
-                    className={cn('whitespace-nowrap relative z-10', isActive && 'text-white')}
-                  >
-                    {label}
-                  </motion.span>
-                )}
-              </AnimatePresence>
-            </button>
-            </motion.div>
-          )
-        })}
+                  onDragOver={(event) => {
+                    event.preventDefault()
+                    event.dataTransfer.dropEffect = 'move'
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    const sourceId = event.dataTransfer.getData('text/plain') as PageType
+                    if (menuItems.some((menuItem) => menuItem.id === sourceId)) {
+                      moveMenuItem(sourceId, item.id)
+                    }
+                    setDraggedPage(null)
+                  }}
+                  onDragEnd={() => setDraggedPage(null)}
+                  onClick={() => onPageChange(item.id)}
+                  onKeyDown={(event) => {
+                    if (!event.altKey) return
+                    if (event.key === 'ArrowUp') {
+                      event.preventDefault()
+                      moveMenuItemByOffset(item.id, -1)
+                    } else if (event.key === 'ArrowDown') {
+                      event.preventDefault()
+                      moveMenuItemByOffset(item.id, 1)
+                    }
+                  }}
+                  aria-current={isActive ? 'page' : undefined}
+                  aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                  aria-label={`${label}，${isEn ? 'drag to reorder or use Alt + arrow keys' : '可拖动排序，也可按 Option + 方向键排序'}`}
+                  className={cn(
+                    'group relative w-full flex items-center rounded-xl text-sm font-medium transition-[color,background-color,box-shadow,opacity] duration-200 overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 cursor-grab active:cursor-grabbing',
+                    isActive
+                      ? 'text-primary-foreground shadow-[0_4px_16px_rgba(91,140,255,0.35)]'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-white/40 dark:hover:bg-white/5',
+                    collapsed ? 'justify-center p-2.5' : 'gap-2.5 px-2.5 py-2.5',
+                    draggedPage === item.id && 'opacity-40'
+                  )}
+                  title={collapsed ? `${label} · ${isEn ? 'Drag to sort' : '拖动排序'}` : undefined}
+                >
+                  {/* 激活态：渐变背景（主题色随动） */}
+                  {isActive && (
+                    <motion.span
+                      layoutId="sidebar-active-pill"
+                      className="absolute inset-0 rounded-xl"
+                      style={{
+                        background:
+                          'linear-gradient(135deg, var(--gradient-from), var(--gradient-to))'
+                      }}
+                      transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+                    />
+                  )}
+                  {!collapsed && (
+                    <GripVertical
+                      className={cn(
+                        'h-3.5 w-3.5 shrink-0 relative z-10 opacity-30 group-hover:opacity-70 transition-opacity',
+                        isActive && 'text-white/80'
+                      )}
+                    />
+                  )}
+                  <Icon
+                    className={cn('h-5 w-5 shrink-0 relative z-10', isActive ? 'text-white' : '')}
+                  />
+                  <AnimatePresence initial={false}>
+                    {!collapsed && (
+                      <motion.span
+                        key="label"
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -8 }}
+                        transition={{ duration: 0.15 }}
+                        className={cn('whitespace-nowrap relative z-10', isActive && 'text-white')}
+                      >
+                        {label}
+                      </motion.span>
+                    )}
+                  </AnimatePresence>
+                </button>
+              </motion.div>
+            )
+          })}
         </div>
       </nav>
 
@@ -225,7 +264,7 @@ export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse
         <button
           onClick={onToggleCollapse}
           className="group w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm text-muted-foreground hover:text-primary hover:bg-white/40 dark:hover:bg-white/5 transition-all overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-          title={collapsed ? (isEn ? 'Expand' : '展开侧边栏') : (isEn ? 'Collapse' : '收起侧边栏')}
+          title={collapsed ? (isEn ? 'Expand' : '展开侧边栏') : isEn ? 'Collapse' : '收起侧边栏'}
         >
           <motion.div
             animate={{ rotate: collapsed ? 0 : 180 }}

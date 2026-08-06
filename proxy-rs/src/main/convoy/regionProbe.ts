@@ -80,9 +80,10 @@ export async function probeKeyRegion(
   return {
     ok: false,
     probedRegions,
-    error: candidates.length > 1
-      ? `所有候选区域均验活失败（${probedRegions.join(', ')}）：${lastError || '未知原因'}`
-      : lastError || '验活失败'
+    error:
+      candidates.length > 1
+        ? `所有候选区域均验活失败（${probedRegions.join(', ')}）：${lastError || '未知原因'}`
+        : lastError || '验活失败'
   }
 }
 

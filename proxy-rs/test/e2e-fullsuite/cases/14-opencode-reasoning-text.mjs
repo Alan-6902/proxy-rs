@@ -24,21 +24,24 @@ export default {
   title: 'opencode: providerOptions.openaiCompatible.reasoningEffort + delta.reasoning_text 双发',
   tags: ['openai', 'opencode', 'reasoning', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postOpenAI({
-      model: DEFAULT_OPENAI_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      // opencode 用 providerOptions 路径传 reasoningEffort, 不用顶层 reasoning_effort
-      providerOptions: {
-        openaiCompatible: {
-          reasoningEffort: 'low'
-        }
+    const result = await postOpenAI(
+      {
+        model: DEFAULT_OPENAI_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        // opencode 用 providerOptions 路径传 reasoningEffort, 不用顶层 reasoning_effort
+        providerOptions: {
+          openaiCompatible: {
+            reasoningEffort: 'low'
+          }
+        },
+        messages: [
+          { role: 'system', content: '你是一个简洁的助手, 一句话回答即可.' },
+          { role: 'user', content: '7 是质数吗?' }
+        ]
       },
-      messages: [
-        { role: 'system', content: '你是一个简洁的助手, 一句话回答即可.' },
-        { role: 'user', content: '7 是质数吗?' }
-      ]
-    }, { base, token })
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind} ttfb=${result.timing?.ttfb}ms`)
     if (result.kind === 'stream-error') log(`err=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'opencode-reasoning.response')
@@ -50,14 +53,20 @@ export default {
     // reasoning_text / reasoning_content 双发验证: 仅当模型本次产生 reasoning 才检查
     // (low effort 下模型可能直接给答案不思考, 这是上游正常行为)
     if (typeof msg.reasoning_text === 'string' && msg.reasoning_text.length > 0) {
-      log(`reasoning_text=${msg.reasoning_text.slice(0, 60)}... (chars=${msg.reasoning_text.length})`)
+      log(
+        `reasoning_text=${msg.reasoning_text.slice(0, 60)}... (chars=${msg.reasoning_text.length})`
+      )
       assertTrue(
         typeof msg.reasoning_content === 'string' && msg.reasoning_content === msg.reasoning_text,
         'reasoning_content 应与 reasoning_text 同时非空且内容一致 (ZephyrSail 双发)'
       )
     } else {
       log('模型本次未输出 reasoning, 跳过双发验证 (上游行为差异, 不算失败)')
-      assertEq(msg.reasoning_content, undefined, '若 reasoning_text 缺失则 reasoning_content 也应缺失 (双发对称)')
+      assertEq(
+        msg.reasoning_content,
+        undefined,
+        '若 reasoning_text 缺失则 reasoning_content 也应缺失 (双发对称)'
+      )
     }
   }
 }

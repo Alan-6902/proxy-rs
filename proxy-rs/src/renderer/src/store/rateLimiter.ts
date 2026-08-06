@@ -93,7 +93,7 @@ export function createRateLimiter(config: Partial<RateLimiterConfig> = {}): Rate
   const state: RateLimiterInternal = {
     config: { ...DEFAULT_RATE_LIMITER_CONFIG, ...config },
     lastRefillTime: Date.now(),
-    tokens: (config.burst ?? DEFAULT_RATE_LIMITER_CONFIG.burst),
+    tokens: config.burst ?? DEFAULT_RATE_LIMITER_CONFIG.burst,
     events: [],
     consecutiveFailures: 0,
     backoffEndAt: 0
@@ -166,17 +166,18 @@ export function createRateLimiter(config: Partial<RateLimiterConfig> = {}): Rate
       refillTokens()
       pruneEvents()
       const now = Date.now()
-      let success = 0, failed = 0
+      let success = 0,
+        failed = 0
       for (const [, ok] of state.events) {
-        if (ok) success++; else failed++
+        if (ok) success++
+        else failed++
       }
       const total = success + failed
       const successRate = total > 0 ? success / total : 1
       const samples = total
-      const riskWarning = samples >= state.config.minSamples && successRate < state.config.successRateThreshold
-      const throughput = state.config.windowSec > 0
-        ? (success * 60 / state.config.windowSec)
-        : 0
+      const riskWarning =
+        samples >= state.config.minSamples && successRate < state.config.successRateThreshold
+      const throughput = state.config.windowSec > 0 ? (success * 60) / state.config.windowSec : 0
 
       return {
         availableTokens: Math.floor(state.tokens),

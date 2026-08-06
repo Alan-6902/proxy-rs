@@ -1,5 +1,20 @@
 import { useState, useEffect } from 'react'
-import { X, RefreshCw, Loader2, Cpu, FileText, Image, Hash, Sparkles, Zap, Shuffle, Brain, Database, AlertTriangle, Globe } from 'lucide-react'
+import {
+  X,
+  RefreshCw,
+  Loader2,
+  Cpu,
+  FileText,
+  Image,
+  Hash,
+  Sparkles,
+  Zap,
+  Shuffle,
+  Brain,
+  Database,
+  AlertTriangle,
+  Globe
+} from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
 import { cn } from '@/lib/utils'
 
@@ -97,7 +112,10 @@ export function ModelsDialog({
                     {models.length} {isEn ? 'models' : '个模型'}
                   </Badge>
                   {fromCache && (
-                    <Badge variant="secondary" className="text-xs bg-warning/10 text-warning border-0">
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-warning/10 text-warning border-0"
+                    >
                       <Sparkles className="h-3 w-3 mr-1" />
                       {isEn ? 'Cached' : '缓存'}
                     </Badge>
@@ -107,9 +125,9 @@ export function ModelsDialog({
             </CardTitle>
             <div className="flex items-center gap-2">
               {onOpenModelMapping && (
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={onOpenModelMapping}
                   className="rounded-lg"
                 >
@@ -122,9 +140,9 @@ export function ModelsDialog({
                   )}
                 </Button>
               )}
-              <Button 
-                variant="outline" 
-                size="sm" 
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={fetchModels}
                 disabled={loading}
                 className="rounded-lg"
@@ -136,7 +154,12 @@ export function ModelsDialog({
                 )}
                 <span className="ml-1.5">{isEn ? 'Refresh' : '刷新'}</span>
               </Button>
-              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => onOpenChange(false)}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 rounded-lg hover:bg-red-500 hover:text-white transition-colors"
+                onClick={() => onOpenChange(false)}
+              >
                 <X className="h-5 w-5" />
               </Button>
             </div>
@@ -163,9 +186,21 @@ export function ModelsDialog({
                       : '这通常是国内 IP 被限制导致的。请尝试以下方案：'}
                   </p>
                   <ul className="text-xs text-warning/90 space-y-0.5 list-disc list-inside">
-                    <li>{isEn ? 'Enable VPN/proxy (system-level or app-level)' : '开启 VPN / 代理（系统级或应用级均可）'}</li>
-                    <li>{isEn ? 'Switch to high-quality outbound IP (US/EU residential preferred)' : '切换到优质外网 IP（推荐美国 / 欧洲住宅 IP）'}</li>
-                    <li>{isEn ? 'Click Refresh after IP change to reload models' : 'IP 切换后点击右上角「刷新」重新加载模型'}</li>
+                    <li>
+                      {isEn
+                        ? 'Enable VPN/proxy (system-level or app-level)'
+                        : '开启 VPN / 代理（系统级或应用级均可）'}
+                    </li>
+                    <li>
+                      {isEn
+                        ? 'Switch to high-quality outbound IP (US/EU residential preferred)'
+                        : '切换到优质外网 IP（推荐美国 / 欧洲住宅 IP）'}
+                    </li>
+                    <li>
+                      {isEn
+                        ? 'Click Refresh after IP change to reload models'
+                        : 'IP 切换后点击右上角「刷新」重新加载模型'}
+                    </li>
                   </ul>
                 </div>
                 <Button
@@ -194,7 +229,11 @@ export function ModelsDialog({
                   <X className="h-8 w-8 text-destructive" />
                 </div>
                 <p className="text-destructive font-medium">{error}</p>
-                <p className="text-sm mt-2">{isEn ? 'Make sure proxy is running and has synced accounts' : '请确保代理服务已启动且已同步账号'}</p>
+                <p className="text-sm mt-2">
+                  {isEn
+                    ? 'Make sure proxy is running and has synced accounts'
+                    : '请确保代理服务已启动且已同步账号'}
+                </p>
               </div>
             ) : models.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
@@ -206,64 +245,88 @@ export function ModelsDialog({
             ) : (
               <div className="grid grid-cols-2 gap-3">
                 {models.map((model, index) => (
-                  <div 
-                    key={model.id} 
+                  <div
+                    key={model.id}
                     className={cn(
-                      "group p-3 rounded-xl border hover:shadow-md hover:border-primary/30 transition-all duration-200",
-                      index === 0 ? "border-primary/40 bg-primary/10" : "bg-background"
+                      'group p-3 rounded-xl border hover:shadow-md hover:border-primary/30 transition-all duration-200',
+                      index === 0 ? 'border-primary/40 bg-primary/10' : 'bg-background'
                     )}
                   >
                     <div className="flex items-start gap-2 mb-2">
-                      <div className={cn(
-                        "w-2 h-2 rounded-full mt-1.5 shrink-0",
-                        index === 0 ? "bg-primary" : "bg-muted-foreground/30"
-                      )} />
+                      <div
+                        className={cn(
+                          'w-2 h-2 rounded-full mt-1.5 shrink-0',
+                          index === 0 ? 'bg-primary' : 'bg-muted-foreground/30'
+                        )}
+                      />
                       <div className="flex-1 min-w-0">
                         <code className="text-sm font-bold text-foreground">{model.id}</code>
                         {model.name && model.name !== model.id && (
-                          <p className="text-[11px] text-primary/70 font-medium truncate">{model.name}</p>
+                          <p className="text-xs text-primary/70 font-medium truncate">
+                            {model.name}
+                          </p>
                         )}
                       </div>
                     </div>
-                    <p className="text-[11px] text-muted-foreground line-clamp-2 mb-2 pl-4">
+                    <p className="text-xs text-muted-foreground line-clamp-2 mb-2 pl-4">
                       {model.description || (isEn ? 'No description' : '无描述')}
                     </p>
                     <div className="flex items-center justify-between pt-2 border-t border-border/50">
                       <div className="flex items-center gap-2">
                         <div className="flex items-center gap-1">
                           {model.inputTypes?.includes('TEXT') && (
-                            <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-blue-500/10 text-blue-600 dark:text-blue-400 border-0">
+                            <Badge
+                              variant="secondary"
+                              className="text-2xs px-1.5 h-5 bg-blue-500/10 text-blue-600 dark:text-blue-400 border-0"
+                            >
                               <FileText className="h-3 w-3" />
                             </Badge>
                           )}
                           {model.inputTypes?.includes('IMAGE') && (
-                            <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-purple-500/10 text-purple-600 dark:text-purple-400 border-0">
+                            <Badge
+                              variant="secondary"
+                              className="text-2xs px-1.5 h-5 bg-purple-500/10 text-purple-600 dark:text-purple-400 border-0"
+                            >
                               <Image className="h-3 w-3" />
                             </Badge>
                           )}
                         </div>
                         {model.supportsThinking && (
-                          <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-0" title={model.thinkingEfforts?.join(', ')}>
+                          <Badge
+                            variant="secondary"
+                            className="text-2xs px-1.5 h-5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-0"
+                            title={model.thinkingEfforts?.join(', ')}
+                          >
                             <Brain className="h-3 w-3" />
                           </Badge>
                         )}
                         {model.supportsPromptCaching && (
-                          <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-0">
+                          <Badge
+                            variant="secondary"
+                            className="text-2xs px-1.5 h-5 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-0"
+                          >
                             <Database className="h-3 w-3" />
                           </Badge>
                         )}
                         {model.rateMultiplier !== undefined && (
-                          <Badge variant="secondary" className="text-[10px] px-1.5 h-5 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-0">
+                          <Badge
+                            variant="secondary"
+                            className="text-2xs px-1.5 h-5 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-0"
+                          >
                             <Zap className="h-3 w-3 mr-0.5" />
                             {model.rateMultiplier}x {model.rateUnit || 'credit'}
                           </Badge>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground">
+                      <div className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
                         <Hash className="h-3 w-3" />
-                        <span className="text-green-600 dark:text-green-400">{formatTokens(model.maxInputTokens)}</span>
+                        <span className="text-green-600 dark:text-green-400">
+                          {formatTokens(model.maxInputTokens)}
+                        </span>
                         <span>/</span>
-                        <span className="text-orange-600 dark:text-orange-400">{formatTokens(model.maxOutputTokens)}</span>
+                        <span className="text-orange-600 dark:text-orange-400">
+                          {formatTokens(model.maxOutputTokens)}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -276,5 +339,3 @@ export function ModelsDialog({
     </div>
   )
 }
-
-

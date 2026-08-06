@@ -6,13 +6,23 @@ import { randomEmailPrefix } from './names'
 import { waitProtonOtp } from './proton-mail-window'
 
 function getRegistrationProxyUrl(): string | undefined {
-  return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || getSystemProxy() || undefined
+  return (
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    getSystemProxy() ||
+    undefined
+  )
 }
 
 async function proxyFetch(url: string, options?: RequestInit): Promise<Response> {
   const agent = safeCreateProxyAgent(getRegistrationProxyUrl())
   if (agent) {
-    return await undiciFetch(url, { ...options, dispatcher: agent } as UndiciRequestInit) as unknown as Response
+    return (await undiciFetch(url, {
+      ...options,
+      dispatcher: agent
+    } as UndiciRequestInit)) as unknown as Response
   }
   return await fetch(url, options)
 }
@@ -93,7 +103,11 @@ export class MoEmailService implements TempEmailService {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`
 
-    const resp = await proxyFetch(url, { method: 'POST', headers, signal: AbortSignal.timeout(30000) })
+    const resp = await proxyFetch(url, {
+      method: 'POST',
+      headers,
+      signal: AbortSignal.timeout(30000)
+    })
     const data = (await resp.json()) as Record<string, unknown>
 
     const addr =
@@ -111,7 +125,11 @@ export class MoEmailService implements TempEmailService {
     return addr
   }
 
-  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+  async waitForCode(
+    timeoutSec: number,
+    intervalSec: number,
+    signal?: AbortSignal
+  ): Promise<string> {
     if (!this.address) throw new Error('邮箱地址为空')
 
     const maxRetries = Math.floor(timeoutSec / intervalSec)
@@ -167,7 +185,7 @@ export class MoEmailService implements TempEmailService {
 export class TempMailPlusService implements TempEmailService {
   private static readonly BASE_URL = 'https://tempmail.plus/api'
 
-  private readonly tmEmail: string   // tempmail.plus 用户名（不含 @mailto.plus）
+  private readonly tmEmail: string // tempmail.plus 用户名（不含 @mailto.plus）
   private readonly epin: string
   /** 支持多域名（用户填多行/逗号/空格分隔），每次 create 随机挑一个，降低单域名被风控关联 */
   private readonly domains: string[]
@@ -188,12 +206,13 @@ export class TempMailPlusService implements TempEmailService {
 
   private get headers(): Record<string, string> {
     return {
-      'accept': 'application/json, text/javascript, */*; q=0.01',
+      accept: 'application/json, text/javascript, */*; q=0.01',
       'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      'user-agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
       'x-requested-with': 'XMLHttpRequest',
-      'Referer': 'https://tempmail.plus/zh/',
-      'cookie': `email=${encodeURIComponent(this.fullEmail)}`
+      Referer: 'https://tempmail.plus/zh/',
+      cookie: `email=${encodeURIComponent(this.fullEmail)}`
     }
   }
 
@@ -213,7 +232,11 @@ export class TempMailPlusService implements TempEmailService {
     return this.address
   }
 
-  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+  async waitForCode(
+    timeoutSec: number,
+    intervalSec: number,
+    signal?: AbortSignal
+  ): Promise<string> {
     if (!this.address) throw new Error('邮箱地址为空')
     const maxRetries = Math.floor(timeoutSec / intervalSec)
     const checkedIds = new Set<number>()
@@ -265,7 +288,10 @@ export class TempMailPlusService implements TempEmailService {
 
   private async fetchMailList(): Promise<Array<Record<string, unknown>>> {
     const url = `${TempMailPlusService.BASE_URL}/mails?email=${encodeURIComponent(this.fullEmail)}&first_id=0&epin=${encodeURIComponent(this.epin)}`
-    const resp = await proxyFetch(url, { headers: this.headers, signal: AbortSignal.timeout(15000) })
+    const resp = await proxyFetch(url, {
+      headers: this.headers,
+      signal: AbortSignal.timeout(15000)
+    })
     const data = (await resp.json()) as Record<string, unknown>
     if (!data.result) return []
     return (data.mail_list as Array<Record<string, unknown>>) || []
@@ -273,14 +299,20 @@ export class TempMailPlusService implements TempEmailService {
 
   private async fetchMailDetail(mailId: number): Promise<Record<string, unknown> | null> {
     const url = `${TempMailPlusService.BASE_URL}/mails/${mailId}?email=${encodeURIComponent(this.fullEmail)}&epin=${encodeURIComponent(this.epin)}`
-    const resp = await proxyFetch(url, { headers: this.headers, signal: AbortSignal.timeout(15000) })
+    const resp = await proxyFetch(url, {
+      headers: this.headers,
+      signal: AbortSignal.timeout(15000)
+    })
     const data = (await resp.json()) as Record<string, unknown>
     return data.result ? data : null
   }
 
   private async deleteMail(mailId: number): Promise<void> {
     const url = `${TempMailPlusService.BASE_URL}/mails/${mailId}`
-    const headers = { ...this.headers, 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' }
+    const headers = {
+      ...this.headers,
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
+    }
     const body = `email=${encodeURIComponent(this.fullEmail)}&epin=${encodeURIComponent(this.epin)}`
     try {
       await proxyFetch(url, { method: 'DELETE', headers, body, signal: AbortSignal.timeout(10000) })
@@ -396,7 +428,9 @@ export class GptMailService implements TempEmailService {
     getSession: () => SessionClient | null
   }) {
     if (typeof opts.getSession !== 'function') {
-      throw new Error('GPTmail 必须传入 getSession（用于每次取最新 TLS SessionClient 绕过 401 校验）')
+      throw new Error(
+        'GPTmail 必须传入 getSession（用于每次取最新 TLS SessionClient 绕过 401 校验）'
+      )
     }
     this.getSession = opts.getSession
     this.baseURL = GptMailService.normalizeBaseURL(opts.baseURL || GptMailService.DEFAULT_BASE_URL)
@@ -409,9 +443,14 @@ export class GptMailService implements TempEmailService {
       .map((d) => d.trim().replace(/^@/, ''))
       .filter(Boolean)
     if (this.domains.length === 0) {
-      throw new Error('GPTmail 自建域名池为空（私有模式: MX 已解析到 GPTmail 的域名；CF 模式: CF 配了 catch-all 的域名）')
+      throw new Error(
+        'GPTmail 自建域名池为空（私有模式: MX 已解析到 GPTmail 的域名；CF 模式: CF 配了 catch-all 的域名）'
+      )
     }
-    this.fixedPrefix = (opts.prefix || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '')
+    this.fixedPrefix = (opts.prefix || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '')
     this.privatePassword = (opts.privatePassword || '').trim()
   }
 
@@ -453,7 +492,7 @@ export class GptMailService implements TempEmailService {
         else if (ch === quote) inStr = false
         continue
       }
-      if (ch === '"' || ch === '\'') {
+      if (ch === '"' || ch === "'") {
         inStr = true
         quote = ch
       } else if (ch === '{') {
@@ -478,7 +517,13 @@ export class GptMailService implements TempEmailService {
    */
   private async request<T = Record<string, unknown>>(
     path: string,
-    init: { method?: 'GET' | 'POST' | 'DELETE'; body?: string; withToken?: boolean; headers?: Record<string, string>; _retried?: boolean } = {}
+    init: {
+      method?: 'GET' | 'POST' | 'DELETE'
+      body?: string
+      withToken?: boolean
+      headers?: Record<string, string>
+      _retried?: boolean
+    } = {}
   ): Promise<T> {
     const url = `${this.baseURL}${path}`
     const origin = new URL(this.baseURL).origin
@@ -487,11 +532,11 @@ export class GptMailService implements TempEmailService {
     const method: 'GET' | 'POST' | 'DELETE' = init.method ?? 'GET'
 
     const headers: Record<string, string> = {
-      'accept': 'application/json, text/plain, */*',
+      accept: 'application/json, text/plain, */*',
       'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'user-agent': GptMailService.UA,
-      'origin': origin,
-      'referer': referer,
+      origin: origin,
+      referer: referer,
       'sec-ch-ua': GptMailService.SEC_CH_UA,
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"Windows"',
@@ -520,19 +565,31 @@ export class GptMailService implements TempEmailService {
     }
 
     let data: unknown
-    try { data = JSON.parse(raw.body) } catch { data = raw.body }
+    try {
+      data = JSON.parse(raw.body)
+    } catch {
+      data = raw.body
+    }
 
     // 401/403 且带 token：可能是滚动 token 过期 —— 重新从页面拿一次 token 后重试一次。
     // （若是 TLS 指纹被识破的 "Browser session required"，重取也无害，最多再失败一次按原错误抛出）
-    if ((raw.status === 401 || raw.status === 403) && !init._retried && (init.withToken ?? true) && path !== '') {
+    if (
+      (raw.status === 401 || raw.status === 403) &&
+      !init._retried &&
+      (init.withToken ?? true) &&
+      path !== ''
+    ) {
       try {
         await this.fetchInitialTokenFromPage()
         return await this.request<T>(path, { ...init, _retried: true })
-      } catch { /* 重取失败则按原错误抛出 */ }
+      } catch {
+        /* 重取失败则按原错误抛出 */
+      }
     }
 
     if (raw.status < 200 || raw.status >= 300) {
-      const snippet = typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)
+      const snippet =
+        typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)
       throw new Error(`GPTmail ${path} HTTP ${raw.status}: ${snippet}`)
     }
 
@@ -583,13 +640,19 @@ export class GptMailService implements TempEmailService {
       if (this.baselineIds.size > 0) {
         console.log(`[GPTmail] inbox 基线邮件数: ${this.baselineIds.size}（轮询时将跳过）`)
       }
-    } catch { /* 基线获取失败不影响后续轮询 */ }
+    } catch {
+      /* 基线获取失败不影响后续轮询 */
+    }
 
     const mode = this.fixedInboxEmail
       ? `CF 转发 → ${this.inboxEmail}`
-      : this.privatePassword ? '私有域名直收（已解锁）' : '私有域名直收（MX→GPTmail）'
+      : this.privatePassword
+        ? '私有域名直收（已解锁）'
+        : '私有域名直收（MX→GPTmail）'
     if (this.domains.length > 1) {
-      console.log(`[GPTmail] 注册邮箱: ${this.address}  (域名池 ${this.domains.length} 个，模式: ${mode})`)
+      console.log(
+        `[GPTmail] 注册邮箱: ${this.address}  (域名池 ${this.domains.length} 个，模式: ${mode})`
+      )
     } else {
       console.log(`[GPTmail] 注册邮箱: ${this.address}  (模式: ${mode})`)
     }
@@ -606,7 +669,8 @@ export class GptMailService implements TempEmailService {
     const pageUrl = `${origin}/${this.inboxEmail}`
 
     const pageHeaders: Record<string, string> = {
-      'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'user-agent': GptMailService.UA,
       'sec-ch-ua': GptMailService.SEC_CH_UA,
@@ -636,7 +700,9 @@ export class GptMailService implements TempEmailService {
     try {
       auth = JSON.parse(jsonText)
     } catch (err) {
-      throw new Error(`GPTmail __BROWSER_AUTH JSON 解析失败: ${err instanceof Error ? err.message : err}`)
+      throw new Error(
+        `GPTmail __BROWSER_AUTH JSON 解析失败: ${err instanceof Error ? err.message : err}`
+      )
     }
     const token = typeof auth.token === 'string' ? auth.token : ''
     if (!token) {
@@ -672,7 +738,11 @@ export class GptMailService implements TempEmailService {
     return this.address
   }
 
-  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+  async waitForCode(
+    timeoutSec: number,
+    intervalSec: number,
+    signal?: AbortSignal
+  ): Promise<string> {
     if (!this.address) throw new Error('GPTmail 注册邮箱为空，需先调用 create()')
     if (!this.inboxEmail) throw new Error('GPTmail inbox 邮箱为空，需先调用 create()')
     if (!this.token) throw new Error('GPTmail token 为空，需先调用 create()')
@@ -690,7 +760,9 @@ export class GptMailService implements TempEmailService {
       try {
         const mails = await this.fetchMails()
         if (attempt === 1 || attempt % 5 === 0) {
-          console.log(`[GPTmail] [${attempt}/${maxRetries}] 收件箱(${this.inboxEmail}) 邮件数: ${mails.length}`)
+          console.log(
+            `[GPTmail] [${attempt}/${maxRetries}] 收件箱(${this.inboxEmail}) 邮件数: ${mails.length}`
+          )
         }
         for (const mail of mails) {
           const id = String(mail.id ?? '')
@@ -721,7 +793,9 @@ export class GptMailService implements TempEmailService {
 
           const code = this.extractOTP(mail)
           if (code) {
-            console.log(`[GPTmail] 提取到验证码: ${code} (from=${mail.from_address ?? ''}, subject=${subject.slice(0, 60)})`)
+            console.log(
+              `[GPTmail] 提取到验证码: ${code} (from=${mail.from_address ?? ''}, subject=${subject.slice(0, 60)})`
+            )
             // 不再全量 clear inbox：CF 转发模式下多任务共享同一 inbox，
             // 清空会误删别的任务待取的验证码。本次邮件已记入 checkedIds，
             // 后续实例靠 create() 重新捕获基线跳过，已足够避免重复取码。
@@ -730,7 +804,10 @@ export class GptMailService implements TempEmailService {
         }
       } catch (err) {
         if (attempt % 5 === 0) {
-          console.log(`[GPTmail] [${attempt}/${maxRetries}] 查询失败:`, err instanceof Error ? err.message : err)
+          console.log(
+            `[GPTmail] [${attempt}/${maxRetries}] 查询失败:`,
+            err instanceof Error ? err.message : err
+          )
         }
       }
       if (attempt % 5 === 0) console.log(`[GPTmail] [${attempt}/${maxRetries}] 暂无验证码...`)
@@ -823,12 +900,14 @@ export async function refreshOutlookToken(acc: OutlookAccount): Promise<string> 
     scope: 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'
   })
 
-  const resp = await proxyFetch(
-    'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
-    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString() }
-  )
+  const resp = await proxyFetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString()
+  })
   const data = (await resp.json()) as Record<string, unknown>
-  if (resp.status !== 200) throw new Error(`刷新失败 ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`)
+  if (resp.status !== 200)
+    throw new Error(`刷新失败 ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`)
   const token = data.access_token as string
   if (!token) throw new Error('响应中无 access_token')
   return token
@@ -846,17 +925,24 @@ class IMAPClient {
 
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const socket = tls.connect(993, 'outlook.office365.com', { servername: 'outlook.office365.com' })
+      const socket = tls.connect(993, 'outlook.office365.com', {
+        servername: 'outlook.office365.com'
+      })
       const timer = setTimeout(() => {
         socket.destroy()
         reject(new Error('连接超时'))
       }, 15000)
 
-      socket.once('error', (err) => { clearTimeout(timer); reject(err) })
+      socket.once('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
       socket.once('secureConnect', () => {
         clearTimeout(timer)
         this.socket = socket
-        this.readLine().then(() => resolve()).catch(reject)
+        this.readLine()
+          .then(() => resolve())
+          .catch(reject)
       })
     })
   }
@@ -966,7 +1052,10 @@ class IMAPClient {
     const rawLines: string[] = []
     let inBody = false
     for (const line of lines) {
-      if (line.includes('FETCH')) { inBody = true; continue }
+      if (line.includes('FETCH')) {
+        inBody = true
+        continue
+      }
       if (line === ')') continue
       if (inBody) rawLines.push(line)
     }
@@ -982,7 +1071,9 @@ class IMAPClient {
         const b64 = content.replace(/[\s]/g, '')
         try {
           decoded += Buffer.from(b64, 'base64').toString() + ' '
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
     if (decoded) return decoded
@@ -998,7 +1089,11 @@ class IMAPClient {
 
   close(): void {
     if (this.socket) {
-      try { this.socket.write('A999 LOGOUT\r\n') } catch { /* ignore */ }
+      try {
+        this.socket.write('A999 LOGOUT\r\n')
+      } catch {
+        /* ignore */
+      }
       this.socket.destroy()
       this.socket = null
     }
@@ -1038,7 +1133,8 @@ export async function waitForOTP(
       const total = await client.selectInbox()
 
       if (total <= beforeCount) {
-        if (attempt % 5 === 0) console.log(`[Outlook IMAP] [${attempt}/${maxRetries}] 暂无新邮件 (当前${total}封)...`)
+        if (attempt % 5 === 0)
+          console.log(`[Outlook IMAP] [${attempt}/${maxRetries}] 暂无新邮件 (当前${total}封)...`)
         await abortableSleep(interval * 1000, signal)
         continue
       }
@@ -1051,13 +1147,20 @@ export async function waitForOTP(
             console.log(`[Outlook IMAP] 获取到验证码: ${code}`)
             return code
           }
-        } catch { /* continue */ }
+        } catch {
+          /* continue */
+        }
       }
 
-      if (attempt % 5 === 0) console.log(`[Outlook IMAP] [${attempt}/${maxRetries}] 新邮件中未找到验证码...`)
+      if (attempt % 5 === 0)
+        console.log(`[Outlook IMAP] [${attempt}/${maxRetries}] 新邮件中未找到验证码...`)
     } catch (err) {
       if (attempt % 5 === 0) console.log(`[Outlook IMAP] 连接失败:`, err)
-      try { accessToken = await refreshOutlookToken(acc) } catch { /* ignore */ }
+      try {
+        accessToken = await refreshOutlookToken(acc)
+      } catch {
+        /* ignore */
+      }
     } finally {
       client?.close()
     }
@@ -1097,7 +1200,11 @@ export class ProtonWebviewService implements TempEmailService {
     return this.address
   }
 
-  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+  async waitForCode(
+    timeoutSec: number,
+    intervalSec: number,
+    signal?: AbortSignal
+  ): Promise<string> {
     return waitProtonOtp(this.address, {
       timeoutSec,
       intervalSec,

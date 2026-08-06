@@ -240,7 +240,11 @@ export class ConvoyCredentialClient {
     return parsed
   }
 
-  private mapHttpError(status: number, retryAfter: string | null, bodyText: string): ConvoyClientError {
+  private mapHttpError(
+    status: number,
+    retryAfter: string | null,
+    bodyText: string
+  ): ConvoyClientError {
     const detail = extractErrorMessage(bodyText)
     const suffix = detail ? `: ${detail}` : ''
     if (status === 401) {
@@ -271,7 +275,11 @@ export class ConvoyCredentialClient {
       )
     }
     if (status >= 500) {
-      return new ConvoyClientError(CONVOY_ERROR.TRANSIENT, `上游服务异常（HTTP ${status}）${suffix}`, status)
+      return new ConvoyClientError(
+        CONVOY_ERROR.TRANSIENT,
+        `上游服务异常（HTTP ${status}）${suffix}`,
+        status
+      )
     }
     return new ConvoyClientError(CONVOY_ERROR.MALFORMED, `HTTP ${status}${suffix}`, status)
   }

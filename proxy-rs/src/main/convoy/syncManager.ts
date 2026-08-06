@@ -47,7 +47,13 @@ export interface ConvoySyncManagerDeps {
   /** 快照变化后把凭证注入反代账号池 */
   applyToAccountPool: (input: {
     /** 自动车拉取的凭证 */
-    credentials: { id: string; apiKey?: string; accessToken?: string; region?: string; expiresAt?: number }[]
+    credentials: {
+      id: string
+      apiKey?: string
+      accessToken?: string
+      region?: string
+      expiresAt?: number
+    }[]
     /** 手填并探测成功的 Key */
     manualKeys: { id: string; apiKey: string; region: string; email?: string }[]
   }) => void
@@ -284,7 +290,8 @@ export class ConvoySyncManager {
       }
 
       for (const credential of snapshot.credentials) {
-        if (credential.apiKey || credential.accessToken) this.acquiredCredentialIds.add(credential.id)
+        if (credential.apiKey || credential.accessToken)
+          this.acquiredCredentialIds.add(credential.id)
       }
 
       this.applyToPool()
@@ -299,7 +306,9 @@ export class ConvoySyncManager {
         minBalanceAlertCents: config.minBalanceAlertCents
       })
       if (rejected.length > 0) {
-        this.log(`本轮 ${rejected.length} 个条目未进入可分配池：${rejected.map((r) => `${r.credentialId}(${r.reason})`).join(', ')}`)
+        this.log(
+          `本轮 ${rejected.length} 个条目未进入可分配池：${rejected.map((r) => `${r.credentialId}(${r.reason})`).join(', ')}`
+        )
       }
       return { success: true }
     } catch (err) {

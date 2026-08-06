@@ -20,7 +20,13 @@ describe('ProxyServer 管理 API 鉴权隔离', () => {
     await server.stop()
   })
 
-  async function request(path: string, key?: string, method = 'GET', body?: unknown, useXApiKey = false): Promise<Response> {
+  async function request(
+    path: string,
+    key?: string,
+    method = 'GET',
+    body?: unknown,
+    useXApiKey = false
+  ): Promise<Response> {
     const headers: Record<string, string> = {}
     if (key) {
       if (useXApiKey) headers['X-Api-Key'] = key
@@ -42,10 +48,20 @@ describe('ProxyServer 管理 API 鉴权隔离', () => {
         socket.destroy()
         reject(new Error('raw request timeout'))
       }, 2_000)
-      socket.on('connect', () => socket.end(`GET ${requestTarget} HTTP/1.1\r\nHost: ${LOOPBACK_HOST}\r\nConnection: close\r\n\r\n`))
-      socket.on('data', chunk => chunks.push(Buffer.from(chunk)))
-      socket.on('error', error => { clearTimeout(timer); reject(error) })
-      socket.on('close', () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')) })
+      socket.on('connect', () =>
+        socket.end(
+          `GET ${requestTarget} HTTP/1.1\r\nHost: ${LOOPBACK_HOST}\r\nConnection: close\r\n\r\n`
+        )
+      )
+      socket.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      socket.on('error', (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+      socket.on('close', () => {
+        clearTimeout(timer)
+        resolve(Buffer.concat(chunks).toString('utf8'))
+      })
     })
   }
 
@@ -91,7 +107,9 @@ describe('ProxyServer 管理 API 鉴权隔离', () => {
     expect(text).not.toContain(USER_KEY)
     expect(JSON.parse(text).adminApiKeyConfigured).toBe(true)
 
-    const update = await request('/admin/config', ADMIN_KEY, 'POST', { adminApiKey: 'attempted-overwrite' })
+    const update = await request('/admin/config', ADMIN_KEY, 'POST', {
+      adminApiKey: 'attempted-overwrite'
+    })
     expect(update.status).toBe(200)
     const updateText = await update.text()
     expect(updateText).not.toContain('legacy-plain-secret')
@@ -104,12 +122,25 @@ describe('ProxyServer 管理 API 鉴权隔离', () => {
 
   it('IP 拒绝优先于管理员认证，管理员与普通密钥限流桶互不碰撞', async () => {
     await server.stop()
-    server = new ProxyServer({ host: LOOPBACK_HOST, port: 0, logRequests: false, deniedIPs: [LOOPBACK_HOST], adminApiKey: ADMIN_KEY })
+    server = new ProxyServer({
+      host: LOOPBACK_HOST,
+      port: 0,
+      logRequests: false,
+      deniedIPs: [LOOPBACK_HOST],
+      adminApiKey: ADMIN_KEY
+    })
     await server.start()
     expect((await request('/admin/stats', ADMIN_KEY)).status).toBe(403)
 
     await server.stop()
-    server = new ProxyServer({ host: LOOPBACK_HOST, port: 0, logRequests: false, rateLimitPerKeyPerMinute: 1, adminApiKey: ADMIN_KEY, apiKeys: [makeApiKey({ id: 'admin:control', name: 'collision', key: USER_KEY })] })
+    server = new ProxyServer({
+      host: LOOPBACK_HOST,
+      port: 0,
+      logRequests: false,
+      rateLimitPerKeyPerMinute: 1,
+      adminApiKey: ADMIN_KEY,
+      apiKeys: [makeApiKey({ id: 'admin:control', name: 'collision', key: USER_KEY })]
+    })
     await server.start()
     expect((await request('/api/event_logging/batch', USER_KEY, 'POST')).status).toBe(200)
     expect((await request('/admin/stats', ADMIN_KEY)).status).toBe(200)
@@ -124,21 +155,38 @@ describe('ProxyServer 管理 API 鉴权隔离', () => {
   })
 
   it('拒绝管理员密钥与普通密钥同值，含初始配置和双向更新', () => {
-    expect(() => new ProxyServer({ adminApiKey: ADMIN_KEY, apiKey: ADMIN_KEY })).toThrow('Invalid admin API key configuration')
-    expect(() => new ProxyServer({ adminApiKey: ADMIN_KEY, apiKeys: [makeApiKey({ key: ADMIN_KEY, enabled: false })] })).toThrow('Invalid admin API key configuration')
+    expect(() => new ProxyServer({ adminApiKey: ADMIN_KEY, apiKey: ADMIN_KEY })).toThrow(
+      'Invalid admin API key configuration'
+    )
+    expect(
+      () =>
+        new ProxyServer({
+          adminApiKey: ADMIN_KEY,
+          apiKeys: [makeApiKey({ key: ADMIN_KEY, enabled: false })]
+        })
+    ).toThrow('Invalid admin API key configuration')
 
     server.updateConfig({ apiKeys: [makeApiKey({ key: USER_KEY })] })
-    expect(() => server.updateConfig({ adminApiKey: USER_KEY })).toThrow('Invalid admin API key configuration')
+    expect(() => server.updateConfig({ adminApiKey: USER_KEY })).toThrow(
+      'Invalid admin API key configuration'
+    )
     server.updateConfig({ adminApiKey: ADMIN_KEY })
-    expect(() => server.updateConfig({ apiKeys: [makeApiKey({ key: ADMIN_KEY })] })).toThrow('Invalid admin API key configuration')
+    expect(() => server.updateConfig({ apiKeys: [makeApiKey({ key: ADMIN_KEY })] })).toThrow(
+      'Invalid admin API key configuration'
+    )
   })
 
   it('失败的普通密钥候选不会污染运行配置或获得业务访问', async () => {
     server.updateConfig({ adminApiKey: ADMIN_KEY, apiKeys: [makeApiKey({ key: USER_KEY })] })
     const before = server.getConfig().apiKeys
-    const failedCandidate = [...(server.getConfig().apiKeys || []), makeApiKey({ id: 'candidate', key: ADMIN_KEY })]
+    const failedCandidate = [
+      ...(server.getConfig().apiKeys || []),
+      makeApiKey({ id: 'candidate', key: ADMIN_KEY })
+    ]
 
-    expect(() => server.updateConfig({ apiKeys: failedCandidate })).toThrow('Invalid admin API key configuration')
+    expect(() => server.updateConfig({ apiKeys: failedCandidate })).toThrow(
+      'Invalid admin API key configuration'
+    )
     expect(server.getConfig().apiKeys).toEqual(before)
     expect((await request('/api/event_logging/batch', ADMIN_KEY, 'POST')).status).toBe(401)
     expect((await request('/api/event_logging/batch', USER_KEY, 'POST')).status).toBe(200)

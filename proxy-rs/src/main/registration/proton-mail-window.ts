@@ -154,7 +154,11 @@ export async function openProtonLogin(
     const loggedIn = await checkLoggedIn(w)
     return { success: true, loggedIn }
   } catch (err) {
-    return { success: false, loggedIn: false, error: err instanceof Error ? err.message : String(err) }
+    return {
+      success: false,
+      loggedIn: false,
+      error: err instanceof Error ? err.message : String(err)
+    }
   }
 }
 
@@ -366,9 +370,13 @@ async function runWaitProtonOtp(address: string, opts: WaitProtonOtpOptions): Pr
         log(`[Proton] 验证码: ${res.code} (${res.matched ? '收件人精确匹配' : '正文去点兜底匹配'})`)
         return res.code
       } else if (res && res.from === 'wrong-recipient') {
-        if (attempt % 8 === 0) log(`[Proton] 最新邮件收件人非当前地址，等待当前验证码... ${res.snippet || ''}`)
+        if (attempt % 8 === 0)
+          log(`[Proton] 最新邮件收件人非当前地址，等待当前验证码... ${res.snippet || ''}`)
       } else if (res && res.from === 'body-nocode') {
-        if (attempt % 8 === 0) log(`[Proton] ${res.matched ? '已打开当前邮件但未提取到码' : '暂无匹配邮件'}: ${res.snippet || ''}`)
+        if (attempt % 8 === 0)
+          log(
+            `[Proton] ${res.matched ? '已打开当前邮件但未提取到码' : '暂无匹配邮件'}: ${res.snippet || ''}`
+          )
       } else if (res && res.from === 'error') {
         if (attempt % 10 === 0) log(`[Proton] 取码脚本异常: ${res.err}`)
       }

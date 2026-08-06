@@ -1,5 +1,14 @@
 // 系统托盘模块
-import { Tray, Menu, nativeImage, app, BrowserWindow, dialog, MenuItemConstructorOptions, NativeImage } from 'electron'
+import {
+  Tray,
+  Menu,
+  nativeImage,
+  app,
+  BrowserWindow,
+  dialog,
+  MenuItemConstructorOptions,
+  NativeImage
+} from 'electron'
 import { join } from 'path'
 import { APP_NAME } from '../shared/appIdentity'
 
@@ -22,36 +31,36 @@ function getTrayIconDir(): string {
 // 图标名称到文件名的映射
 const ICON_FILE_MAP: Record<string, string> = {
   // 应用图标
-  'app': 'icon.png',
+  app: 'icon.png',
   // 状态图标
   'status-running': '运行状态.png',
   'status-stopped': '停止状态.png',
   // 菜单图标
-  'mail': '当前账户.png',
-  'refresh': '刷新.png',
-  'switchAccount': '切换.png',
-  'copy': '复制.png',
-  'window': '弹出窗口.png',
-  'logout': '退出.png',
-  'play': '播放.png',
-  'stop': '停止状态.png',
-  'check': '已勾选.png',
-  'warning': '警告.png',
-  'usage': '用量.png',
-  'requests': '请求.png'
+  mail: '当前账户.png',
+  refresh: '刷新.png',
+  switchAccount: '切换.png',
+  copy: '复制.png',
+  window: '弹出窗口.png',
+  logout: '退出.png',
+  play: '播放.png',
+  stop: '停止状态.png',
+  check: '已勾选.png',
+  warning: '警告.png',
+  usage: '用量.png',
+  requests: '请求.png'
 }
 
 // 从文件加载图标
 function loadIconFromFile(iconKey: string): NativeImage {
   const cached = menuIcons.get(iconKey)
   if (cached) return cached
-  
+
   const fileName = ICON_FILE_MAP[iconKey]
   if (!fileName) {
     console.warn(`[Tray] Unknown icon key: ${iconKey}`)
     return nativeImage.createEmpty()
   }
-  
+
   const iconPath = join(getTrayIconDir(), fileName)
   try {
     const icon = nativeImage.createFromPath(iconPath)
@@ -106,7 +115,12 @@ interface TrayCallbacks {
   getCurrentAccount: () => TrayAccountInfo | null
   getAccountList: () => TrayAccountInfo[]
   getProxyStats: () => { totalRequests: number; successRequests: number; failedRequests: number }
-  getSessionStats: () => { totalRequests: number; successRequests: number; failedRequests: number; startTime: number }
+  getSessionStats: () => {
+    totalRequests: number
+    successRequests: number
+    failedRequests: number
+    startTime: number
+  }
 }
 
 let callbacks: TrayCallbacks | null = null
@@ -140,7 +154,7 @@ function buildTrayMenu(): Menu {
   const menuTemplate: MenuItemConstructorOptions[] = []
 
   const isEn = currentLanguage === 'en'
-  
+
   // 应用标题
   menuTemplate.push({
     label: `Kiro ${isEn ? 'Account Manager' : '账号管理器'} v${app.getVersion()}`,
@@ -153,14 +167,24 @@ function buildTrayMenu(): Menu {
   if (callbacks) {
     const proxyStatus = callbacks.getProxyStatus()
     menuTemplate.push({
-      label: proxyStatus.running 
-        ? (isEn ? `Proxy Running (Port ${proxyStatus.port})` : `代理服务运行中 (端口 ${proxyStatus.port})`) 
-        : (isEn ? 'Proxy Stopped' : '代理服务已停止'),
+      label: proxyStatus.running
+        ? isEn
+          ? `Proxy Running (Port ${proxyStatus.port})`
+          : `代理服务运行中 (端口 ${proxyStatus.port})`
+        : isEn
+          ? 'Proxy Stopped'
+          : '代理服务已停止',
       icon: getStatusIcon(proxyStatus.running),
       enabled: false
     })
     menuTemplate.push({
-      label: proxyStatus.running ? (isEn ? 'Stop Proxy' : '停止代理服务') : (isEn ? 'Start Proxy' : '启动代理服务'),
+      label: proxyStatus.running
+        ? isEn
+          ? 'Stop Proxy'
+          : '停止代理服务'
+        : isEn
+          ? 'Start Proxy'
+          : '启动代理服务',
       icon: getMenuIcon(proxyStatus.running ? 'stop' : 'play'),
       click: async () => {
         await callbacks?.onToggleProxy()
@@ -183,16 +207,16 @@ function buildTrayMenu(): Menu {
       enabled: false
     })
     menuTemplate.push({
-      label: isEn 
+      label: isEn
         ? `   Identity: ${account.idp} | ${account.subscription || 'Unknown'} | ${account.status === 'active' ? 'Active' : account.status}`
         : `   身份: ${account.idp} | ${account.subscription || '未知'} | ${account.status === 'active' ? '活跃' : account.status}`,
       icon: getMenuIcon(account.status === 'active' ? 'check' : 'warning'),
       enabled: false
     })
-    
+
     if (account.usage) {
       menuTemplate.push({
-        label: isEn 
+        label: isEn
           ? `   Usage: ${account.usage.usedCredits} / ${account.usage.totalCredits} Credits`
           : `   用量: ${account.usage.usedCredits} / ${account.usage.totalCredits} Credits`,
         icon: getMenuIcon('usage'),
@@ -200,17 +224,26 @@ function buildTrayMenu(): Menu {
       })
     }
     // 从主进程获取实时统计数据（总计和会话）
-    const proxyStats = callbacks?.getProxyStats() || { totalRequests: 0, successRequests: 0, failedRequests: 0 }
-    const sessionStats = callbacks?.getSessionStats() || { totalRequests: 0, successRequests: 0, failedRequests: 0, startTime: 0 }
+    const proxyStats = callbacks?.getProxyStats() || {
+      totalRequests: 0,
+      successRequests: 0,
+      failedRequests: 0
+    }
+    const sessionStats = callbacks?.getSessionStats() || {
+      totalRequests: 0,
+      successRequests: 0,
+      failedRequests: 0,
+      startTime: 0
+    }
     menuTemplate.push({
-      label: isEn 
+      label: isEn
         ? `   Total: ${proxyStats.totalRequests} (✓${proxyStats.successRequests} ✗${proxyStats.failedRequests})`
         : `   总计: ${proxyStats.totalRequests} (成功${proxyStats.successRequests} 失败${proxyStats.failedRequests})`,
       icon: getMenuIcon('requests'),
       enabled: false
     })
     menuTemplate.push({
-      label: isEn 
+      label: isEn
         ? `   Session: ${sessionStats.totalRequests} (✓${sessionStats.successRequests} ✗${sessionStats.failedRequests})`
         : `   本次: ${sessionStats.totalRequests} (成功${sessionStats.successRequests} 失败${sessionStats.failedRequests})`,
       icon: getMenuIcon('requests'),
@@ -237,9 +270,11 @@ function buildTrayMenu(): Menu {
   })
 
   const accounts = callbacks?.getAccountList() || accountList
-  const activeAccounts = accounts.filter(a => a.status === 'active')
+  const activeAccounts = accounts.filter((a) => a.status === 'active')
   menuTemplate.push({
-    label: isEn ? `Switch to Next Account (${activeAccounts.length} available)` : `切换到下一个账户 (${activeAccounts.length} 个可用)`,
+    label: isEn
+      ? `Switch to Next Account (${activeAccounts.length} available)`
+      : `切换到下一个账户 (${activeAccounts.length} 个可用)`,
     icon: getMenuIcon('switchAccount'),
     enabled: activeAccounts.length > 1,
     click: async () => {
@@ -330,7 +365,7 @@ export function createTray(cbs: TrayCallbacks): Tray | null {
   try {
     const iconPath = getTrayIconPath()
     let icon = nativeImage.createFromPath(iconPath)
-    
+
     // macOS 需要设置为 Template 图标
     if (process.platform === 'darwin') {
       icon = icon.resize({ width: 16, height: 16 })
@@ -380,7 +415,9 @@ export function getTray(): Tray | null {
 }
 
 // 显示关闭确认对话框
-export async function showCloseConfirmDialog(mainWindow: BrowserWindow): Promise<'minimize' | 'quit' | 'cancel'> {
+export async function showCloseConfirmDialog(
+  mainWindow: BrowserWindow
+): Promise<'minimize' | 'quit' | 'cancel'> {
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'question',
     buttons: ['最小化到托盘', '退出程序', '取消'],

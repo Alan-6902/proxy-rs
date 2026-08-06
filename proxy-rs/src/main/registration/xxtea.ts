@@ -1,5 +1,7 @@
 const DELTA = 0x9e3779b9 >>> 0
-const FALLBACK_KEY: [number, number, number, number] = [1888420705, 2576816180, 2347232058, 874813317]
+const FALLBACK_KEY: [number, number, number, number] = [
+  1888420705, 2576816180, 2347232058, 874813317
+]
 const FALLBACK_VER = '4.0.0'
 const FALLBACK_IDENTIFIER = 'ECdITeCs'
 
@@ -93,7 +95,10 @@ function xxteaEncryptCore(plaintext: string, key: [number, number, number, numbe
   const n = Math.ceil(plaintext.length / 4)
   const v = new Uint32Array(n)
   for (let i = 0; i < n; i++) {
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0
+    let b0 = 0,
+      b1 = 0,
+      b2 = 0,
+      b3 = 0
     if (4 * i < plaintext.length) b0 = plaintext.charCodeAt(4 * i)
     if (4 * i + 1 < plaintext.length) b1 = plaintext.charCodeAt(4 * i + 1)
     if (4 * i + 2 < plaintext.length) b2 = plaintext.charCodeAt(4 * i + 2)

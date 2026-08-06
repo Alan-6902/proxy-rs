@@ -23,13 +23,16 @@ export default {
   title: 'system=array 多 block (复刻 Claude Code 结构)',
   tags: ['anthropic', 'system', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      system: SYSTEM_CLAUDECODE_STYLE,
-      messages: [{ role: 'user', content: '简单介绍一下你能做什么.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        system: SYSTEM_CLAUDECODE_STYLE,
+        messages: [{ role: 'user', content: '简单介绍一下你能做什么.' }]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err body=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'system-array.response')

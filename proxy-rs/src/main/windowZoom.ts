@@ -21,10 +21,7 @@ export function resolveWindowZoomAction(input: WindowZoomInput): WindowZoomActio
   return null
 }
 
-export function getNextWindowZoomLevel(
-  currentLevel: number,
-  action: WindowZoomAction
-): number {
+export function getNextWindowZoomLevel(currentLevel: number, action: WindowZoomAction): number {
   if (action === 'reset') return 0
   const nextLevel = currentLevel + (action === 'in' ? 1 : -1)
   return Math.min(MAX_ZOOM_LEVEL, Math.max(MIN_ZOOM_LEVEL, nextLevel))

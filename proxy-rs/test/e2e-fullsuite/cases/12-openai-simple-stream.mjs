@@ -19,15 +19,18 @@ export default {
   title: 'OpenAI /v1/chat/completions 流式简单对话',
   tags: ['openai', 'stream', 'basic'],
   run: async ({ base, token, log }) => {
-    const result = await postOpenAI({
-      model: DEFAULT_OPENAI_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      messages: [
-        { role: 'system', content: '你是一个简洁的助手, 用一句话回答.' },
-        { role: 'user', content: '简单介绍一下你自己.' }
-      ]
-    }, { base, token })
+    const result = await postOpenAI(
+      {
+        model: DEFAULT_OPENAI_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        messages: [
+          { role: 'system', content: '你是一个简洁的助手, 用一句话回答.' },
+          { role: 'user', content: '简单介绍一下你自己.' }
+        ]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind} ttfb=${result.timing?.ttfb}ms`)
     if (result.kind === 'stream-error') log(`err=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'openai-stream.response')

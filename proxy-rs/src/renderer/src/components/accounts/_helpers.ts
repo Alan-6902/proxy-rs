@@ -34,11 +34,13 @@ export function generateGlowStyle(tagColors: string[]): CSSProperties {
       boxShadow: `0 0 0 1px ${color}, 0 4px 12px -2px ${colorTransparent}`
     }
   }
-  const gradientColors = tagColors.map((c, i) => {
-    const percent = (i / tagColors.length) * 100
-    const nextPercent = ((i + 1) / tagColors.length) * 100
-    return `${toRgba(c)} ${percent}%, ${toRgba(c)} ${nextPercent}%`
-  }).join(', ')
+  const gradientColors = tagColors
+    .map((c, i) => {
+      const percent = (i / tagColors.length) * 100
+      const nextPercent = ((i + 1) / tagColors.length) * 100
+      return `${toRgba(c)} ${percent}%, ${toRgba(c)} ${nextPercent}%`
+    })
+    .join(', ')
   return {
     background: `linear-gradient(var(--card-solid), var(--card-solid)) padding-box, linear-gradient(135deg, ${gradientColors}) border-box`,
     border: '1.5px solid transparent',
@@ -56,10 +58,12 @@ export function generateRowGlowStyle(tagColors: string[]): CSSProperties {
     }
   }
   // 多标签：垂直渐变左边色带（双层 backgroundClip trick，渐变只在 border-box 的 3px 区域显示）
-  const gradientStops = tagColors.map((c, i) => {
-    const percent = (i / (tagColors.length - 1)) * 100
-    return `${toRgba(c)} ${percent}%`
-  }).join(', ')
+  const gradientStops = tagColors
+    .map((c, i) => {
+      const percent = (i / (tagColors.length - 1)) * 100
+      return `${toRgba(c)} ${percent}%`
+    })
+    .join(', ')
   return {
     borderLeftWidth: '3px',
     borderLeftColor: 'transparent',
@@ -93,7 +97,8 @@ export const unauthorizedRowStyle: CSSProperties = {
 
 export function getSubscriptionColor(type: string, title?: string): string {
   const text = (title || type).toUpperCase()
-  if (text.includes('PRO+') || text.includes('PRO_PLUS') || text.includes('PROPLUS')) return 'bg-purple-500'
+  if (text.includes('PRO+') || text.includes('PRO_PLUS') || text.includes('PROPLUS'))
+    return 'bg-purple-500'
   if (text.includes('POWER')) return 'bg-amber-500'
   if (text.includes('PRO')) return 'bg-blue-500'
   return 'bg-gray-500'
@@ -121,11 +126,16 @@ export const StatusLabelsEn: Record<string, string> = {
 export function getStatusBadgeClass(status: string, isUnauthorized: boolean): string {
   if (isUnauthorized) return 'text-destructive bg-destructive/10'
   switch (status) {
-    case 'active': return 'text-success bg-success/10'
-    case 'error': return 'text-destructive bg-destructive/10'
-    case 'expired': return 'text-warning bg-warning/10'
-    case 'refreshing': return 'text-primary bg-primary/10'
-    default: return 'text-muted-foreground bg-muted'
+    case 'active':
+      return 'text-success bg-success/10'
+    case 'error':
+      return 'text-destructive bg-destructive/10'
+    case 'expired':
+      return 'text-warning bg-warning/10'
+    case 'refreshing':
+      return 'text-primary bg-primary/10'
+    default:
+      return 'text-muted-foreground bg-muted'
   }
 }
 
@@ -151,14 +161,22 @@ export function formatTokenExpiry(expiresAt: number, isEn: boolean): string {
   } else if (hours < 24) {
     const remainingMinutes = minutes % 60
     return isEn
-      ? (remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`)
-      : (remainingMinutes > 0 ? `${hours} 小时 ${remainingMinutes} 分` : `${hours} 小时`)
+      ? remainingMinutes > 0
+        ? `${hours}h ${remainingMinutes}m`
+        : `${hours}h`
+      : remainingMinutes > 0
+        ? `${hours} 小时 ${remainingMinutes} 分`
+        : `${hours} 小时`
   } else {
     const days = Math.floor(hours / 24)
     const remainingHours = hours % 24
     return isEn
-      ? (remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`)
-      : (remainingHours > 0 ? `${days} 天 ${remainingHours} 小时` : `${days} 天`)
+      ? remainingHours > 0
+        ? `${days}d ${remainingHours}h`
+        : `${days}d`
+      : remainingHours > 0
+        ? `${days} 天 ${remainingHours} 小时`
+        : `${days} 天`
   }
 }
 

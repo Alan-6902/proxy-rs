@@ -2,7 +2,19 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, type PageType } from './components/layout'
-import { HomePage, AboutPage, SettingsPage, ProxyPage, ProxyPoolPage, DiagnosePage, ConfigSyncPage, RegisterPage, SeatsPage, ConvoyPage, LogsPage } from './components/pages'
+import {
+  HomePage,
+  AboutPage,
+  SettingsPage,
+  ProxyPage,
+  ProxyPoolPage,
+  DiagnosePage,
+  ConfigSyncPage,
+  RegisterPage,
+  SeatsPage,
+  ConvoyPage,
+  LogsPage
+} from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { ConfirmDialogHost } from './components/ui'
 import { useAccountsStore } from './store/accounts'
@@ -45,10 +57,10 @@ function App(): React.JSX.Element {
 
   // 切换到下一个可用账户
   const switchToNextAccount = useCallback(() => {
-    const activeAccounts = Array.from(accounts.values()).filter(acc => acc.status === 'active')
+    const activeAccounts = Array.from(accounts.values()).filter((acc) => acc.status === 'active')
     if (activeAccounts.length <= 1) return
 
-    const currentIndex = activeAccounts.findIndex(acc => acc.id === activeAccountId)
+    const currentIndex = activeAccounts.findIndex((acc) => acc.id === activeAccountId)
     const nextIndex = (currentIndex + 1) % activeAccounts.length
     setActiveAccount(activeAccounts[nextIndex].id)
   }, [accounts, activeAccountId, setActiveAccount])
@@ -63,7 +75,7 @@ function App(): React.JSX.Element {
       const currentAccounts = currentState.accounts
       const currentActiveId = currentState.activeAccountId
 
-      const accountList = Array.from(currentAccounts.values()).map(acc => ({
+      const accountList = Array.from(currentAccounts.values()).map((acc) => ({
         id: acc.id,
         email: acc.email || 'Unknown',
         idp: acc.idp || 'Unknown',
@@ -80,13 +92,15 @@ function App(): React.JSX.Element {
             idp: activeAccount.idp || 'Unknown',
             status: activeAccount.status,
             subscription: activeAccount.subscription?.title || undefined,
-            usage: activeAccount.usage ? {
-              usedCredits: activeAccount.usage.current || 0,
-              totalCredits: activeAccount.usage.limit || 0,
-              totalRequests: 0,
-              successRequests: 0,
-              failedRequests: 0
-            } : undefined
+            usage: activeAccount.usage
+              ? {
+                  usedCredits: activeAccount.usage.current || 0,
+                  totalCredits: activeAccount.usage.limit || 0,
+                  totalRequests: 0,
+                  successRequests: 0,
+                  failedRequests: 0
+                }
+              : undefined
           })
         } else {
           window.api.updateTrayAccount(null)
@@ -165,7 +179,8 @@ function App(): React.JSX.Element {
 
   // 监听后台刷新结果：缓冲 + 批量化 flush，N 条结果合并为一次 set，消除 Map 复制风暴
   useEffect(() => {
-    const refreshBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> = []
+    const refreshBuffer: Array<{ id: string; success: boolean; data?: unknown; error?: string }> =
+      []
     let flushTimer: ReturnType<typeof setTimeout> | null = null
     const flush = (): void => {
       flushTimer = null
@@ -235,7 +250,8 @@ function App(): React.JSX.Element {
       if (!account) return
       const credentialChanged =
         (info.accessToken !== undefined && info.accessToken !== account.credentials.accessToken) ||
-        (info.refreshToken !== undefined && info.refreshToken !== account.credentials.refreshToken) ||
+        (info.refreshToken !== undefined &&
+          info.refreshToken !== account.credentials.refreshToken) ||
         (info.expiresAt !== undefined && info.expiresAt !== account.credentials.expiresAt) ||
         (info.credentialRevision !== undefined &&
           info.credentialRevision !== account.credentials.credentialRevision) ||

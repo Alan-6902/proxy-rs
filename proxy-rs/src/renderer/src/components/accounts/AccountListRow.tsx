@@ -1,7 +1,7 @@
 import { memo, useState, useMemo, useCallback } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import { Badge, Button } from '../ui'
+import { Badge, Button, askConfirm } from '../ui'
 import type { Account, AccountTag, AccountGroup } from '@/types/account'
 import {
   Check,
@@ -17,7 +17,8 @@ import {
   Clock,
   KeyRound,
   FolderOpen,
-  Copy
+  Copy,
+  Download
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -44,6 +45,7 @@ interface AccountListRowProps {
 // 紧凑列表行 — 视觉对齐 AccountCard
 // 高度 ~72px，圆角 + 流光边框 + 标签光晕 + 封禁红色背景
 import { canRefreshUpstreamCredential } from '../../types/account'
+import { ExportDialog } from './ExportDialog'
 
 function AccountListRowComponent({
   account,
@@ -81,16 +83,18 @@ function AccountListRowComponent({
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
   const [emailCopied, setEmailCopied] = useState(false)
+  // 单账号导出（复用批量导出对话框，格式选项一致）
+  const [showExportDialog, setShowExportDialog] = useState(false)
 
   // 封禁判定
   const isUnauthorized = isBannedError(account.lastError)
 
   // 标签
   const accountTags = useMemo(
-    () => (account.tags || []).map(id => tags.get(id)).filter((t): t is AccountTag => !!t),
+    () => (account.tags || []).map((id) => tags.get(id)).filter((t): t is AccountTag => !!t),
     [account.tags, tags]
   )
-  const tagColors = useMemo(() => accountTags.map(t => t.color), [accountTags])
+  const tagColors = useMemo(() => accountTags.map((t) => t.color), [accountTags])
 
   // 分组
   const accountGroup = useMemo(() => {
@@ -134,52 +138,76 @@ function AccountListRowComponent({
   }, [account.isActive, isUnauthorized, tagColors])
 
   // === Handlers ===
-  const handleSwitch = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation()
-    setActiveAccount(account.id)
-  }, [account.id, setActiveAccount])
+  const handleSwitch = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      setActiveAccount(account.id)
+    },
+    [account.id, setActiveAccount]
+  )
 
-  const handleRefresh = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (isRefreshing || !canRefreshUpstreamCredential(account.credentials)) return
-    setIsRefreshing(true)
-    try {
-      await refreshAccountToken(account.id)
-      await checkAccountStatus(account.id)
-    } finally {
-      setIsRefreshing(false)
-    }
-  }, [account.id, isRefreshing, refreshAccountToken, checkAccountStatus])
-
-  const handleDelete = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!confirm(isEn ? `Delete account "${account.email}"?` : `确定删除账号 "${account.email}"？`)) return
-    removeAccount(account.id)
-  }, [account.id, account.email, isEn, removeAccount])
-
-  const handleClearSuspended = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (isClearingSuspended) return
-    setIsClearingSuspended(true)
-    try {
-      const result = await window.api.proxyClearAccountSuspended(account.id)
-      if (result.success) {
-        updateAccountStatus(account.id, 'active', undefined)
+  const handleRefresh = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (isRefreshing || !canRefreshUpstreamCredential(account.credentials)) return
+      setIsRefreshing(true)
+      try {
+        await refreshAccountToken(account.id)
+        await checkAccountStatus(account.id)
+      } finally {
+        setIsRefreshing(false)
       }
-    } finally {
-      setIsClearingSuspended(false)
-    }
-  }, [account.id, isClearingSuspended, updateAccountStatus])
+    },
+    [account.id, isRefreshing, refreshAccountToken, checkAccountStatus]
+  )
 
-  const handleCopyEmail = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation()
-    const text = account.email || account.userId || ''
-    if (text) {
-      navigator.clipboard.writeText(text)
-      setEmailCopied(true)
-      setTimeout(() => setEmailCopied(false), 1500)
-    }
-  }, [account.email, account.userId])
+  const handleDelete = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation()
+      const confirmed = await askConfirm({
+        title: isEn ? `Delete account "${account.email}"?` : `确定删除账号 "${account.email}"？`,
+        description: isEn
+          ? 'The account and its stored credentials are removed from this app. This cannot be undone.'
+          : '该账号及其保存的凭据将从本应用中移除，此操作不可恢复。',
+        confirmText: isEn ? 'Delete' : '删除',
+        cancelText: isEn ? 'Cancel' : '取消',
+        tone: 'danger'
+      })
+      if (!confirmed) return
+      removeAccount(account.id)
+    },
+    [account.id, account.email, isEn, removeAccount]
+  )
+
+  const handleClearSuspended = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (isClearingSuspended) return
+      setIsClearingSuspended(true)
+      try {
+        const result = await window.api.proxyClearAccountSuspended(account.id)
+        if (result.success) {
+          updateAccountStatus(account.id, 'active', undefined)
+        }
+      } finally {
+        setIsClearingSuspended(false)
+      }
+    },
+    [account.id, isClearingSuspended, updateAccountStatus]
+  )
+
+  const handleCopyEmail = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      const text = account.email || account.userId || ''
+      if (text) {
+        navigator.clipboard.writeText(text)
+        setEmailCopied(true)
+        setTimeout(() => setEmailCopied(false), 1500)
+      }
+    },
+    [account.email, account.userId]
+  )
 
   // ============ 渲染 ============
 
@@ -189,7 +217,11 @@ function AccountListRowComponent({
         'group relative flex items-center gap-3 pl-3 pr-3 py-2.5 rounded-xl border bg-solid-card transition-all duration-300 cursor-pointer overflow-hidden',
         'hover:shadow-md',
         account.isActive && 'active-glow-border border-transparent',
-        !account.isActive && !isUnauthorized && tagColors.length === 0 && !isSelected && 'border-border'
+        !account.isActive &&
+          !isUnauthorized &&
+          tagColors.length === 0 &&
+          !isSelected &&
+          'border-border'
       )}
       style={rowStyle}
       onClick={() => toggleSelection(account.id)}
@@ -207,7 +239,10 @@ function AccountListRowComponent({
             ? 'bg-primary border-primary text-primary-foreground'
             : 'border-muted-foreground/30 hover:border-primary'
         )}
-        onClick={(e) => { e.stopPropagation(); toggleSelection(account.id) }}
+        onClick={(e) => {
+          e.stopPropagation()
+          toggleSelection(account.id)
+        }}
       >
         {isSelected && <Check className="h-3 w-3" />}
       </div>
@@ -234,7 +269,7 @@ function AccountListRowComponent({
         </div>
 
         {/* 下行：分组 + 标签 + 错误 + 复制 */}
-        <div className="flex items-center gap-1.5 min-w-0 text-[10px] overflow-hidden">
+        <div className="flex items-center gap-1.5 min-w-0 text-2xs overflow-hidden">
           {accountGroup && (
             <span
               className="px-1.5 py-0.5 rounded flex items-center gap-1 flex-shrink-0"
@@ -244,7 +279,7 @@ function AccountListRowComponent({
               {accountGroup.name}
             </span>
           )}
-          {accountTags.slice(0, 4).map(tag => {
+          {accountTags.slice(0, 4).map((tag) => {
             const tagColor = toRgba(tag.color)
             return (
               <span
@@ -268,7 +303,10 @@ function AccountListRowComponent({
 
           {/* 错误信息（非封禁，因为封禁已用红色徽章显示） */}
           {account.lastError && !isUnauthorized && (
-            <span className="text-destructive truncate flex-1 min-w-0 italic" title={account.lastError}>
+            <span
+              className="text-destructive truncate flex-1 min-w-0 italic"
+              title={account.lastError}
+            >
               {account.lastError}
             </span>
           )}
@@ -292,7 +330,7 @@ function AccountListRowComponent({
         {/* 状态徽章（min-w 保持等宽） */}
         <div
           className={cn(
-            'text-[10px] font-medium h-5 px-2 rounded-full flex items-center justify-center gap-1 min-w-[52px]',
+            'text-2xs font-medium h-5 px-2 rounded-full flex items-center justify-center gap-1 min-w-[52px]',
             getStatusBadgeClass(account.status, isUnauthorized)
           )}
         >
@@ -301,7 +339,10 @@ function AccountListRowComponent({
           {isUnauthorized ? (
             <span
               className="cursor-pointer hover:underline"
-              onClick={(e) => { e.stopPropagation(); onShowDetail() }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onShowDetail()
+              }}
             >
               {isEn ? 'Banned' : '已封禁'}
             </span>
@@ -313,7 +354,7 @@ function AccountListRowComponent({
         {/* 订阅徽章（min-w 保持等宽，PRO+/FREE 视觉对齐） */}
         <Badge
           className={cn(
-            'text-white text-[10px] h-5 px-2 border-0 min-w-[90px] flex items-center justify-center',
+            'text-white text-2xs h-5 px-2 border-0 min-w-[90px] flex items-center justify-center',
             getSubscriptionColor(account.subscription.type, account.subscription.title)
           )}
         >
@@ -323,7 +364,7 @@ function AccountListRowComponent({
         {/* IDP（固定宽度，所有账号视觉对齐） */}
         <Badge
           variant="outline"
-          className="text-[10px] h-5 px-1.5 text-muted-foreground font-normal border-muted-foreground/30 bg-muted/30 min-w-[72px] flex items-center justify-center"
+          className="text-2xs h-5 px-1.5 text-muted-foreground font-normal border-muted-foreground/30 bg-muted/30 min-w-[72px] flex items-center justify-center"
         >
           {account.idp}
         </Badge>
@@ -333,18 +374,26 @@ function AccountListRowComponent({
           <Badge
             variant="outline"
             className={cn(
-              'text-[10px] h-5 px-1.5 font-normal cursor-pointer group transition-colors',
+              'text-2xs h-5 px-1.5 font-normal cursor-pointer group transition-colors',
               boundProxy.enabled && boundProxy.status !== 'dead'
                 ? 'border-cyan-500/40 text-cyan-700 dark:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20'
                 : 'border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-500/10'
             )}
             title={`${isEn ? 'Bound proxy:' : '绑定代理：'} ${boundProxy.host}:${boundProxy.port}${boundProxy.label ? ` (${boundProxy.label})` : ''}\n${isEn ? 'Click to unbind' : '点击解绑'}`}
-            onClick={(e) => {
+            onClick={async (e) => {
               e.stopPropagation()
-              if (confirm(isEn
-                ? `Unbind ${account.email} from ${boundProxy.host}:${boundProxy.port}?`
-                : `解绑 ${account.email} 与 ${boundProxy.host}:${boundProxy.port}？`
-              )) {
+              const confirmed = await askConfirm({
+                title: isEn
+                  ? `Unbind ${account.email} from ${boundProxy.host}:${boundProxy.port}?`
+                  : `解绑 ${account.email} 与 ${boundProxy.host}:${boundProxy.port}？`,
+                description: isEn
+                  ? 'Requests for this account will stop using the bound outbound proxy.'
+                  : '该账号的请求将不再经由此出口代理。',
+                confirmText: isEn ? 'Unbind' : '解绑',
+                cancelText: isEn ? 'Cancel' : '取消',
+                tone: 'warning'
+              })
+              if (confirmed) {
                 unbindAccountFromProxy(account.id)
               }
             }}
@@ -360,7 +409,7 @@ function AccountListRowComponent({
         {/* Active 容器（始终保留宽度，确保后续元素位置固定） */}
         <div className="w-[60px] flex items-center">
           {account.isActive && (
-            <Badge className="h-5 px-2 bg-success text-white border-0 hover:bg-success/90 text-[10px] flex items-center justify-center w-full">
+            <Badge className="h-5 px-2 bg-success text-white border-0 hover:bg-success/90 text-2xs flex items-center justify-center w-full">
               <Power className="h-2.5 w-2.5 mr-0.5" />
               {isEn ? 'Active' : '当前'}
             </Badge>
@@ -373,15 +422,17 @@ function AccountListRowComponent({
 
       {/* === Credits 区（中右） === */}
       <div className="flex-shrink-0 w-40 flex flex-col gap-0.5 px-2">
-        <div className="flex items-center justify-between text-[10px]">
+        <div className="flex items-center justify-between text-2xs">
           <span className="text-muted-foreground">{isEn ? 'Usage' : '使用量'}</span>
-          <span className={cn(
-            'font-mono font-medium tabular-nums',
-            isCritical ? 'text-destructive' : isHighUsage ? 'text-warning' : 'text-foreground'
-          )}>
+          <span
+            className={cn(
+              'font-mono font-medium tabular-nums',
+              isCritical ? 'text-destructive' : isHighUsage ? 'text-warning' : 'text-foreground'
+            )}
+          >
             {percentUsed.toFixed(usagePrecision ? 2 : 0)}%
             {isCritical && (
-              <span className="ml-1 text-[9px] text-destructive font-semibold">
+              <span className="ml-1 text-3xs text-destructive font-semibold">
                 +{(percentUsed - 100).toFixed(usagePrecision ? 2 : 0)}%
               </span>
             )}
@@ -392,21 +443,30 @@ function AccountListRowComponent({
             const planRatioPct = (100 / percentUsed) * 100
             return (
               <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
-                <div className="absolute inset-y-0 left-0 bg-warning transition-all duration-300" style={{ width: `${planRatioPct}%` }} />
-                <div className="absolute inset-y-0 right-0 bg-destructive transition-all duration-300" style={{ left: `${planRatioPct}%` }} />
+                <div
+                  className="absolute inset-y-0 left-0 bg-warning transition-all duration-300"
+                  style={{ width: `${planRatioPct}%` }}
+                />
+                <div
+                  className="absolute inset-y-0 right-0 bg-destructive transition-all duration-300"
+                  style={{ left: `${planRatioPct}%` }}
+                />
               </div>
             )
           }
           return (
             <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
               <div
-                className={cn('absolute inset-y-0 left-0 transition-all duration-300', isHighUsage ? 'bg-warning' : 'bg-primary')}
+                className={cn(
+                  'absolute inset-y-0 left-0 transition-all duration-300',
+                  isHighUsage ? 'bg-warning' : 'bg-primary'
+                )}
                 style={{ width: `${Math.min(percentUsed, 100)}%` }}
               />
             </div>
           )
         })()}
-        <div className="flex justify-between text-[9px] text-muted-foreground pt-0.5">
+        <div className="flex justify-between text-3xs text-muted-foreground pt-0.5">
           <span className={cn(isCritical && 'text-destructive font-semibold')}>
             {formatUsage(account.usage.current)}
             {isCritical && ` (+${formatUsage(account.usage.current - account.usage.limit)})`}
@@ -416,23 +476,35 @@ function AccountListRowComponent({
       </div>
 
       {/* === 时间信息区 === */}
-      <div className="flex-shrink-0 hidden lg:flex flex-col leading-tight gap-0.5 text-[10px] text-muted-foreground w-28">
-        <div className="flex items-center gap-1" title={isEn ? 'Subscription days left' : '订阅剩余天数'}>
+      <div className="flex-shrink-0 hidden lg:flex flex-col leading-tight gap-0.5 text-2xs text-muted-foreground w-28">
+        <div
+          className="flex items-center gap-1"
+          title={isEn ? 'Subscription days left' : '订阅剩余天数'}
+        >
           <Clock className="h-3 w-3" />
           <span className={isExpiringSoon ? 'text-warning font-medium' : ''}>
-            {daysRemaining !== undefined ? (isEn ? `${daysRemaining}d` : `${daysRemaining}天`) : '-'}
+            {daysRemaining !== undefined
+              ? isEn
+                ? `${daysRemaining}d`
+                : `${daysRemaining}天`
+              : '-'}
           </span>
         </div>
         <div
           className="flex items-center gap-1"
-          title={account.credentials.expiresAt
-            ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN')
-            : (isEn ? 'Unknown' : '未知')
+          title={
+            account.credentials.expiresAt
+              ? new Date(account.credentials.expiresAt).toLocaleString(isEn ? 'en-US' : 'zh-CN')
+              : isEn
+                ? 'Unknown'
+                : '未知'
           }
         >
           <KeyRound className="h-3 w-3" />
           <span className={isTokenExpiringSoon ? 'text-destructive font-medium' : ''}>
-            {account.credentials.expiresAt ? formatTokenExpiry(account.credentials.expiresAt, isEn) : '-'}
+            {account.credentials.expiresAt
+              ? formatTokenExpiry(account.credentials.expiresAt, isEn)
+              : '-'}
           </span>
         </div>
       </div>
@@ -449,7 +521,11 @@ function AccountListRowComponent({
               disabled={isClearingSuspended}
               title={isEn ? 'Reset Suspended' : '重置封禁状态'}
             >
-              {isClearingSuspended ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+              {isClearingSuspended ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" />
+              )}
             </Button>
             <a
               href="https://support.aws.amazon.com/#/contacts/kiro"
@@ -481,7 +557,11 @@ function AccountListRowComponent({
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-foreground"
           onClick={handleRefresh}
-          disabled={isRefreshing || account.status === 'refreshing' || !canRefreshUpstreamCredential(account.credentials)}
+          disabled={
+            isRefreshing ||
+            account.status === 'refreshing' ||
+            !canRefreshUpstreamCredential(account.credentials)
+          }
           title={isEn ? 'Check account info' : '检查账户信息'}
         >
           <RefreshCw className={cn('h-3.5 w-3.5', isRefreshing && 'animate-spin')} />
@@ -491,7 +571,23 @@ function AccountListRowComponent({
           size="icon"
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-foreground"
-          onClick={(e) => { e.stopPropagation(); onShowDetail() }}
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowExportDialog(true)
+          }}
+          title={isEn ? 'Export this account' : '导出该账号'}
+        >
+          <Download className="h-3.5 w-3.5" />
+        </Button>
+
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          onClick={(e) => {
+            e.stopPropagation()
+            onShowDetail()
+          }}
           title={isEn ? 'Details' : '详情'}
         >
           <Info className="h-3.5 w-3.5" />
@@ -501,7 +597,10 @@ function AccountListRowComponent({
           size="icon"
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-foreground"
-          onClick={(e) => { e.stopPropagation(); onEdit() }}
+          onClick={(e) => {
+            e.stopPropagation()
+            onEdit()
+          }}
           title={isEn ? 'Edit' : '编辑'}
         >
           <Edit className="h-3.5 w-3.5" />
@@ -524,6 +623,17 @@ function AccountListRowComponent({
       {account.isActive && isUnauthorized && (
         <div className="banned-badge" title={isEn ? 'Banned' : '已封禁'} />
       )}
+
+      {/* 单账号导出弹窗 —— 走 portal，但 React 合成事件仍沿组件树冒泡，
+          需拦住 click 否则会触发行的 toggleSelection */}
+      <div onClick={(e) => e.stopPropagation()}>
+        <ExportDialog
+          open={showExportDialog}
+          onClose={() => setShowExportDialog(false)}
+          accounts={[account]}
+          selectedCount={1}
+        />
+      </div>
     </div>
   )
 }

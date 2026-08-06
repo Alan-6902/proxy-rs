@@ -104,8 +104,7 @@ const CREDENTIAL_STATUS_STYLE: Record<ConvoyCredentialStatus, string> = {
     'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
   [CONVOY_CREDENTIAL_STATUS.EXPIRED]:
     'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
-  [CONVOY_CREDENTIAL_STATUS.UNAVAILABLE]:
-    'bg-muted text-muted-foreground border-border'
+  [CONVOY_CREDENTIAL_STATUS.UNAVAILABLE]: 'bg-muted text-muted-foreground border-border'
 }
 
 const ALERT_STYLE: Record<ConvoyAlertKind, string> = {
@@ -187,12 +186,15 @@ export function ConvoyPage(): React.JSX.Element {
   const stateStyle = STATE_STYLE[status?.state ?? CONVOY_STATE.IDLE]
 
   /** 配置里的金额以分存，输入框以元编辑，保存时统一换算 */
-  const buildConfigToSave = useCallback((): Partial<ConvoySyncConfig> => ({
-    ...config,
-    maxChargePerPullCents: toCents(chargeText.maxChargePerPull),
-    dailyChargeLimitCents: toCents(chargeText.dailyChargeLimit),
-    minBalanceAlertCents: toCents(chargeText.minBalanceAlert)
-  }), [chargeText, config])
+  const buildConfigToSave = useCallback(
+    (): Partial<ConvoySyncConfig> => ({
+      ...config,
+      maxChargePerPullCents: toCents(chargeText.maxChargePerPull),
+      dailyChargeLimitCents: toCents(chargeText.dailyChargeLimit),
+      minBalanceAlertCents: toCents(chargeText.minBalanceAlert)
+    }),
+    [chargeText, config]
+  )
 
   const handleSave = useCallback(async () => {
     setBusy('saving')
@@ -508,9 +510,7 @@ export function ConvoyPage(): React.JSX.Element {
               <Label className="text-xs">{isEn ? 'Max charge / pull' : '单次金额上限'}</Label>
               <Input
                 value={chargeText.maxChargePerPull}
-                onChange={(e) =>
-                  setChargeText({ ...chargeText, maxChargePerPull: e.target.value })
-                }
+                onChange={(e) => setChargeText({ ...chargeText, maxChargePerPull: e.target.value })}
                 className="font-mono"
               />
             </div>
@@ -518,9 +518,7 @@ export function ConvoyPage(): React.JSX.Element {
               <Label className="text-xs">{isEn ? 'Daily charge limit' : '每日金额上限'}</Label>
               <Input
                 value={chargeText.dailyChargeLimit}
-                onChange={(e) =>
-                  setChargeText({ ...chargeText, dailyChargeLimit: e.target.value })
-                }
+                onChange={(e) => setChargeText({ ...chargeText, dailyChargeLimit: e.target.value })}
                 className="font-mono"
               />
             </div>
@@ -528,9 +526,7 @@ export function ConvoyPage(): React.JSX.Element {
               <Label className="text-xs">{isEn ? 'Low balance alert' : '余额告警阈值'}</Label>
               <Input
                 value={chargeText.minBalanceAlert}
-                onChange={(e) =>
-                  setChargeText({ ...chargeText, minBalanceAlert: e.target.value })
-                }
+                onChange={(e) => setChargeText({ ...chargeText, minBalanceAlert: e.target.value })}
                 className="font-mono"
               />
             </div>
@@ -590,7 +586,12 @@ export function ConvoyPage(): React.JSX.Element {
               )}
               {isEn ? 'Save & restart polling' : '保存并重启轮询'}
             </Button>
-            <Button variant="outline" className="rounded-xl" onClick={handleClear} disabled={isBusy}>
+            <Button
+              variant="outline"
+              className="rounded-xl"
+              onClick={handleClear}
+              disabled={isBusy}
+            >
               <Trash2 className="mr-1.5 h-4 w-4" />
               {isEn ? 'Clear key & config' : '清除 Key 与配置'}
             </Button>
@@ -741,9 +742,7 @@ export function ConvoyPage(): React.JSX.Element {
                 <thead className="sticky top-0 bg-muted/60 text-2xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">ID</th>
-                    <th className="px-3 py-2 text-left font-medium">
-                      {isEn ? 'Status' : '状态'}
-                    </th>
+                    <th className="px-3 py-2 text-left font-medium">{isEn ? 'Status' : '状态'}</th>
                     <th className="px-3 py-2 text-left font-medium">{isEn ? 'Type' : '类型'}</th>
                     <th className="px-3 py-2 text-left font-medium">
                       {isEn ? 'Credential' : '凭证'}
@@ -761,10 +760,7 @@ export function ConvoyPage(): React.JSX.Element {
                       <td className="px-3 py-2">
                         <Badge
                           variant="outline"
-                          className={cn(
-                            'text-2xs',
-                            CREDENTIAL_STATUS_STYLE[credential.status]
-                          )}
+                          className={cn('text-2xs', CREDENTIAL_STATUS_STYLE[credential.status])}
                         >
                           {credential.status}
                         </Badge>
@@ -827,7 +823,12 @@ function ToggleRow({
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="min-w-0">
-        <p className={cn('text-sm font-medium', danger && checked && 'text-red-700 dark:text-red-400')}>
+        <p
+          className={cn(
+            'text-sm font-medium',
+            danger && checked && 'text-red-700 dark:text-red-400'
+          )}
+        >
           {label}
         </p>
         <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>

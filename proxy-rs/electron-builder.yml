@@ -16,8 +16,8 @@ asarUnpack:
   - node_modules/tlsclientwrapper/**
   - node_modules/piscina/**
 extraResources:
-  - from: "resources/tls-client-xgo-1.14.0-windows-amd64.dll"
-    to: "tls-client-xgo-1.14.0-windows-amd64.dll"
+  - from: 'resources/tls-client-xgo-1.14.0-windows-amd64.dll'
+    to: 'tls-client-xgo-1.14.0-windows-amd64.dll'
 protocols:
   name: Proxy RS Auth
   schemes:
@@ -33,14 +33,14 @@ nsis:
   shortcutName: Proxy RS
   uninstallDisplayName: Proxy RS
   createDesktopShortcut: always
-  oneClick: false           # 关闭一键安装，显示安装向导
-  allowToChangeInstallationDirectory: true  # 允许选择安装位置
+  oneClick: false # 关闭一键安装，显示安装向导
+  allowToChangeInstallationDirectory: true # 允许选择安装位置
   perMachine: false
-  runAfterFinish: false     # 安装完不自动启动
+  runAfterFinish: false # 安装完不自动启动
   installerIcon: resources/icon.ico
   uninstallerIcon: resources/icon.ico
 mac:
-  identity: null  # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
+  identity: null # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
   # 使用无空格的包名作为本地产物文件名前缀，保证各平台命名一致。
   artifactName: ${name}-${version}-${arch}-mac.${ext}
   # 架构由 npm 打包命令决定，便于双架构与当前机器单架构构建共用配置。
@@ -54,7 +54,7 @@ mac:
     - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
     - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
   notarize: false
-  hardenedRuntime: false  # 禁用强化运行时（需要签名）
+  hardenedRuntime: false # 禁用强化运行时（需要签名）
 dmg:
   artifactName: ${name}-${version}-${arch}.${ext}
 linux:

@@ -40,7 +40,10 @@ export function TitleBar(): React.ReactNode {
     init()
 
     // 获取应用版本号
-    window.api.getAppVersion().then(setAppVersion).catch(() => {})
+    window.api
+      .getAppVersion()
+      .then(setAppVersion)
+      .catch(() => {})
 
     return () => cleanup?.()
   }, [])
@@ -54,13 +57,15 @@ export function TitleBar(): React.ReactNode {
         'bg-[var(--titlebar-bg)] text-foreground/80',
         'border-b border-foreground/5'
       )}
-      style={{
-        // 整条 titlebar 可拖动
-        WebkitAppRegion: 'drag',
-        // mac 留 80px 给 traffic lights
-        paddingLeft: isMac ? 80 : 12,
-        paddingRight: isMac ? 12 : 0
-      } as React.CSSProperties}
+      style={
+        {
+          // 整条 titlebar 可拖动
+          WebkitAppRegion: 'drag',
+          // mac 留 80px 给 traffic lights
+          paddingLeft: isMac ? 80 : 12,
+          paddingRight: isMac ? 12 : 0
+        } as React.CSSProperties
+      }
     >
       {/* 应用图标 + 标题 */}
       <div
@@ -70,15 +75,24 @@ export function TitleBar(): React.ReactNode {
         )}
       >
         {!isMac && (
-          <img src="./icon.png" alt="" className="h-4 w-4 opacity-90" onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')} />
+          <img
+            src="./icon.png"
+            alt=""
+            className="h-4 w-4 opacity-90"
+            onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
+          />
         )}
         <span className="font-medium tracking-wide text-foreground/70">
-          {APP_NAME}{appVersion && ` v${appVersion}`}
+          {APP_NAME}
+          {appVersion && ` v${appVersion}`}
         </span>
       </div>
 
       {/* 任务中心入口（仅当有任务时显示） */}
-      <div className="flex items-center gap-1 px-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+      <div
+        className="flex items-center gap-1 px-2"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
         <TaskCenterButton />
       </div>
 
@@ -88,17 +102,27 @@ export function TitleBar(): React.ReactNode {
           className="flex items-stretch h-full"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
-          <TitleBarButton onClick={() => window.api.window.minimize()} title={isEn ? 'Minimize' : '最小化'}>
+          <TitleBarButton
+            onClick={() => window.api.window.minimize()}
+            title={isEn ? 'Minimize' : '最小化'}
+          >
             <Minus className="h-3.5 w-3.5" strokeWidth={2} />
           </TitleBarButton>
-          <TitleBarButton onClick={() => window.api.window.maximizeToggle()} title={isMaximized ? (isEn ? 'Restore' : '还原') : (isEn ? 'Maximize' : '最大化')}>
+          <TitleBarButton
+            onClick={() => window.api.window.maximizeToggle()}
+            title={isMaximized ? (isEn ? 'Restore' : '还原') : isEn ? 'Maximize' : '最大化'}
+          >
             {isMaximized ? (
               <RestoreIcon className="h-3 w-3" strokeWidth={2} />
             ) : (
               <Square className="h-3 w-3" strokeWidth={2} />
             )}
           </TitleBarButton>
-          <TitleBarButton onClick={() => window.api.window.close()} title={isEn ? 'Close' : '关闭'} variant="close">
+          <TitleBarButton
+            onClick={() => window.api.window.close()}
+            title={isEn ? 'Close' : '关闭'}
+            variant="close"
+          >
             <X className="h-3.5 w-3.5" strokeWidth={2} />
           </TitleBarButton>
         </div>
@@ -114,7 +138,12 @@ interface TitleBarButtonProps {
   children: React.ReactNode
 }
 
-function TitleBarButton({ onClick, title, variant = 'default', children }: TitleBarButtonProps): React.ReactNode {
+function TitleBarButton({
+  onClick,
+  title,
+  variant = 'default',
+  children
+}: TitleBarButtonProps): React.ReactNode {
   return (
     <button
       type="button"
@@ -123,9 +152,7 @@ function TitleBarButton({ onClick, title, variant = 'default', children }: Title
       className={cn(
         'flex items-center justify-center w-12 h-full text-foreground/70 transition-colors',
         'hover:text-foreground',
-        variant === 'close'
-          ? 'hover:bg-red-500 hover:text-white'
-          : 'hover:bg-foreground/10'
+        variant === 'close' ? 'hover:bg-red-500 hover:text-white' : 'hover:bg-foreground/10'
       )}
     >
       {children}

@@ -1,15 +1,28 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+
+/* ==================== 展示字体（本地打包，CSP default-src 'self' 下唯一可行方案） ====================
+ * Bricolage Grotesque Variable / OFL-1.1 / latin 子集
+ * 只承担标题与数据强调，中文与正文由系统字体栈承接，避免 fallback 时布局跳动。
+ * 授权与轴信息见 assets/fonts/LICENSE-BricolageGrotesque.txt */
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  font-style: normal;
+  font-weight: 200 800;
+  font-stretch: 75% 100%;
+  font-display: swap;
+  src: url('../assets/fonts/BricolageGrotesque-Variable-latin.woff2') format('woff2');
+}
 
 @theme {
   /* ==================== 浅色模式 - F1 清新冰白蓝 ==================== */
-  --color-background: #EEF2F8;
+  --color-background: #eef2f8;
   --color-foreground: #0f172a;
   --color-card: rgba(255, 255, 255, 0.72);
   --color-card-foreground: #0f172a;
-  --card-solid: #FFFFFF; /* 账户卡片专用不透明背景，避免主题色透过玻璃态渗染数据区 */
+  --card-solid: #ffffff; /* 账户卡片专用不透明背景，避免主题色透过玻璃态渗染数据区 */
   --color-popover: rgba(255, 255, 255, 0.95);
   --color-popover-foreground: #0f172a;
-  --color-primary: #5B8CFF;
+  --color-primary: #5b8cff;
   --color-primary-foreground: #ffffff;
   --color-secondary: rgba(241, 245, 249, 0.6);
   --color-secondary-foreground: #1e293b;
@@ -21,37 +34,85 @@
   --color-destructive-foreground: #ffffff;
   --color-border: rgba(255, 255, 255, 0.4);
   --color-input: rgba(255, 255, 255, 0.6);
-  --color-ring: #5B8CFF;
-  --color-success: #22C55E;
+  --color-ring: #5b8cff;
+  --color-success: #22c55e;
   --color-warning: #f59e0b;
-  --color-accent-violet: #8B5CF6;
+  --color-accent-violet: #8b5cf6;
+
+  /* ==================== 排版层级（编辑感：展示字与正文字分工明确） ====================
+   * display : 页面标题 / 大数字 —— 方形骨架 + 收紧字距，撑出版面重量
+   * sans    : 正文 / 控件 —— 系统栈，中英混排最稳
+   * mono    : ID / Token / 时间戳 —— 等宽 + tabular */
+  --font-display:
+    'Bricolage Grotesque', ui-sans-serif, system-ui, -apple-system, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* 桌面端可读性字号：统一抬高原先偏小的 xs / sm 层级 */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: 1.375rem;
+
+  /* 更小的两档：给徽标、角标、表格辅助列等密集处使用。
+   * 取代散落各页的 text-[9px] / text-[10px] 硬编码像素值——
+   * 数值与原先 globals.css 属性选择器兜底后的实际渲染结果一致。 */
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1rem;
+  --text-3xs: 0.6875rem;
+  --text-3xs--line-height: 0.875rem;
+
+  /* 展示字号阶梯（用于 PageHeader / KPI 数字，行高压紧以贴合大字重） */
+  --text-display-sm: 1.375rem;
+  --text-display-sm--line-height: 1.75rem;
+  --text-display: 1.75rem;
+  --text-display--line-height: 2rem;
+  --text-display-lg: 2.25rem;
+  --text-display-lg--line-height: 2.375rem;
+
+  /* 字距：大字收紧、小字微张，全站只用这三档 */
+  --tracking-display: -0.028em;
+  --tracking-tight-title: -0.014em;
+  --tracking-eyebrow: 0.16em;
 
   /* Sidebar 激活药丸渐变（主色 → 紫辅） */
-  --gradient-from: #5B8CFF;
-  --gradient-to:   #8B5CF6;
+  --gradient-from: #5b8cff;
+  --gradient-to: #8b5cf6;
 
   /* 圆角系统 */
-  --radius-sm: 0.5rem;     /* 8px */
-  --radius-md: 0.75rem;    /* 12px */
-  --radius-lg: 1rem;       /* 16px */
-  --radius-xl: 1.25rem;    /* 20px */
-  --radius-2xl: 1.5rem;    /* 24px - 新主流 Card 圆角 */
-  --radius-3xl: 2rem;      /* 32px - 容器级 */
+  --radius-sm: 0.5rem; /* 8px */
+  --radius-md: 0.75rem; /* 12px */
+  --radius-lg: 1rem; /* 16px */
+  --radius-xl: 1.25rem; /* 20px */
+  --radius-2xl: 1.5rem; /* 24px - 新主流 Card 圆角 */
+  --radius-3xl: 2rem; /* 32px - 容器级 */
 
   /* ==================== 玻璃态 (Glassmorphism) 令牌 ==================== */
   --glass-bg: rgba(255, 255, 255, 0.55);
-  --glass-bg-strong: rgba(255, 255, 255, 0.90);
+  --glass-bg-strong: rgba(255, 255, 255, 0.9);
   --glass-bg-subtle: rgba(255, 255, 255, 0.35);
   --glass-border: rgba(255, 255, 255, 0.4);
   --glass-border-strong: rgba(255, 255, 255, 0.6);
   /* 玻璃阳光：微外描边 + 轻远阴影 + 近接触影（低调远阴影避免卡片间隙发黑） */
-  --glass-shadow: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(31, 38, 135, 0.06), 0 1px 3px rgba(31, 38, 135, 0.04);
-  --glass-shadow-hover: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 12px 32px rgba(31, 38, 135, 0.12), 0 3px 8px rgba(31, 38, 135, 0.06);
+  --glass-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(31, 38, 135, 0.06),
+    0 1px 3px rgba(31, 38, 135, 0.04);
+  --glass-shadow-hover:
+    0 0 0 1px rgba(15, 23, 42, 0.06), 0 12px 32px rgba(31, 38, 135, 0.12),
+    0 3px 8px rgba(31, 38, 135, 0.06);
   --glass-shadow-glow: 0 0 0 1px rgba(91, 140, 255, 0.18), 0 8px 32px rgba(91, 140, 255, 0.18);
   --glass-shadow-violet: 0 0 0 1px rgba(139, 92, 246, 0.18), 0 8px 32px rgba(139, 92, 246, 0.18);
 
   /* Titlebar 颜色 - 浅色冰白蓝玻璃 */
-  --titlebar-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.78) 0%, rgba(229, 235, 245, 0.65) 100%);
+  --titlebar-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.78) 0%,
+    rgba(229, 235, 245, 0.65) 100%
+  );
 
   /* 账户卡片状态颜色 - 浅色模式 */
   --card-active-bg: rgba(91, 140, 255, 0.08);
@@ -70,14 +131,14 @@
 
 /* ==================== 深色模式 - E1 深空蓝 ==================== */
 .dark {
-  --color-background: #0B1220;
+  --color-background: #0b1220;
   --color-foreground: #f1f5f9;
   --color-card: rgba(22, 30, 48, 0.6);
   --color-card-foreground: #f1f5f9;
-  --card-solid: #1A2236; /* 深色模式对应的不透明卡片背景 */
+  --card-solid: #1a2236; /* 深色模式对应的不透明卡片背景 */
   --color-popover: rgba(20, 25, 40, 0.95);
   --color-popover-foreground: #f1f5f9;
-  --color-primary: #7BA3FF;
+  --color-primary: #7ba3ff;
   --color-primary-foreground: #0a0e1a;
   --color-secondary: rgba(40, 45, 60, 0.5);
   --color-secondary-foreground: #f1f5f9;
@@ -87,20 +148,24 @@
   --color-accent-foreground: #f1f5f9;
   --color-border: rgba(255, 255, 255, 0.08);
   --color-input: rgba(40, 45, 60, 0.5);
-  --color-ring: #7BA3FF;
+  --color-ring: #7ba3ff;
 
   /* 深色模式默认渐变 */
-  --gradient-from: #7BA3FF;
-  --gradient-to:   #A78BFA;
+  --gradient-from: #7ba3ff;
+  --gradient-to: #a78bfa;
 
   /* 玻璃态 - 深色 */
   --glass-bg: rgba(20, 25, 40, 0.65);
-  --glass-bg-strong: rgba(20, 25, 40, 0.90);
+  --glass-bg-strong: rgba(20, 25, 40, 0.9);
   --glass-bg-subtle: rgba(20, 25, 40, 0.45);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-border-strong: rgba(255, 255, 255, 0.15);
-  --glass-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 8px 32px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.2);
-  --glass-shadow-hover: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.3);
+  --glass-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04), 0 8px 32px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.2);
+  --glass-shadow-hover:
+    0 0 0 1px rgba(255, 255, 255, 0.08), 0 16px 48px rgba(0, 0, 0, 0.55),
+    0 4px 12px rgba(0, 0, 0, 0.3);
   --glass-shadow-glow: 0 0 0 1px rgba(123, 163, 255, 0.25), 0 8px 32px rgba(123, 163, 255, 0.18);
   --glass-shadow-violet: 0 0 0 1px rgba(167, 139, 250, 0.25), 0 8px 32px rgba(167, 139, 250, 0.18);
 
@@ -130,13 +195,13 @@
   --color-primary: #a855f7;
   --color-ring: #a855f7;
   --gradient-from: #a855f7;
-  --gradient-to:   #7c3aed;
+  --gradient-to: #7c3aed;
 }
 .theme-purple.dark {
   --color-primary: #c084fc;
   --color-ring: #c084fc;
   --gradient-from: #c084fc;
-  --gradient-to:   #a78bfa;
+  --gradient-to: #a78bfa;
 }
 
 /* 翠绿 - 翠→青青 */
@@ -144,13 +209,13 @@
   --color-primary: #10b981;
   --color-ring: #10b981;
   --gradient-from: #10b981;
-  --gradient-to:   #14b8a6;
+  --gradient-to: #14b8a6;
 }
 .theme-emerald.dark {
   --color-primary: #34d399;
   --color-ring: #34d399;
   --gradient-from: #34d399;
-  --gradient-to:   #2dd4bf;
+  --gradient-to: #2dd4bf;
 }
 
 /* 橙色 - 橙 → 红 */
@@ -158,13 +223,13 @@
   --color-primary: #f97316;
   --color-ring: #f97316;
   --gradient-from: #f97316;
-  --gradient-to:   #ef4444;
+  --gradient-to: #ef4444;
 }
 .theme-orange.dark {
   --color-primary: #fb923c;
   --color-ring: #fb923c;
   --gradient-from: #fb923c;
-  --gradient-to:   #f87171;
+  --gradient-to: #f87171;
 }
 
 /* 玫瑰 - 玫瑰 → 粉 */
@@ -172,13 +237,13 @@
   --color-primary: #f43f5e;
   --color-ring: #f43f5e;
   --gradient-from: #f43f5e;
-  --gradient-to:   #ec4899;
+  --gradient-to: #ec4899;
 }
 .theme-rose.dark {
   --color-primary: #fb7185;
   --color-ring: #fb7185;
   --gradient-from: #fb7185;
-  --gradient-to:   #f472b6;
+  --gradient-to: #f472b6;
 }
 
 /* 青色 - 青 → 蓝 */
@@ -186,13 +251,13 @@
   --color-primary: #06b6d4;
   --color-ring: #06b6d4;
   --gradient-from: #06b6d4;
-  --gradient-to:   #0ea5e9;
+  --gradient-to: #0ea5e9;
 }
 .theme-cyan.dark {
   --color-primary: #22d3ee;
   --color-ring: #22d3ee;
   --gradient-from: #22d3ee;
-  --gradient-to:   #38bdf8;
+  --gradient-to: #38bdf8;
 }
 
 /* 琥珀 - 琥珀 → 黄 */
@@ -200,13 +265,13 @@
   --color-primary: #f59e0b;
   --color-ring: #f59e0b;
   --gradient-from: #f59e0b;
-  --gradient-to:   #eab308;
+  --gradient-to: #eab308;
 }
 .theme-amber.dark {
   --color-primary: #fbbf24;
   --color-ring: #fbbf24;
   --gradient-from: #fbbf24;
-  --gradient-to:   #facc15;
+  --gradient-to: #facc15;
 }
 
 /* 水鸭蓝 - 水鸭 → 翠 */
@@ -214,13 +279,13 @@
   --color-primary: #14b8a6;
   --color-ring: #14b8a6;
   --gradient-from: #14b8a6;
-  --gradient-to:   #10b981;
+  --gradient-to: #10b981;
 }
 .theme-teal.dark {
   --color-primary: #2dd4bf;
   --color-ring: #2dd4bf;
   --gradient-from: #2dd4bf;
-  --gradient-to:   #34d399;
+  --gradient-to: #34d399;
 }
 
 /* 靖蓝 - 靖 → 紫 */
@@ -228,13 +293,13 @@
   --color-primary: #6366f1;
   --color-ring: #6366f1;
   --gradient-from: #6366f1;
-  --gradient-to:   #8b5cf6;
+  --gradient-to: #8b5cf6;
 }
 .theme-indigo.dark {
   --color-primary: #818cf8;
   --color-ring: #818cf8;
   --gradient-from: #818cf8;
-  --gradient-to:   #a78bfa;
+  --gradient-to: #a78bfa;
 }
 
 /* 青柠 - 青柠 → 翠 */
@@ -242,13 +307,13 @@
   --color-primary: #84cc16;
   --color-ring: #84cc16;
   --gradient-from: #84cc16;
-  --gradient-to:   #10b981;
+  --gradient-to: #10b981;
 }
 .theme-lime.dark {
   --color-primary: #a3e635;
   --color-ring: #a3e635;
   --gradient-from: #a3e635;
-  --gradient-to:   #34d399;
+  --gradient-to: #34d399;
 }
 
 /* 粉红 - 粉 → 玫瑰 */
@@ -256,13 +321,13 @@
   --color-primary: #ec4899;
   --color-ring: #ec4899;
   --gradient-from: #ec4899;
-  --gradient-to:   #f43f5e;
+  --gradient-to: #f43f5e;
 }
 .theme-pink.dark {
   --color-primary: #f472b6;
   --color-ring: #f472b6;
   --gradient-from: #f472b6;
-  --gradient-to:   #fb7185;
+  --gradient-to: #fb7185;
 }
 
 /* 石板灰 - 灰 → 靖 */
@@ -270,13 +335,13 @@
   --color-primary: #64748b;
   --color-ring: #64748b;
   --gradient-from: #64748b;
-  --gradient-to:   #6366f1;
+  --gradient-to: #6366f1;
 }
 .theme-slate.dark {
   --color-primary: #94a3b8;
   --color-ring: #94a3b8;
   --gradient-from: #94a3b8;
-  --gradient-to:   #818cf8;
+  --gradient-to: #818cf8;
 }
 
 /* 锌灰 - 灰 → 深灰 */
@@ -284,13 +349,13 @@
   --color-primary: #71717a;
   --color-ring: #71717a;
   --gradient-from: #71717a;
-  --gradient-to:   #52525b;
+  --gradient-to: #52525b;
 }
 .theme-zinc.dark {
   --color-primary: #a1a1aa;
   --color-ring: #a1a1aa;
   --gradient-from: #a1a1aa;
-  --gradient-to:   #d4d4d8;
+  --gradient-to: #d4d4d8;
 }
 
 /* 晴空蓝 - 晴空 → 青 */
@@ -298,13 +363,13 @@
   --color-primary: #0ea5e9;
   --color-ring: #0ea5e9;
   --gradient-from: #0ea5e9;
-  --gradient-to:   #06b6d4;
+  --gradient-to: #06b6d4;
 }
 .theme-sky.dark {
   --color-primary: #38bdf8;
   --color-ring: #38bdf8;
   --gradient-from: #38bdf8;
-  --gradient-to:   #22d3ee;
+  --gradient-to: #22d3ee;
 }
 
 /* 紫罗兰 - 紫罗兰 → 紫 */
@@ -312,13 +377,13 @@
   --color-primary: #8b5cf6;
   --color-ring: #8b5cf6;
   --gradient-from: #8b5cf6;
-  --gradient-to:   #a855f7;
+  --gradient-to: #a855f7;
 }
 .theme-violet.dark {
   --color-primary: #a78bfa;
   --color-ring: #a78bfa;
   --gradient-from: #a78bfa;
-  --gradient-to:   #c084fc;
+  --gradient-to: #c084fc;
 }
 
 /* 洋红 - 洋红 → 粉 */
@@ -326,13 +391,13 @@
   --color-primary: #d946ef;
   --color-ring: #d946ef;
   --gradient-from: #d946ef;
-  --gradient-to:   #ec4899;
+  --gradient-to: #ec4899;
 }
 .theme-fuchsia.dark {
   --color-primary: #e879f9;
   --color-ring: #e879f9;
   --gradient-from: #e879f9;
-  --gradient-to:   #f472b6;
+  --gradient-to: #f472b6;
 }
 
 /* 热情红 - 红 → 橙 */
@@ -340,13 +405,13 @@
   --color-primary: #ef4444;
   --color-ring: #ef4444;
   --gradient-from: #ef4444;
-  --gradient-to:   #f97316;
+  --gradient-to: #f97316;
 }
 .theme-red.dark {
   --color-primary: #f87171;
   --color-ring: #f87171;
   --gradient-from: #f87171;
-  --gradient-to:   #fb923c;
+  --gradient-to: #fb923c;
 }
 
 /* 明黄 - 黄 → 琥珀 */
@@ -354,13 +419,13 @@
   --color-primary: #eab308;
   --color-ring: #eab308;
   --gradient-from: #eab308;
-  --gradient-to:   #f59e0b;
+  --gradient-to: #f59e0b;
 }
 .theme-yellow.dark {
   --color-primary: #facc15;
   --color-ring: #facc15;
   --gradient-from: #facc15;
-  --gradient-to:   #fbbf24;
+  --gradient-to: #fbbf24;
 }
 
 /* 草绿 - 绿 → 翠 */
@@ -368,13 +433,13 @@
   --color-primary: #22c55e;
   --color-ring: #22c55e;
   --gradient-from: #22c55e;
-  --gradient-to:   #10b981;
+  --gradient-to: #10b981;
 }
 .theme-green.dark {
   --color-primary: #4ade80;
   --color-ring: #4ade80;
   --gradient-from: #4ade80;
-  --gradient-to:   #2dd4bf;
+  --gradient-to: #2dd4bf;
 }
 
 /* 暖灰 - 灰 → 暖棕 */
@@ -382,13 +447,13 @@
   --color-primary: #78716c;
   --color-ring: #78716c;
   --gradient-from: #78716c;
-  --gradient-to:   #a8a29e;
+  --gradient-to: #a8a29e;
 }
 .theme-stone.dark {
   --color-primary: #a8a29e;
   --color-ring: #a8a29e;
   --gradient-from: #a8a29e;
-  --gradient-to:   #d6d3d1;
+  --gradient-to: #d6d3d1;
 }
 
 /* 中性灰 - 灰 → 深灰 */
@@ -396,145 +461,145 @@
   --color-primary: #737373;
   --color-ring: #737373;
   --gradient-from: #737373;
-  --gradient-to:   #525252;
+  --gradient-to: #525252;
 }
 .theme-neutral.dark {
   --color-primary: #a3a3a3;
   --color-ring: #a3a3a3;
   --gradient-from: #a3a3a3;
-  --gradient-to:   #d4d4d4;
+  --gradient-to: #d4d4d4;
 }
 
 /* ==================== 奢华配色（精致高级感） ==================== */
 
 /* 奢华金 - 金 → 深金 */
 .theme-gold {
-  --color-primary: #C9A227;
-  --color-ring: #C9A227;
-  --gradient-from: #D4AF37;
-  --gradient-to:   #B8860B;
+  --color-primary: #c9a227;
+  --color-ring: #c9a227;
+  --gradient-from: #d4af37;
+  --gradient-to: #b8860b;
 }
 .theme-gold.dark {
-  --color-primary: #E6C25C;
-  --color-ring: #E6C25C;
-  --gradient-from: #E6C25C;
-  --gradient-to:   #C9A227;
+  --color-primary: #e6c25c;
+  --color-ring: #e6c25c;
+  --gradient-from: #e6c25c;
+  --gradient-to: #c9a227;
 }
 
 /* 海军蓝 - 商务深蓝 */
 .theme-navy {
-  --color-primary: #1E40AF;
-  --color-ring: #1E40AF;
-  --gradient-from: #1E40AF;
-  --gradient-to:   #1E3A8A;
+  --color-primary: #1e40af;
+  --color-ring: #1e40af;
+  --gradient-from: #1e40af;
+  --gradient-to: #1e3a8a;
 }
 .theme-navy.dark {
-  --color-primary: #60A5FA;
-  --color-ring: #60A5FA;
-  --gradient-from: #60A5FA;
-  --gradient-to:   #3B82F6;
+  --color-primary: #60a5fa;
+  --color-ring: #60a5fa;
+  --gradient-from: #60a5fa;
+  --gradient-to: #3b82f6;
 }
 
 /* 酒红 - 优雅深红 */
 .theme-wine {
-  --color-primary: #9F1239;
-  --color-ring: #9F1239;
-  --gradient-from: #9F1239;
-  --gradient-to:   #7C2D12;
+  --color-primary: #9f1239;
+  --color-ring: #9f1239;
+  --gradient-from: #9f1239;
+  --gradient-to: #7c2d12;
 }
 .theme-wine.dark {
-  --color-primary: #E11D48;
-  --color-ring: #E11D48;
-  --gradient-from: #E11D48;
-  --gradient-to:   #BE123C;
+  --color-primary: #e11d48;
+  --color-ring: #e11d48;
+  --gradient-from: #e11d48;
+  --gradient-to: #be123c;
 }
 
 /* 香槟 - 温暖金米色 */
 .theme-champagne {
-  --color-primary: #B89968;
-  --color-ring: #B89968;
-  --gradient-from: #C8A878;
-  --gradient-to:   #A88656;
+  --color-primary: #b89968;
+  --color-ring: #b89968;
+  --gradient-from: #c8a878;
+  --gradient-to: #a88656;
 }
 .theme-champagne.dark {
-  --color-primary: #DCC9A6;
-  --color-ring: #DCC9A6;
-  --gradient-from: #DCC9A6;
-  --gradient-to:   #C8A878;
+  --color-primary: #dcc9a6;
+  --color-ring: #dcc9a6;
+  --gradient-from: #dcc9a6;
+  --gradient-to: #c8a878;
 }
 
 /* ==================== 莫兰迪色系（高级灰调） ==================== */
 
 /* 烟雾蓝 - 莫兰迪蓝灰 */
 .theme-dustyblue {
-  --color-primary: #64748B;
-  --color-ring: #64748B;
-  --gradient-from: #94A3B8;
-  --gradient-to:   #64748B;
+  --color-primary: #64748b;
+  --color-ring: #64748b;
+  --gradient-from: #94a3b8;
+  --gradient-to: #64748b;
 }
 .theme-dustyblue.dark {
-  --color-primary: #CBD5E1;
-  --color-ring: #CBD5E1;
-  --gradient-from: #CBD5E1;
-  --gradient-to:   #94A3B8;
+  --color-primary: #cbd5e1;
+  --color-ring: #cbd5e1;
+  --gradient-from: #cbd5e1;
+  --gradient-to: #94a3b8;
 }
 
 /* 陶土橙 - 大地色暖橙 */
 .theme-terracotta {
-  --color-primary: #B45434;
-  --color-ring: #B45434;
-  --gradient-from: #C2410C;
-  --gradient-to:   #9A3412;
+  --color-primary: #b45434;
+  --color-ring: #b45434;
+  --gradient-from: #c2410c;
+  --gradient-to: #9a3412;
 }
 .theme-terracotta.dark {
-  --color-primary: #FB923C;
-  --color-ring: #FB923C;
-  --gradient-from: #FB923C;
-  --gradient-to:   #EA580C;
+  --color-primary: #fb923c;
+  --color-ring: #fb923c;
+  --gradient-from: #fb923c;
+  --gradient-to: #ea580c;
 }
 
 /* 鼠尾草 - 高级灰绿 */
 .theme-sage {
-  --color-primary: #6B8E5A;
-  --color-ring: #6B8E5A;
-  --gradient-from: #84A98C;
-  --gradient-to:   #52796F;
+  --color-primary: #6b8e5a;
+  --color-ring: #6b8e5a;
+  --gradient-from: #84a98c;
+  --gradient-to: #52796f;
 }
 .theme-sage.dark {
-  --color-primary: #A3BFA0;
-  --color-ring: #A3BFA0;
-  --gradient-from: #A3BFA0;
-  --gradient-to:   #84A98C;
+  --color-primary: #a3bfa0;
+  --color-ring: #a3bfa0;
+  --gradient-from: #a3bfa0;
+  --gradient-to: #84a98c;
 }
 
 /* 烟紫 - 莫兰迪薰衣紫 */
 .theme-mauve {
-  --color-primary: #8E7CC3;
-  --color-ring: #8E7CC3;
-  --gradient-from: #B197C2;
-  --gradient-to:   #836D8E;
+  --color-primary: #8e7cc3;
+  --color-ring: #8e7cc3;
+  --gradient-from: #b197c2;
+  --gradient-to: #836d8e;
 }
 .theme-mauve.dark {
-  --color-primary: #C7B8DD;
-  --color-ring: #C7B8DD;
-  --gradient-from: #C7B8DD;
-  --gradient-to:   #B197C2;
+  --color-primary: #c7b8dd;
+  --color-ring: #c7b8dd;
+  --gradient-from: #c7b8dd;
+  --gradient-to: #b197c2;
 }
 
 /* ==================== 自然深色（沉静质感） ==================== */
 
 /* 珊瑚 - 温柔粉橙 */
 .theme-coral {
-  --color-primary: #F87171;
-  --color-ring: #F87171;
-  --gradient-from: #FB7185;
-  --gradient-to:   #F472B6;
+  --color-primary: #f87171;
+  --color-ring: #f87171;
+  --gradient-from: #fb7185;
+  --gradient-to: #f472b6;
 }
 .theme-coral.dark {
-  --color-primary: #FCA5A5;
-  --color-ring: #FCA5A5;
-  --gradient-from: #FCA5A5;
-  --gradient-to:   #FB7185;
+  --color-primary: #fca5a5;
+  --color-ring: #fca5a5;
+  --gradient-from: #fca5a5;
+  --gradient-to: #fb7185;
 }
 
 /* 森林 - 深邃自然绿 */
@@ -542,27 +607,27 @@
   --color-primary: #166534;
   --color-ring: #166534;
   --gradient-from: #166534;
-  --gradient-to:   #14532D;
+  --gradient-to: #14532d;
 }
 .theme-forest.dark {
-  --color-primary: #4ADE80;
-  --color-ring: #4ADE80;
-  --gradient-from: #4ADE80;
-  --gradient-to:   #22C55E;
+  --color-primary: #4ade80;
+  --color-ring: #4ade80;
+  --gradient-from: #4ade80;
+  --gradient-to: #22c55e;
 }
 
 /* 深海 - 海洋青绿 */
 .theme-ocean {
-  --color-primary: #155E75;
-  --color-ring: #155E75;
-  --gradient-from: #155E75;
-  --gradient-to:   #134E4A;
+  --color-primary: #155e75;
+  --color-ring: #155e75;
+  --gradient-from: #155e75;
+  --gradient-to: #134e4a;
 }
 .theme-ocean.dark {
-  --color-primary: #67E8F9;
-  --color-ring: #67E8F9;
-  --gradient-from: #67E8F9;
-  --gradient-to:   #22D3EE;
+  --color-primary: #67e8f9;
+  --color-ring: #67e8f9;
+  --gradient-from: #67e8f9;
+  --gradient-to: #22d3ee;
 }
 
 * {
@@ -570,22 +635,27 @@
 }
 
 /* ==================== 表单控件全局兜底（深色边框，玻璃背景上可见） ==================== */
-input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
 textarea,
 select {
   border-color: rgba(15, 23, 42, 0.15);
 }
-.dark input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+.dark input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
 .dark textarea,
 .dark select {
   border-color: rgba(255, 255, 255, 0.15);
 }
-input:focus, textarea:focus, select:focus {
+input:focus,
+textarea:focus,
+select:focus {
   border-color: var(--color-primary);
 }
 /* 修复：body 的 user-select:none 会干扰 Chromium IME composition 事件，导致中文输入法/部分英文输入时
    "只能删除不能输入"。对所有可编辑控件显式恢复 user-select:text + -webkit-user-select:text。 */
-input, textarea, select, [contenteditable="true"] {
+input,
+textarea,
+select,
+[contenteditable='true'] {
   -webkit-user-select: text;
   user-select: text;
 }
@@ -594,20 +664,27 @@ body {
   /* 浅色：100% 实色渐变，跟随主题色染色 */
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--gradient-from) 10%, #EEF2F8) 0%,
-    #EEF2F8 50%,
-    color-mix(in srgb, var(--gradient-to) 8%, #F2F5FA) 100%
+    color-mix(in srgb, var(--gradient-from) 10%, #eef2f8) 0%,
+    #eef2f8 50%,
+    color-mix(in srgb, var(--gradient-to) 8%, #f2f5fa) 100%
   );
   color: var(--color-foreground);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 让 UI 数字默认走等宽字形，避免刷新时数值跳动 */
+  font-variant-numeric: tabular-nums;
 }
+
 .dark body {
   /* 深色：实色深空蓝渐变 + 主题色染色 */
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--gradient-from) 14%, #0F1729) 0%,
-    #0B1220 50%,
-    color-mix(in srgb, var(--gradient-to) 10%, #060A14) 100%
+    color-mix(in srgb, var(--gradient-from) 14%, #0f1729) 0%,
+    #0b1220 50%,
+    color-mix(in srgb, var(--gradient-to) 10%, #060a14) 100%
   );
 }
 
@@ -640,7 +717,7 @@ body {
 
 /* 深色模式：浅色 thumb */
 .dark ::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.20);
+  background-color: rgba(255, 255, 255, 0.2);
 }
 .dark ::-webkit-scrollbar-thumb:hover {
   background-color: var(--color-primary);
@@ -652,7 +729,7 @@ body {
   scrollbar-color: rgba(15, 23, 42, 0.25) transparent;
 }
 .dark * {
-  scrollbar-color: rgba(255, 255, 255, 0.20) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 
 /* 流光边框动画 */
@@ -732,8 +809,9 @@ body {
   position: absolute;
   inset: -1px;
   border-radius: inherit;
-  box-shadow: 0 0 16px 1px rgba(91, 140, 255, 0.25),
-              0 0 32px 4px rgba(139, 92, 246, 0.12);
+  box-shadow:
+    0 0 16px 1px rgba(91, 140, 255, 0.25),
+    0 0 32px 4px rgba(139, 92, 246, 0.12);
   pointer-events: none;
   z-index: 0;
 }
@@ -839,8 +917,9 @@ body {
 
 /* hover 浮起 + 阴影增强 */
 .hover-lift {
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
 .hover-lift:hover {
@@ -860,8 +939,9 @@ body {
 /* ==================== 渐变描边按钮（跟随主题渐变） ==================== */
 .gradient-border {
   position: relative;
-  background: linear-gradient(var(--color-card), var(--color-card)) padding-box,
-              linear-gradient(135deg, var(--gradient-from), var(--gradient-to)) border-box;
+  background:
+    linear-gradient(var(--color-card), var(--color-card)) padding-box,
+    linear-gradient(135deg, var(--gradient-from), var(--gradient-to)) border-box;
   border: 1.5px solid transparent;
 }
 
@@ -869,7 +949,9 @@ body {
 .gradient-bg-primary {
   background: linear-gradient(135deg, var(--gradient-from) 0%, var(--gradient-to) 100%);
   color: white;
-  transition: filter 0.2s ease, box-shadow 0.25s ease;
+  transition:
+    filter 0.2s ease,
+    box-shadow 0.25s ease;
 }
 .gradient-bg-primary:hover {
   filter: brightness(1.08);
@@ -879,15 +961,29 @@ body {
 /* ==================== Ambient light 背景（主壳呼吸感） ==================== */
 
 @keyframes ambient-float-a {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33%      { transform: translate(40px, -30px) scale(1.1); }
-  66%      { transform: translate(-30px, 40px) scale(0.95); }
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(40px, -30px) scale(1.1);
+  }
+  66% {
+    transform: translate(-30px, 40px) scale(0.95);
+  }
 }
 
 @keyframes ambient-float-b {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33%      { transform: translate(-50px, 30px) scale(1.05); }
-  66%      { transform: translate(30px, -40px) scale(0.9); }
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(-50px, 30px) scale(1.05);
+  }
+  66% {
+    transform: translate(30px, -40px) scale(0.9);
+  }
 }
 
 .ambient-bg {
@@ -908,7 +1004,11 @@ body {
   width: 640px;
   height: 640px;
   /* 主题主色 blob - 左上 */
-  background: radial-gradient(circle, color-mix(in srgb, var(--gradient-from) 38%, transparent) 0%, transparent 70%);
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--gradient-from) 38%, transparent) 0%,
+    transparent 70%
+  );
   top: -240px;
   left: -160px;
   animation: ambient-float-a 22s ease-in-out infinite;
@@ -917,7 +1017,11 @@ body {
   width: 560px;
   height: 560px;
   /* 主题辅色 blob - 右下 */
-  background: radial-gradient(circle, color-mix(in srgb, var(--gradient-to) 34%, transparent) 0%, transparent 70%);
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--gradient-to) 34%, transparent) 0%,
+    transparent 70%
+  );
   bottom: -240px;
   right: -160px;
   animation: ambient-float-b 26s ease-in-out infinite;
@@ -936,15 +1040,99 @@ body {
 
 /* ==================== 呼吸辉光（用于强调元素） ==================== */
 @keyframes breathe-glow {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow: 0 0 0 0 rgba(91, 140, 255, 0);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(91, 140, 255, 0.15), 0 0 24px rgba(91, 140, 255, 0.25);
+    box-shadow:
+      0 0 0 6px rgba(91, 140, 255, 0.15),
+      0 0 24px rgba(91, 140, 255, 0.25);
   }
 }
 .breathe-glow {
   animation: breathe-glow 3s ease-in-out infinite;
+}
+
+/* ==================== 排版工具类（编辑感层级） ====================
+ * 页面里只用这几个类描述"这段文字是什么角色"，不再各页手写 text-2xl font-bold text-<色>。 */
+
+/* 页面主标题：展示字 + 大字重 + 收紧字距 */
+.type-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  font-stretch: 96%;
+  line-height: 1.08;
+}
+
+/* 卡片/区块标题：正文字体但收紧字距，与正文形成层级但不喧哗 */
+.type-title {
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight-title);
+}
+
+/* eyebrow：标题上方的全大写小标签，编辑排版的标志性元素 */
+.type-eyebrow {
+  font-family: var(--font-display);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--color-muted-foreground);
+}
+
+/* eyebrow 徽标：在 eyebrow 之上加粗放大 + 语义色药丸底 + 呼吸辉光，
+ * 用于 KPI 卡的指标名（总账号数 / 已封禁 / 使用率 …），让指标名不再退成灰色小字。
+ * 语义色由使用处通过 --chip-accent 传入，缺省回落主色。 */
+.type-eyebrow-chip {
+  --chip-accent: var(--color-primary);
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-display);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.3125rem 0.5rem;
+  border-radius: var(--radius-sm);
+  color: color-mix(in srgb, var(--chip-accent) 72%, var(--color-foreground));
+  background: color-mix(in srgb, var(--chip-accent) 14%, transparent);
+  animation: chip-breathe 2.8s ease-in-out infinite;
+}
+.dark .type-eyebrow-chip {
+  color: color-mix(in srgb, var(--chip-accent) 82%, #ffffff);
+  background: color-mix(in srgb, var(--chip-accent) 22%, transparent);
+}
+@keyframes chip-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--chip-accent) 0%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--chip-accent) 16%, transparent),
+      0 0 12px color-mix(in srgb, var(--chip-accent) 22%, transparent);
+  }
+}
+
+/* KPI 数字：展示字 + 等宽字形，保证列对齐 */
+.type-metric {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* 技术标识（ID / Token / 端点）：等宽 + 轻微字距张开便于逐字符核对 */
+.type-code {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ==================== Page Hero（统一的页面顶部视觉容器） ==================== */
@@ -957,6 +1145,61 @@ body {
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
+}
+
+/* Hero 氛围光：以前每个页面手抄两个 blur blob，现在收敛成伪元素，色相跟随主题渐变令牌。
+ * 页面只需 <div class="page-hero">，不再重复装饰 DOM。 */
+.page-hero::before,
+.page-hero::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(38px);
+}
+.page-hero::before {
+  width: 15rem;
+  height: 15rem;
+  top: -8rem;
+  right: -4rem;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--gradient-from) 28%, transparent) 0%,
+    transparent 70%
+  );
+}
+.page-hero::after {
+  width: 11rem;
+  height: 11rem;
+  bottom: -6rem;
+  left: -3rem;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--gradient-to) 22%, transparent) 0%,
+    transparent 70%
+  );
+}
+.dark .page-hero::before,
+.dark .page-hero::after {
+  opacity: 0.7;
+}
+
+/* Hero 顶部高光细线：给玻璃面一个"受光边"，比纯边框更有物理感 */
+.page-hero > .page-hero-rule {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--gradient-from) 55%, transparent) 22%,
+    color-mix(in srgb, var(--gradient-to) 55%, transparent) 72%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 1;
 }
 
 /* ==================== Page Surface（主页面内容区背景装饰） ==================== */
@@ -993,8 +1236,12 @@ body {
   pointer-events: none;
   z-index: 0;
 }
-.dark .page-surface::before { background: radial-gradient(circle, rgba(123, 163, 255, 0.06) 0%, transparent 70%); }
-.dark .page-surface::after { background: radial-gradient(circle, rgba(167, 139, 250, 0.04) 0%, transparent 70%); }
+.dark .page-surface::before {
+  background: radial-gradient(circle, rgba(123, 163, 255, 0.06) 0%, transparent 70%);
+}
+.dark .page-surface::after {
+  background: radial-gradient(circle, rgba(167, 139, 250, 0.04) 0%, transparent 70%);
+}
 .page-surface > * {
   position: relative;
   z-index: 1;
@@ -1013,4 +1260,59 @@ body {
   opacity: 0.04;
   mix-blend-mode: overlay;
   border-radius: inherit;
+}
+
+/* ==================== 进场错峰揭示 ====================
+ * 页面切换已由 App.tsx 的 AnimatePresence 处理整体淡入；
+ * 这里补的是页内区块的错峰上浮，让"一整屏同时出现"变成有节奏的落位。
+ * 纯 CSS 实现，不引入额外 JS 动画开销。 */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 父容器加 .stagger-children，其直接子元素按序延迟入场 */
+.stagger-children > * {
+  animation: rise-in 0.44s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.stagger-children > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.stagger-children > *:nth-child(2) {
+  animation-delay: 45ms;
+}
+.stagger-children > *:nth-child(3) {
+  animation-delay: 90ms;
+}
+.stagger-children > *:nth-child(4) {
+  animation-delay: 135ms;
+}
+.stagger-children > *:nth-child(5) {
+  animation-delay: 180ms;
+}
+.stagger-children > *:nth-child(6) {
+  animation-delay: 215ms;
+}
+.stagger-children > *:nth-child(7) {
+  animation-delay: 245ms;
+}
+/* 第 8 个之后不再累加延迟，避免长页面末尾迟迟不出现 */
+.stagger-children > *:nth-child(n + 8) {
+  animation-delay: 270ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stagger-children > * {
+    animation: none;
+  }
+  /* 呼吸灯停掉但保留药丸底色，不牺牲可读层级 */
+  .type-eyebrow-chip {
+    animation: none;
+  }
 }

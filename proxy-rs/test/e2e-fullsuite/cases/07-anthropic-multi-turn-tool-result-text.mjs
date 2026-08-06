@@ -12,11 +12,7 @@
  *   - 至少收到一个完整 message_stop 事件
  */
 import { postAnthropic } from '../lib/http.mjs'
-import {
-  DEFAULT_ANTHROPIC_MODEL,
-  SMALL_MAX_TOKENS,
-  TOOL_GET_WEATHER
-} from '../lib/fixtures.mjs'
+import { DEFAULT_ANTHROPIC_MODEL, SMALL_MAX_TOKENS, TOOL_GET_WEATHER } from '../lib/fixtures.mjs'
 import { assertHttp200, assertTrue, assertNotContains } from '../lib/assert.mjs'
 
 export default {
@@ -25,42 +21,45 @@ export default {
   tags: ['anthropic', 'tool', 'multi-turn', 'regression', 'stream'],
   run: async ({ base, token, log }) => {
     const toolUseId = 'toolu_e2e_test_tr1'
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      tools: [TOOL_GET_WEATHER],
-      messages: [
-        { role: 'user', content: '帮我查一下上海的天气.' },
-        {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: '我来调用工具查询.' },
-            {
-              type: 'tool_use',
-              id: toolUseId,
-              name: 'GetWeather',
-              input: { city: 'Shanghai', unit: 'celsius' }
-            }
-          ]
-        },
-        {
-          // 关键: 同一条 user message 同时含 tool_result + text
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: toolUseId,
-              content: '上海, 晴, 28°C, 湿度 60%, 风速 3km/h.'
-            },
-            {
-              type: 'text',
-              text: '请根据上面的天气信息, 用一句话给我穿衣建议.'
-            }
-          ]
-        }
-      ]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        tools: [TOOL_GET_WEATHER],
+        messages: [
+          { role: 'user', content: '帮我查一下上海的天气.' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: '我来调用工具查询.' },
+              {
+                type: 'tool_use',
+                id: toolUseId,
+                name: 'GetWeather',
+                input: { city: 'Shanghai', unit: 'celsius' }
+              }
+            ]
+          },
+          {
+            // 关键: 同一条 user message 同时含 tool_result + text
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: '上海, 晴, 28°C, 湿度 60%, 风速 3km/h.'
+              },
+              {
+                type: 'text',
+                text: '请根据上面的天气信息, 用一句话给我穿衣建议.'
+              }
+            ]
+          }
+        ]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') {
       log(`upstream body: ${result.text?.slice(0, 500)}`)

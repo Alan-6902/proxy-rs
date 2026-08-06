@@ -10,23 +10,44 @@
 
 /** 命中即整体打码的敏感键名（小写匹配） */
 const SENSITIVE_KEYS = [
-  'password', 'passwd', 'pwd',
-  'accesstoken', 'access_token',
-  'refreshtoken', 'refresh_token',
-  'idtoken', 'id_token',
-  'bearertoken', 'bearer',
-  'authorization', 'auth',
-  'apikey', 'api_key', 'x-api-key',
-  'clientsecret', 'client_secret',
-  'secret', 'epin', 'cookie', 'set-cookie',
-  'proxyauthorization', 'proxy-authorization'
+  'password',
+  'passwd',
+  'pwd',
+  'accesstoken',
+  'access_token',
+  'refreshtoken',
+  'refresh_token',
+  'idtoken',
+  'id_token',
+  'bearertoken',
+  'bearer',
+  'authorization',
+  'auth',
+  'apikey',
+  'api_key',
+  'x-api-key',
+  'clientsecret',
+  'client_secret',
+  'secret',
+  'epin',
+  'cookie',
+  'set-cookie',
+  'proxyauthorization',
+  'proxy-authorization'
 ]
 
 /** 白名单：这些键虽然包含敏感子串但本身是安全的计量/统计字段 */
 const SAFE_KEYS = new Set([
-  'inputtokens', 'outputtokens', 'cachetokens',
-  'cachereadtokens', 'cachewritetokens', 'reasoningtokens',
-  'totaltokens', 'maxtokens', 'tokensused', 'tokencount'
+  'inputtokens',
+  'outputtokens',
+  'cachetokens',
+  'cachereadtokens',
+  'cachewritetokens',
+  'reasoningtokens',
+  'totaltokens',
+  'maxtokens',
+  'tokensused',
+  'tokencount'
 ])
 
 /** 仅保留头尾少量字符，中间打码；过短直接全打码 */
@@ -47,16 +68,23 @@ export function redactString(input: string): string {
   })
 
   // 2) Authorization: Bearer xxx / Basic xxx
-  out = out.replace(/(authorization\s*[:=]\s*)(bearer|basic)\s+([A-Za-z0-9._\-+/=]+)/gi, (_m, p, scheme) => {
-    return `${p}${scheme} ***`
-  })
+  out = out.replace(
+    /(authorization\s*[:=]\s*)(bearer|basic)\s+([A-Za-z0-9._\-+/=]+)/gi,
+    (_m, p, scheme) => {
+      return `${p}${scheme} ***`
+    }
+  )
 
   // 3) JWT（三段 base64url）整体打码
-  out = out.replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g, (m) => maskMiddle(m, 6, 4))
+  out = out.replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g, (m) =>
+    maskMiddle(m, 6, 4)
+  )
 
   // 4) 形如 accessToken=xxx / "refreshToken":"xxx" 的内联键值（兜底，针对已被 JSON.stringify 的串）
-  out = out.replace(/("?(?:access_?token|refresh_?token|id_?token|password|api_?key|client_?secret|secret|epin)"?\s*[:=]\s*"?)([^",}\s]+)("?)/gi,
-    (_m, prefix, val, suffix) => `${prefix}${maskMiddle(String(val))}${suffix}`)
+  out = out.replace(
+    /("?(?:access_?token|refresh_?token|id_?token|password|api_?key|client_?secret|secret|epin)"?\s*[:=]\s*"?)([^",}\s]+)("?)/gi,
+    (_m, prefix, val, suffix) => `${prefix}${maskMiddle(String(val))}${suffix}`
+  )
 
   return out
 }
@@ -64,7 +92,9 @@ export function redactString(input: string): string {
 function isSensitiveKey(key: string): boolean {
   const k = key.toLowerCase().replace(/[_-]/g, '')
   if (SAFE_KEYS.has(k)) return false
-  return SENSITIVE_KEYS.some((s) => k === s.replace(/[_-]/g, '') || k.includes(s.replace(/[_-]/g, '')))
+  return SENSITIVE_KEYS.some(
+    (s) => k === s.replace(/[_-]/g, '') || k.includes(s.replace(/[_-]/g, ''))
+  )
 }
 
 /** 递归脱敏任意值（对象/数组/字符串）。maxDepth 防御过深结构与循环引用 */

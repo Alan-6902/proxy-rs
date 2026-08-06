@@ -36,7 +36,11 @@ export async function writeSecureBackup(dir: string, data: unknown): Promise<voi
     const enc = safeStorage.encryptString(json)
     await fs.writeFile(encPath(dir), enc)
     // 清理旧的明文备份，避免明文长期残留
-    try { await fs.unlink(legacyPath(dir)) } catch { /* 不存在则忽略 */ }
+    try {
+      await fs.unlink(legacyPath(dir))
+    } catch {
+      /* 不存在则忽略 */
+    }
     return
   }
   // 兜底：环境不支持加密时仍写明文，优先保证不丢数据

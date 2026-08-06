@@ -25,13 +25,16 @@ export default {
   title: '声明工具不强制 + schema 元字段 ($schema/additionalProperties)',
   tags: ['anthropic', 'tool', 'stream'],
   run: async ({ base, token, log }) => {
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      tools: [TOOL_GET_WEATHER, TOOL_GET_TIME, TOOL_WITH_SCHEMA_META],
-      messages: [{ role: 'user', content: '你好, 用一句话回答我.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        tools: [TOOL_GET_WEATHER, TOOL_GET_TIME, TOOL_WITH_SCHEMA_META],
+        messages: [{ role: 'user', content: '你好, 用一句话回答我.' }]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind}`)
     if (result.kind === 'stream-error') log(`err body=${result.text?.slice(0, 300)}`)
     assertHttp200(result, 'tool-decl.response')

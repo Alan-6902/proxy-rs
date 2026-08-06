@@ -14,21 +14,37 @@ export default {
     const url = `${base.replace(/\/$/, '')}/v1/responses`
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({
         model: DEFAULT_OPENAI_MODEL,
         max_output_tokens: SMALL_MAX_TOKENS,
-        input: [{ role: 'user', content: '一句话回答即可.' }]
+        input: [{ role: 'user', content: '一句话回答即可.' }],
+        stream: true
       })
     })
     const text = await r.text()
     log(`status=${r.status} bytes=${text.length}`)
-    assertTrue(r.status === 200 || r.status === 400 || r.status === 404, `responses 端点应 200 (实现) 或 404 (未实现), 实际 ${r.status}`)
-    if (r.status === 200) {
-      const json = JSON.parse(text)
-      assertTrue(json.output !== undefined || json.choices !== undefined, '应含 output 或 choices 字段')
-    } else {
-      log('Responses API 不支持或未实现, 跳过详细断言')
-    }
+    assertTrue(
+      r.status === 200,
+      `responses 流式端点应返回 200, 实际 ${r.status}: ${text.slice(0, 300)}`
+    )
+    const events = text
+      .split('\n\n')
+      .map((frame) => frame.split('\n').find((line) => line.startsWith('data: ')))
+      .filter(Boolean)
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+    const eventTypes = events.map((event) => event.type)
+    assertTrue(eventTypes.includes('response.created'), '应包含 response.created')
+    assertTrue(
+      eventTypes.includes('response.output_text.delta'),
+      '应包含实时 response.output_text.delta'
+    )
+    assertTrue(eventTypes.includes('response.completed'), '应包含 response.completed')
+    assertTrue(
+      events
+        .filter((event) => event.type === 'response.output_text.delta')
+        .some((event) => event.delta),
+      '至少一个文本 delta 应非空'
+    )
   }
 }

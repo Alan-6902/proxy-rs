@@ -41,7 +41,10 @@ function stubFetch(responses: StubResponse | StubResponse[]): {
   return { fetchImpl, calls }
 }
 
-function makeClient(fetchImpl: ConvoyFetch, overrides: Partial<{ allowInsecureHttp: boolean; baseUrl: string; convoyKey: string }> = {}): ConvoyCredentialClient {
+function makeClient(
+  fetchImpl: ConvoyFetch,
+  overrides: Partial<{ allowInsecureHttp: boolean; baseUrl: string; convoyKey: string }> = {}
+): ConvoyCredentialClient {
   return new ConvoyCredentialClient({
     baseUrl: overrides.baseUrl ?? BASE_URL,
     convoyKey: overrides.convoyKey ?? CONVOY_KEY,
@@ -145,7 +148,9 @@ describe('HTTP 错误码映射', () => {
 
   it('429 的 Retry-After 秒数生效，且不低于兜底 60s', async () => {
     const { fetchImpl } = stubFetch({ status: 429, body: {}, headers: { 'retry-after': '120' } })
-    const error = await makeClient(fetchImpl).fetchSummary().catch((err) => err)
+    const error = await makeClient(fetchImpl)
+      .fetchSummary()
+      .catch((err) => err)
     expect(error.retryAfterMs).toBe(120_000)
 
     const { fetchImpl: shortFetch } = stubFetch({
@@ -153,13 +158,17 @@ describe('HTTP 错误码映射', () => {
       body: {},
       headers: { 'retry-after': '5' }
     })
-    const shortError = await makeClient(shortFetch).fetchSummary().catch((err) => err)
+    const shortError = await makeClient(shortFetch)
+      .fetchSummary()
+      .catch((err) => err)
     expect(shortError.retryAfterMs).toBe(60_000)
   })
 
   it('429 未给 Retry-After 时至少等 60s', async () => {
     const { fetchImpl } = stubFetch({ status: 429, body: {} })
-    const error = await makeClient(fetchImpl).fetchSummary().catch((err) => err)
+    const error = await makeClient(fetchImpl)
+      .fetchSummary()
+      .catch((err) => err)
     expect(error.retryAfterMs).toBe(60_000)
   })
 
@@ -168,7 +177,9 @@ describe('HTTP 错误码映射', () => {
       status: 401,
       body: { error: { message: 'key expired' }, debugKey: 'super-secret-value' }
     })
-    const error = await makeClient(fetchImpl).fetchSummary().catch((err) => err)
+    const error = await makeClient(fetchImpl)
+      .fetchSummary()
+      .catch((err) => err)
     expect(error.message).toContain('key expired')
     expect(error.message).not.toContain('super-secret-value')
   })
@@ -211,8 +222,9 @@ describe('概览解析', () => {
     expect(summary.autoConvoyId).toBe('42')
     expect(summary.autoConvoyTitle).toBe('示例自动车')
     expect(summary.farePerCredentialCents).toBe(200)
-    expect(summary.credentialSummary.filter((c) => c.status === 'active').map((c) => c.credentialId))
-      .toEqual(['9', '11'])
+    expect(
+      summary.credentialSummary.filter((c) => c.status === 'active').map((c) => c.credentialId)
+    ).toEqual(['9', '11'])
   })
 
   it('onBoard 缺失时按未上车处理，不触发计费接口', () => {
@@ -235,8 +247,9 @@ describe('概览解析', () => {
   })
 
   it('车费未给时为 undefined，不当成 0 元', () => {
-    expect(parseSummary({ onBoard: true, credentialSummary: [] }).farePerCredentialCents)
-      .toBeUndefined()
+    expect(
+      parseSummary({ onBoard: true, credentialSummary: [] }).farePerCredentialCents
+    ).toBeUndefined()
   })
 })
 
@@ -274,7 +287,9 @@ describe('完整凭证响应解析', () => {
   it('credential=null 保留条目但明文为空', () => {
     const parsed = parseCredentialsResponse({
       ...validResponse,
-      credentials: [{ credentialId: '9', status: 'expired', newlyCharged: false, charged: 0, credential: null }]
+      credentials: [
+        { credentialId: '9', status: 'expired', newlyCharged: false, charged: 0, credential: null }
+      ]
     })
     expect(parsed.credentials[0].credential).toBeNull()
   })
@@ -307,7 +322,13 @@ describe('完整凭证响应解析', () => {
   it('部分发放响应仍能提取已发放凭证', () => {
     const parsed = parseCredentialsResponse({
       credentials: [
-        { credentialId: '1', status: 'active', newlyCharged: true, charged: 2, credential: { type: 'api_key', apiKey: 'ksk_a1' } },
+        {
+          credentialId: '1',
+          status: 'active',
+          newlyCharged: true,
+          charged: 2,
+          credential: { type: 'api_key', apiKey: 'ksk_a1' }
+        },
         { credentialId: '2', status: 'active', newlyCharged: false, charged: 0, credential: null }
       ],
       newlyChargedCount: 1,
@@ -326,7 +347,11 @@ describe('完整凭证响应解析', () => {
   })
 
   it('合法空列表被接受', () => {
-    const parsed = parseCredentialsResponse({ credentials: [], newlyChargedCount: 0, totalCharged: 0 })
+    const parsed = parseCredentialsResponse({
+      credentials: [],
+      newlyChargedCount: 0,
+      totalCharged: 0
+    })
     expect(parsed.credentials).toEqual([])
   })
 })

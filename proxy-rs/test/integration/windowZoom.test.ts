@@ -39,7 +39,9 @@ describe('window zoom shortcuts', () => {
         keyboardInput({ key: '-', code: 'Minus', meta: false, control: false })
       )
     ).toBeNull()
-    expect(resolveWindowZoomAction(keyboardInput({ key: '-', code: 'Minus', alt: true }))).toBeNull()
+    expect(
+      resolveWindowZoomAction(keyboardInput({ key: '-', code: 'Minus', alt: true }))
+    ).toBeNull()
     expect(
       resolveWindowZoomAction(keyboardInput({ type: 'keyUp', key: '-', code: 'Minus' }))
     ).toBeNull()

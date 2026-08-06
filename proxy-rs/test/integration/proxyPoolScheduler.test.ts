@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from '../../src/main/proxy/proxyPoolScheduler'
-import { DEFAULT_PROXY_POOL_CONFIG, type ProxyEntry, type ProxyPoolConfig, type ProxyValidationResult } from '../../src/shared/proxyPool'
+import {
+  ProxyPoolScheduler,
+  type ProxyPoolStoreSlice
+} from '../../src/main/proxy/proxyPoolScheduler'
+import {
+  DEFAULT_PROXY_POOL_CONFIG,
+  type ProxyEntry,
+  type ProxyPoolConfig,
+  type ProxyValidationResult
+} from '../../src/shared/proxyPool'
 
 function makeEntry(id: string, overrides: Partial<ProxyEntry> = {}): ProxyEntry {
   return {
@@ -48,9 +56,7 @@ function makeHarness(options: {
       inFlight++
       peakInFlight = Math.max(peakInFlight, inFlight)
       try {
-        return options.validate
-          ? await options.validate(url)
-          : { success: true, latencyMs: 100 }
+        return options.validate ? await options.validate(url) : { success: true, latencyMs: 100 }
       } finally {
         inFlight--
       }
@@ -65,7 +71,9 @@ function makeHarness(options: {
     notified,
     syncedProxyIds,
     validatedUrls,
-    get peakInFlight() { return peakInFlight },
+    get peakInFlight() {
+      return peakInFlight
+    },
     entry: (id: string): ProxyEntry | undefined => data.proxyPool?.[id]
   }
 }
@@ -189,9 +197,10 @@ describe('代理池定时验活调度器', () => {
           makeEntry('2', { status: 'alive' })
         ],
         config: { autoDisableDead: true, failureThreshold: 3 },
-        validate: (url) => url.endsWith('9001')
-          ? { success: false, error: 'dead' }
-          : { success: true, latencyMs: 100 }
+        validate: (url) =>
+          url.endsWith('9001')
+            ? { success: false, error: 'dead' }
+            : { success: true, latencyMs: 100 }
       })
       await h.scheduler.runOnce()
       expect(h.entry('1')?.enabled).toBe(false)
@@ -253,7 +262,9 @@ describe('代理池定时验活调度器', () => {
   describe('防重入', () => {
     it('前一轮未完成时 runOnce 直接返回 0，不重复验活', async () => {
       let release: (() => void) | null = null
-      const gate = new Promise<void>((r) => { release = r })
+      const gate = new Promise<void>((r) => {
+        release = r
+      })
       const h = makeHarness({
         entries: [makeEntry('1')],
         validate: async () => {

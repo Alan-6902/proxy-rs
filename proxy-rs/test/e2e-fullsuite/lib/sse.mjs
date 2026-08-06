@@ -80,8 +80,8 @@ function parseSingleEvent(rawEvent) {
  */
 export async function collectAnthropicStream(response) {
   const events = []
-  const contentBlocks = []     // index -> block 累积
-  const blocksOrder = []       // 按 index 顺序
+  const contentBlocks = [] // index -> block 累积
+  const blocksOrder = [] // 按 index 顺序
   let message = null
   let usage = null
   let stopReason = null
@@ -126,9 +126,12 @@ export async function collectAnthropicStream(response) {
       if (!block) continue
       const d = data.delta
       if (d?.type === 'text_delta' && typeof d.text === 'string') block.text += d.text
-      else if (d?.type === 'thinking_delta' && typeof d.thinking === 'string') block.thinking += d.thinking
-      else if (d?.type === 'signature_delta' && typeof d.signature === 'string') block.signature = (block.signature ?? '') + d.signature
-      else if (d?.type === 'input_json_delta' && typeof d.partial_json === 'string') block._partial_json += d.partial_json
+      else if (d?.type === 'thinking_delta' && typeof d.thinking === 'string')
+        block.thinking += d.thinking
+      else if (d?.type === 'signature_delta' && typeof d.signature === 'string')
+        block.signature = (block.signature ?? '') + d.signature
+      else if (d?.type === 'input_json_delta' && typeof d.partial_json === 'string')
+        block._partial_json += d.partial_json
       continue
     }
     if (ev.event === 'content_block_stop') {
@@ -136,7 +139,10 @@ export async function collectAnthropicStream(response) {
       const block = contentBlocks[idx]
       if (block?.type === 'tool_use') {
         try {
-          block.input = block._partial_json && block._partial_json.length > 0 ? JSON.parse(block._partial_json) : {}
+          block.input =
+            block._partial_json && block._partial_json.length > 0
+              ? JSON.parse(block._partial_json)
+              : {}
         } catch {
           block.input = {}
         }
@@ -191,7 +197,7 @@ export async function collectOpenAIStream(response) {
   let reasoningText = ''
   let reasoningOpaque = ''
   let providerMetadata = null
-  const toolCalls = []       // index -> { id, type, function:{ name, arguments } }
+  const toolCalls = [] // index -> { id, type, function:{ name, arguments } }
   let finishReason = null
   let usage = null
   let role = null
@@ -235,11 +241,16 @@ export async function collectOpenAIStream(response) {
     if (Array.isArray(delta.tool_calls)) {
       for (const tc of delta.tool_calls) {
         const idx = tc.index ?? 0
-        const slot = toolCalls[idx] ?? { id: '', type: 'function', function: { name: '', arguments: '' } }
+        const slot = toolCalls[idx] ?? {
+          id: '',
+          type: 'function',
+          function: { name: '', arguments: '' }
+        }
         if (tc.id) slot.id = tc.id
         if (tc.type) slot.type = tc.type
         if (tc.function?.name) slot.function.name = tc.function.name
-        if (typeof tc.function?.arguments === 'string') slot.function.arguments += tc.function.arguments
+        if (typeof tc.function?.arguments === 'string')
+          slot.function.arguments += tc.function.arguments
         toolCalls[idx] = slot
       }
     }

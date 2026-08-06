@@ -22,7 +22,7 @@ export default {
         headers: {
           'content-type': 'application/json',
           'anthropic-version': '2023-06-01',
-          'authorization': `Bearer ${token}`
+          authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
           model: DEFAULT_ANTHROPIC_MODEL,
@@ -32,20 +32,29 @@ export default {
         }),
         signal: ctl.signal
       })
-      try { await r.text() } catch { aborted = true }
-    } catch { aborted = true }
+      try {
+        await r.text()
+      } catch {
+        aborted = true
+      }
+    } catch {
+      aborted = true
+    }
     log(`first request aborted=${aborted}`)
 
-    await new Promise(r => setTimeout(r, 1000))
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      messages: [{ role: 'user', content: '简单回答, 反代是否仍正常工作?' }]
-    }, { base, token })
+    await new Promise((r) => setTimeout(r, 1000))
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        messages: [{ role: 'user', content: '简单回答, 反代是否仍正常工作?' }]
+      },
+      { base, token }
+    )
     log(`second request status=${result.status} kind=${result.kind}`)
     assertHttp200(result, 'post-abort.response')
-    const textBlock = (result.collected?.message?.content ?? []).find(b => b.type === 'text')
+    const textBlock = (result.collected?.message?.content ?? []).find((b) => b.type === 'text')
     assertTrue(textBlock !== undefined, 'abort 后反代应仍能正常处理新请求')
   }
 }

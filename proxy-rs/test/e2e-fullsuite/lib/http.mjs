@@ -15,6 +15,7 @@
  *   - 不解析 SSE (交给 sse.mjs)
  */
 import { collectAnthropicStream, collectOpenAIStream } from './sse.mjs'
+import { DEFAULT_PROXY_BASE_URL } from './fixtures.mjs'
 
 const ANTHROPIC_HEADERS = (token) => {
   const h = {
@@ -35,7 +36,10 @@ const OPENAI_HEADERS = (token) => {
   return h
 }
 
-export async function postAnthropic(body, { base, token, timeoutMs = 120_000, extraHeaders = {} } = {}) {
+export async function postAnthropic(
+  body,
+  { base, token, timeoutMs = 120_000, extraHeaders = {} } = {}
+) {
   const url = `${stripTrailing(base)}/v1/messages`
   const headers = { ...ANTHROPIC_HEADERS(token), ...extraHeaders }
   const stream = body.stream === true
@@ -62,7 +66,11 @@ export async function postAnthropic(body, { base, token, timeoutMs = 120_000, ex
     const text = await response.text().catch(() => '')
     clearTimeout(timer)
     let json
-    try { json = text ? JSON.parse(text) : null } catch { json = null }
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
     return {
       kind: 'non-stream',
       status: response.status,
@@ -108,7 +116,10 @@ export async function postAnthropic(body, { base, token, timeoutMs = 120_000, ex
   }
 }
 
-export async function postOpenAI(body, { base, token, timeoutMs = 120_000, extraHeaders = {} } = {}) {
+export async function postOpenAI(
+  body,
+  { base, token, timeoutMs = 120_000, extraHeaders = {} } = {}
+) {
   const url = `${stripTrailing(base)}/v1/chat/completions`
   const headers = { ...OPENAI_HEADERS(token), ...extraHeaders }
   const stream = body.stream === true
@@ -134,7 +145,11 @@ export async function postOpenAI(body, { base, token, timeoutMs = 120_000, extra
     const text = await response.text().catch(() => '')
     clearTimeout(timer)
     let json
-    try { json = text ? JSON.parse(text) : null } catch { json = null }
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
     return {
       kind: 'non-stream',
       status: response.status,
@@ -185,6 +200,6 @@ function collectResponseHeaders(response) {
 }
 
 function stripTrailing(base) {
-  if (!base) return 'http://127.0.0.1:8787'
+  if (!base) return DEFAULT_PROXY_BASE_URL
   return base.endsWith('/') ? base.slice(0, -1) : base
 }

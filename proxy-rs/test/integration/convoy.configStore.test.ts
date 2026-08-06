@@ -82,12 +82,12 @@ describe('配置归一化', () => {
 
   it('非数值上限回落到默认值', () => {
     const normalized = normalizeConvoyConfig({ maxChargePerPullCents: Number.NaN })
-    expect(normalized.maxChargePerPullCents).toBe(
-      DEFAULT_CONVOY_SYNC_CONFIG.maxChargePerPullCents
-    )
+    expect(normalized.maxChargePerPullCents).toBe(DEFAULT_CONVOY_SYNC_CONFIG.maxChargePerPullCents)
   })
 
   it('小数上限向下取整，避免分级金额出现分以下的位', () => {
-    expect(normalizeConvoyConfig({ maxChargePerPullCents: 1999.7 }).maxChargePerPullCents).toBe(1999)
+    expect(normalizeConvoyConfig({ maxChargePerPullCents: 1999.7 }).maxChargePerPullCents).toBe(
+      1999
+    )
   })
 })

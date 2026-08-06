@@ -123,8 +123,7 @@ describe('凭证明文不泄露', () => {
         ok: false,
         status: 401,
         headers: { get: () => null },
-        text: async () =>
-          JSON.stringify({ error: { message: `invalid apiKey=${CONVOY_KEY}` } })
+        text: async () => JSON.stringify({ error: { message: `invalid apiKey=${CONVOY_KEY}` } })
       }),
       verifyKeyRegion: async () => ({ ok: true }),
       applyToAccountPool: () => {},

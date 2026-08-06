@@ -17,7 +17,7 @@ export default {
       headers: {
         'content-type': 'application/json',
         'anthropic-version': '2023-06-01',
-        'authorization': `Bearer ${token}`
+        authorization: `Bearer ${token}`
       },
       body: JSON.stringify({
         model: DEFAULT_ANTHROPIC_MODEL,
@@ -29,6 +29,9 @@ export default {
     assertTrue(r.status === 200, `count_tokens 应返回 200, 实际 ${r.status}`)
     const json = JSON.parse(text)
     assertHasField(json, 'input_tokens', 'count_tokens.json')
-    assertTrue(typeof json.input_tokens === 'number' && json.input_tokens >= 0, 'input_tokens 应是非负数')
+    assertTrue(
+      typeof json.input_tokens === 'number' && json.input_tokens >= 0,
+      'input_tokens 应是非负数'
+    )
   }
 }

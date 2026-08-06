@@ -28,13 +28,13 @@ let customLocales: Record<string, Translations> = {}
 function getNestedValue(obj: Translations, path: string): string {
   const keys = path.split('.')
   let current: Translations | string = obj
-  
+
   for (const key of keys) {
     if (typeof current === 'string') return path
     if (current[key] === undefined) return path
     current = current[key]
   }
-  
+
   return typeof current === 'string' ? current : path
 }
 
@@ -60,29 +60,36 @@ export function getActualLanguage(language: Language): 'en' | 'zh' {
 /**
  * 翻译函数
  */
-export function translate(key: string, language: 'en' | 'zh', params?: Record<string, string | number>): string {
+export function translate(
+  key: string,
+  language: 'en' | 'zh',
+  params?: Record<string, string | number>
+): string {
   // 优先使用自定义翻译
   let text = getNestedValue(customLocales[language] || {}, key)
-  
+
   // 如果自定义翻译没有，使用内置翻译
   if (text === key) {
     text = getNestedValue(builtInLocales[language] || builtInLocales.en, key)
   }
-  
+
   // 替换参数
   if (params && text !== key) {
     Object.entries(params).forEach(([paramKey, value]) => {
       text = text.replace(new RegExp(`\\{${paramKey}\\}`, 'g'), String(value))
     })
   }
-  
+
   return text
 }
 
 /**
  * 加载自定义翻译文件
  */
-export async function loadCustomLocale(language: string, translations: Translations): Promise<void> {
+export async function loadCustomLocale(
+  language: string,
+  translations: Translations
+): Promise<void> {
   customLocales[language] = translations
 }
 
@@ -106,12 +113,12 @@ interface I18nState {
 export const useI18n = create<I18nState>((set, get) => ({
   language: 'auto',
   actualLanguage: detectSystemLanguage(),
-  
+
   setLanguage: (language: Language) => {
     const actualLanguage = getActualLanguage(language)
     set({ language, actualLanguage })
   },
-  
+
   t: (key: string, params?: Record<string, string | number>) => {
     const { actualLanguage } = get()
     return translate(key, actualLanguage, params)

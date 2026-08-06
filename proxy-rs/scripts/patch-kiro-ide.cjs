@@ -36,19 +36,19 @@
  * Kiro 升级会覆盖 extension.js，升级后请重新运行本脚本。
  */
 
-'use strict';
+'use strict'
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
-const PATCH_VERSION = 1;
-const MARKER = `/* @patched-kiro-builderid-arn-fix v${PATCH_VERSION} */`;
+const PATCH_VERSION = 1
+const MARKER = `/* @patched-kiro-builderid-arn-fix v${PATCH_VERSION} */`
 const PLACEHOLDER_ARN_BUILDERID =
-  'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX';
+  'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
 
-const args = parseArgs(process.argv.slice(2));
-const log = createLogger(args.verbose);
+const args = parseArgs(process.argv.slice(2))
+const log = createLogger(args.verbose)
 
 function parseArgs(argv) {
   const out = {
@@ -57,40 +57,40 @@ function parseArgs(argv) {
     verbose: false,
     kiroDir: null,
     userDataDir: null
-  };
+  }
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
+    const a = argv[i]
     switch (a) {
       case '--dry-run':
-        out.dryRun = true;
-        break;
+        out.dryRun = true
+        break
       case '--restore':
-        out.restore = true;
-        break;
+        out.restore = true
+        break
       case '--verbose':
       case '-v':
-        out.verbose = true;
-        break;
+        out.verbose = true
+        break
       case '--kiro-dir':
-        out.kiroDir = argv[++i];
-        break;
+        out.kiroDir = argv[++i]
+        break
       case '--userdata-dir':
-        out.userDataDir = argv[++i];
-        break;
+        out.userDataDir = argv[++i]
+        break
       case '-h':
       case '--help':
-        printHelp();
-        process.exit(0);
-        break;
+        printHelp()
+        process.exit(0)
+        break
       default:
         if (a.startsWith('--')) {
-          console.error(`Unknown option: ${a}`);
-          printHelp();
-          process.exit(64);
+          console.error(`Unknown option: ${a}`)
+          printHelp()
+          process.exit(64)
         }
     }
   }
-  return out;
+  return out
 }
 
 function printHelp() {
@@ -124,7 +124,7 @@ patch-kiro-ide.cjs - 修补 Kiro IDE BuilderId 占位符 profileArn bug
   2  找不到 Kiro 安装目录
   3  找不到任何目标文件（路径或版本不匹配）
  64  参数错误
-`);
+`)
 }
 
 function createLogger(verbose) {
@@ -133,13 +133,13 @@ function createLogger(verbose) {
     warn: (msg) => console.warn(`[patch] WARN: ${msg}`),
     error: (msg) => console.error(`[patch] ERROR: ${msg}`),
     debug: (msg) => {
-      if (verbose) console.log(`[patch] DEBUG: ${msg}`);
+      if (verbose) console.log(`[patch] DEBUG: ${msg}`)
     }
-  };
+  }
 }
 
 function probeKiroDir(dir) {
-  if (!dir) return false;
+  if (!dir) return false
   const win = path.join(
     dir,
     'resources',
@@ -148,163 +148,167 @@ function probeKiroDir(dir) {
     'kiro.kiro-agent',
     'dist',
     'extension.js'
-  );
-  if (fs.existsSync(win)) return true;
-  const mac = path.join(dir, 'extensions', 'kiro.kiro-agent', 'dist', 'extension.js');
-  if (fs.existsSync(mac)) return true;
-  return false;
+  )
+  if (fs.existsSync(win)) return true
+  const mac = path.join(dir, 'extensions', 'kiro.kiro-agent', 'dist', 'extension.js')
+  if (fs.existsSync(mac)) return true
+  return false
 }
 
 function detectKiroDir() {
-  if (args.kiroDir) return args.kiroDir;
-  if (process.env.KIRO_DIR) return process.env.KIRO_DIR;
+  if (args.kiroDir) return args.kiroDir
+  if (process.env.KIRO_DIR) return process.env.KIRO_DIR
 
-  const platform = os.platform();
-  const candidates = [];
+  const platform = os.platform()
+  const candidates = []
   if (platform === 'win32') {
     candidates.push(
       'D:\\Program\\Kiro',
       'C:\\Program Files\\Kiro',
       'C:\\Program Files (x86)\\Kiro',
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Kiro')
-    );
+    )
   } else if (platform === 'darwin') {
     candidates.push(
       '/Applications/Kiro.app/Contents/Resources/app',
       path.join(os.homedir(), 'Applications/Kiro.app/Contents/Resources/app')
-    );
+    )
   } else {
-    candidates.push('/usr/share/kiro', '/opt/Kiro', path.join(os.homedir(), '.local/share/kiro'));
+    candidates.push('/usr/share/kiro', '/opt/Kiro', path.join(os.homedir(), '.local/share/kiro'))
   }
   for (const dir of candidates) {
-    if (probeKiroDir(dir)) return dir;
+    if (probeKiroDir(dir)) return dir
   }
-  return null;
+  return null
 }
 
 function detectUserDataDir() {
-  if (args.userDataDir) return args.userDataDir;
-  if (process.env.KIRO_USERDATA_DIR) return process.env.KIRO_USERDATA_DIR;
-  const platform = os.platform();
-  if (platform === 'win32') return path.join(process.env.APPDATA || '', 'Kiro');
-  if (platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'Kiro');
-  return path.join(os.homedir(), '.config', 'Kiro');
+  if (args.userDataDir) return args.userDataDir
+  if (process.env.KIRO_USERDATA_DIR) return process.env.KIRO_USERDATA_DIR
+  const platform = os.platform()
+  if (platform === 'win32') return path.join(process.env.APPDATA || '', 'Kiro')
+  if (platform === 'darwin')
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Kiro')
+  return path.join(os.homedir(), '.config', 'Kiro')
 }
 
 function getExtRoot(kiroDir) {
-  const winRoot = path.join(kiroDir, 'resources', 'app', 'extensions', 'kiro.kiro-agent');
-  if (fs.existsSync(winRoot)) return winRoot;
-  const macRoot = path.join(kiroDir, 'extensions', 'kiro.kiro-agent');
-  if (fs.existsSync(macRoot)) return macRoot;
-  return null;
+  const winRoot = path.join(kiroDir, 'resources', 'app', 'extensions', 'kiro.kiro-agent')
+  if (fs.existsSync(winRoot)) return winRoot
+  const macRoot = path.join(kiroDir, 'extensions', 'kiro.kiro-agent')
+  if (fs.existsSync(macRoot)) return macRoot
+  return null
 }
 
 function listTargetFiles(kiroDir) {
-  const extRoot = getExtRoot(kiroDir);
-  if (!extRoot) return [];
+  const extRoot = getExtRoot(kiroDir)
+  if (!extRoot) return []
 
-  const targets = [];
-  const ext = path.join(extRoot, 'dist', 'extension.js');
-  if (fs.existsSync(ext)) targets.push(ext);
+  const targets = []
+  const ext = path.join(extRoot, 'dist', 'extension.js')
+  if (fs.existsSync(ext)) targets.push(ext)
 
-  const sharedDist = path.join(extRoot, 'packages', 'kiro-shared', 'dist');
+  const sharedDist = path.join(extRoot, 'packages', 'kiro-shared', 'dist')
   if (fs.existsSync(sharedDist)) {
     for (const name of ['index.js', 'index.cjs']) {
-      const p = path.join(sharedDist, name);
-      if (fs.existsSync(p)) targets.push(p);
+      const p = path.join(sharedDist, name)
+      if (fs.existsSync(p)) targets.push(p)
     }
     for (const name of fs.readdirSync(sharedDist)) {
       if (/^external-idp-auth-provider-[A-Za-z0-9_-]+\.(js|cjs)$/.test(name)) {
-        targets.push(path.join(sharedDist, name));
+        targets.push(path.join(sharedDist, name))
       }
     }
   }
 
   // autocomplete 包只 import 这些符号、不定义它们，无需修补
-  return targets;
+  return targets
 }
 
 function applyReplacements(src) {
-  let touched = 0;
+  let touched = 0
 
   // 补丁 1: getFixedProfileArn 顶部插入 BuilderId 短路
-  const reFixed = /function getFixedProfileArn\(tokenProvider, currentToken\) \{\s*if \(!FixedProfileArns\.has/g;
+  const reFixed =
+    /function getFixedProfileArn\(tokenProvider, currentToken\) \{\s*if \(!FixedProfileArns\.has/g
   src = src.replace(reFixed, () => {
-    touched++;
+    touched++
     return [
       'function getFixedProfileArn(tokenProvider, currentToken) {',
       '  if (tokenProvider === "BuilderId") return void 0;',
       '  if (!FixedProfileArns.has'
-    ].join('\n');
-  });
+    ].join('\n')
+  })
 
   // 补丁 2: supportsProfiles 移除 BuilderId IdC 归类（extension.js 中有多份副本）
-  const reSupports = /token\.provider === "Enterprise" \|\| token\.provider === "Internal" \|\| token\.provider === "BuilderId"/g;
+  const reSupports =
+    /token\.provider === "Enterprise" \|\| token\.provider === "Internal" \|\| token\.provider === "BuilderId"/g
   src = src.replace(reSupports, () => {
-    touched++;
-    return 'token.provider === "Enterprise" || token.provider === "Internal"';
-  });
+    touched++
+    return 'token.provider === "Enterprise" || token.provider === "Internal"'
+  })
 
   // 补丁 3: resolveProfileArn 顶部插入 BuilderId 短路（多副本场景同样 g flag）
-  const reResolve = /async function resolveProfileArn\(options2?\) \{\s*const profileArn = await authProvider\.getProfileArn\(\);/g;
+  const reResolve =
+    /async function resolveProfileArn\(options2?\) \{\s*const profileArn = await authProvider\.getProfileArn\(\);/g
   src = src.replace(reResolve, () => {
-    touched++;
+    touched++
     return [
       'async function resolveProfileArn(options2) {',
       '  const __kiroPatchToken = authProvider.readToken();',
       '  if (__kiroPatchToken && __kiroPatchToken.provider === "BuilderId") return void 0;',
       '  const profileArn = await authProvider.getProfileArn();'
-    ].join('\n');
-  });
+    ].join('\n')
+  })
 
-  return { src, touched };
+  return { src, touched }
 }
 
 function patchFile(filePath) {
-  const original = fs.readFileSync(filePath, 'utf8');
+  const original = fs.readFileSync(filePath, 'utf8')
   if (original.startsWith(MARKER) || original.includes(MARKER)) {
-    log.debug(`already patched: ${filePath}`);
-    return { changed: false, reason: 'already-patched' };
+    log.debug(`already patched: ${filePath}`)
+    return { changed: false, reason: 'already-patched' }
   }
 
-  const { src: replaced, touched } = applyReplacements(original);
+  const { src: replaced, touched } = applyReplacements(original)
   if (touched === 0) {
-    log.warn(`no anchor matched in ${filePath} (file may be upgraded / format changed)`);
-    return { changed: false, reason: 'no-anchor' };
+    log.warn(`no anchor matched in ${filePath} (file may be upgraded / format changed)`)
+    return { changed: false, reason: 'no-anchor' }
   }
 
-  const patched = `${MARKER}\n${replaced}`;
+  const patched = `${MARKER}\n${replaced}`
 
   if (args.dryRun) {
-    log.info(`[dry-run] would patch ${filePath} (${touched} replacement(s))`);
-    return { changed: true, touched, dryRun: true };
+    log.info(`[dry-run] would patch ${filePath} (${touched} replacement(s))`)
+    return { changed: true, touched, dryRun: true }
   }
 
-  const bakPath = `${filePath}.kpatch-backup`;
+  const bakPath = `${filePath}.kpatch-backup`
   if (!fs.existsSync(bakPath)) {
-    fs.writeFileSync(bakPath, original);
-    log.debug(`backup written: ${bakPath}`);
+    fs.writeFileSync(bakPath, original)
+    log.debug(`backup written: ${bakPath}`)
   } else {
-    log.debug(`backup already exists, kept as-is: ${bakPath}`);
+    log.debug(`backup already exists, kept as-is: ${bakPath}`)
   }
-  fs.writeFileSync(filePath, patched);
-  log.info(`patched ${filePath} (${touched} replacement(s))`);
-  return { changed: true, touched };
+  fs.writeFileSync(filePath, patched)
+  log.info(`patched ${filePath} (${touched} replacement(s))`)
+  return { changed: true, touched }
 }
 
 function restoreFile(filePath) {
-  const bakPath = `${filePath}.kpatch-backup`;
+  const bakPath = `${filePath}.kpatch-backup`
   if (!fs.existsSync(bakPath)) {
-    log.debug(`no backup for ${filePath}, skip`);
-    return false;
+    log.debug(`no backup for ${filePath}, skip`)
+    return false
   }
   if (args.dryRun) {
-    log.info(`[dry-run] would restore ${filePath} from ${bakPath}`);
-    return true;
+    log.info(`[dry-run] would restore ${filePath} from ${bakPath}`)
+    return true
   }
-  fs.copyFileSync(bakPath, filePath);
-  log.info(`restored ${filePath}`);
-  return true;
+  fs.copyFileSync(bakPath, filePath)
+  log.info(`restored ${filePath}`)
+  return true
 }
 
 function cleanProfileJson(userDataDir) {
@@ -314,43 +318,43 @@ function cleanProfileJson(userDataDir) {
     'globalStorage',
     'kiro.kiro-agent',
     'profile.json'
-  );
+  )
   if (!fs.existsSync(profilePath)) {
-    log.debug(`no profile.json at: ${profilePath}`);
-    return false;
+    log.debug(`no profile.json at: ${profilePath}`)
+    return false
   }
-  let parsed;
+  let parsed
   try {
-    parsed = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(profilePath, 'utf8'))
   } catch (e) {
-    log.warn(`profile.json unreadable, skip: ${e.message}`);
-    return false;
+    log.warn(`profile.json unreadable, skip: ${e.message}`)
+    return false
   }
   if (!parsed || parsed.arn !== PLACEHOLDER_ARN_BUILDERID) {
-    log.debug(`profile.json arn=${parsed && parsed.arn}, not placeholder, leave alone`);
-    return false;
+    log.debug(`profile.json arn=${parsed && parsed.arn}, not placeholder, leave alone`)
+    return false
   }
   if (args.dryRun) {
-    log.info(`[dry-run] would remove placeholder profile.json: ${profilePath}`);
-    return true;
+    log.info(`[dry-run] would remove placeholder profile.json: ${profilePath}`)
+    return true
   }
-  const bakPath = `${profilePath}.kpatch-backup`;
-  if (!fs.existsSync(bakPath)) fs.copyFileSync(profilePath, bakPath);
-  fs.unlinkSync(profilePath);
-  log.info(`removed placeholder profile.json: ${profilePath}`);
-  return true;
+  const bakPath = `${profilePath}.kpatch-backup`
+  if (!fs.existsSync(bakPath)) fs.copyFileSync(profilePath, bakPath)
+  fs.unlinkSync(profilePath)
+  log.info(`removed placeholder profile.json: ${profilePath}`)
+  return true
 }
 
 function warnIfKiroRunning() {
-  if (os.platform() !== 'win32') return;
+  if (os.platform() !== 'win32') return
   try {
-    const { execSync } = require('child_process');
+    const { execSync } = require('child_process')
     const stdout = execSync('tasklist /FI "IMAGENAME eq Kiro.exe" /FO CSV', {
       stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf8'
-    });
+    })
     if (/^"Kiro\.exe"/m.test(stdout)) {
-      log.warn('Kiro.exe is running. It is strongly recommended to fully exit Kiro first.');
+      log.warn('Kiro.exe is running. It is strongly recommended to fully exit Kiro first.')
     }
   } catch {
     // ignore detection errors
@@ -360,63 +364,61 @@ function warnIfKiroRunning() {
 function main() {
   log.info(
     `patch-kiro-ide v${PATCH_VERSION} - mode=${args.dryRun ? 'dry-run' : args.restore ? 'restore' : 'apply'}`
-  );
+  )
 
-  const kiroDir = detectKiroDir();
+  const kiroDir = detectKiroDir()
   if (!kiroDir) {
-    log.error('Kiro install dir not found. Pass --kiro-dir <path> or set KIRO_DIR.');
-    process.exit(2);
+    log.error('Kiro install dir not found. Pass --kiro-dir <path> or set KIRO_DIR.')
+    process.exit(2)
   }
-  log.info(`Kiro install dir: ${kiroDir}`);
+  log.info(`Kiro install dir: ${kiroDir}`)
 
-  const userDataDir = detectUserDataDir();
-  log.info(`Kiro userData dir: ${userDataDir}`);
+  const userDataDir = detectUserDataDir()
+  log.info(`Kiro userData dir: ${userDataDir}`)
 
-  warnIfKiroRunning();
+  warnIfKiroRunning()
 
-  const targets = listTargetFiles(kiroDir);
+  const targets = listTargetFiles(kiroDir)
   if (targets.length === 0) {
     log.error(
       `No target files found under ${kiroDir}. Is this a valid Kiro install? (looked under resources/app/extensions/kiro.kiro-agent)`
-    );
-    process.exit(3);
+    )
+    process.exit(3)
   }
-  log.info(`Found ${targets.length} target file(s).`);
+  log.info(`Found ${targets.length} target file(s).`)
 
-  let changes = 0;
+  let changes = 0
   if (args.restore) {
-    for (const f of targets) if (restoreFile(f)) changes++;
+    for (const f of targets) if (restoreFile(f)) changes++
     const bakProfile = path.join(
       userDataDir,
       'User',
       'globalStorage',
       'kiro.kiro-agent',
       'profile.json.kpatch-backup'
-    );
+    )
     if (fs.existsSync(bakProfile)) {
       log.info(
         `profile.json backup exists at ${bakProfile} (not restored automatically; restore manually if you really want the placeholder back)`
-      );
+      )
     }
   } else {
     for (const f of targets) {
-      const r = patchFile(f);
-      if (r.changed) changes++;
+      const r = patchFile(f)
+      if (r.changed) changes++
     }
-    if (cleanProfileJson(userDataDir)) changes++;
+    if (cleanProfileJson(userDataDir)) changes++
   }
 
-  log.info(
-    `done. ${changes} file(s) ${args.restore ? 'restored' : 'changed/cleaned'}.`
-  );
+  log.info(`done. ${changes} file(s) ${args.restore ? 'restored' : 'changed/cleaned'}.`)
   if (!args.restore && changes > 0 && !args.dryRun) {
-    log.info('Please fully restart Kiro IDE for the patch to take effect.');
+    log.info('Please fully restart Kiro IDE for the patch to take effect.')
   }
 }
 
 try {
-  main();
+  main()
 } catch (e) {
-  log.error((e && (e.stack || e.message)) || String(e));
-  process.exit(1);
+  log.error((e && (e.stack || e.message)) || String(e))
+  process.exit(1)
 }

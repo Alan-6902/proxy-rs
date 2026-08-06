@@ -240,8 +240,12 @@ describe('安全门禁', () => {
   })
 
   it('URL 拼接容忍两侧多余斜杠', () => {
-    expect(joinConvoyUrl('http://h/api/user/', '/me/auto-ride')).toBe('http://h/api/user/me/auto-ride')
-    expect(joinConvoyUrl('http://h/api/user', 'me/auto-ride')).toBe('http://h/api/user/me/auto-ride')
+    expect(joinConvoyUrl('http://h/api/user/', '/me/auto-ride')).toBe(
+      'http://h/api/user/me/auto-ride'
+    )
+    expect(joinConvoyUrl('http://h/api/user', 'me/auto-ride')).toBe(
+      'http://h/api/user/me/auto-ride'
+    )
   })
 })
 

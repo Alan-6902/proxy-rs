@@ -12,7 +12,7 @@ import { assertHttp200, assertTrue } from '../lib/assert.mjs'
 
 async function fetchStats(base, token) {
   const url = `${base.replace(/\/$/, '')}/admin/stats`
-  const r = await fetch(url, { headers: { 'authorization': `Bearer ${token}` } })
+  const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
   if (!r.ok) throw new Error(`admin/stats failed: ${r.status}`)
   return await r.json()
 }
@@ -26,19 +26,25 @@ export default {
     const beforeTotal = before?.totalRequests ?? before?.stats?.totalRequests ?? 0
     log(`baseline totalRequests=${beforeTotal}`)
 
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      messages: [{ role: 'user', content: '一句话回答.' }]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        messages: [{ role: 'user', content: '一句话回答.' }]
+      },
+      { base, token }
+    )
     assertHttp200(result, 'admin-stats.response')
 
     // 等 200ms 让统计落库
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 300))
     const after = await fetchStats(base, token)
     const afterTotal = after?.totalRequests ?? after?.stats?.totalRequests ?? 0
     log(`after totalRequests=${afterTotal}`)
-    assertTrue(afterTotal >= beforeTotal + 1, `stats 应至少 +1, before=${beforeTotal} after=${afterTotal}`)
+    assertTrue(
+      afterTotal >= beforeTotal + 1,
+      `stats 应至少 +1, before=${beforeTotal} after=${afterTotal}`
+    )
   }
 }

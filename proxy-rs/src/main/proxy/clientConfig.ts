@@ -3,7 +3,13 @@ import { access, copyFile, mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 
-export type ProxyClientTarget = 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
+export type ProxyClientTarget =
+  | 'claudeCode'
+  | 'opencode'
+  | 'codex'
+  | 'gemini'
+  | 'hermes'
+  | 'openclaw'
 type OpenCodeInputModality = 'text' | 'image' | 'pdf'
 
 export interface ProxyClientModel {
@@ -95,7 +101,8 @@ function stripJsonc(content: string): string {
 
     if (current === '/' && next === '*') {
       index += 2
-      while (index < content.length && !(content[index] === '*' && content[index + 1] === '/')) index++
+      while (index < content.length && !(content[index] === '*' && content[index + 1] === '/'))
+        index++
       index++
       continue
     }
@@ -151,13 +158,15 @@ function escapeTomlString(value: string): string {
 }
 
 function outputLimit(model: ProxyClientModel): number {
-  if (typeof model.maxOutputTokens === 'number' && model.maxOutputTokens > 0) return model.maxOutputTokens
+  if (typeof model.maxOutputTokens === 'number' && model.maxOutputTokens > 0)
+    return model.maxOutputTokens
   if (model.id.toLowerCase().includes('haiku')) return 8192
   return 32000
 }
 
 function contextLimit(model: ProxyClientModel): number {
-  if (typeof model.maxInputTokens === 'number' && model.maxInputTokens > 0) return model.maxInputTokens
+  if (typeof model.maxInputTokens === 'number' && model.maxInputTokens > 0)
+    return model.maxInputTokens
   return 200000
 }
 
@@ -166,7 +175,8 @@ function inputModalities(model: ProxyClientModel): OpenCodeInputModality[] {
   for (const item of model.inputTypes ?? []) {
     const lower = item.toLowerCase()
     if (lower.includes('image')) values.add('image')
-    if (lower.includes('pdf') || lower.includes('document') || lower.includes('file')) values.add('pdf')
+    if (lower.includes('pdf') || lower.includes('document') || lower.includes('file'))
+      values.add('pdf')
   }
   return Array.from(values)
 }
@@ -178,7 +188,10 @@ function buildProxyOrigin(input: ConfigureProxyClientsInput): string {
 }
 
 async function exists(path: string): Promise<boolean> {
-  return access(path, constants.F_OK).then(() => true, () => false)
+  return access(path, constants.F_OK).then(
+    () => true,
+    () => false
+  )
 }
 
 async function backupIfExists(path: string): Promise<string[]> {
@@ -215,8 +228,12 @@ function getClaudeSettingsPath(): string {
 
 function getOpenCodeConfigPath(): string {
   const dir = join(homedir(), '.config', 'opencode')
-  const candidates = [join(dir, 'opencode.jsonc'), join(dir, 'opencode.json'), join(dir, 'config.json')]
-  return candidates.find(path => existsSync(path)) || candidates[1]
+  const candidates = [
+    join(dir, 'opencode.jsonc'),
+    join(dir, 'opencode.json'),
+    join(dir, 'config.json')
+  ]
+  return candidates.find((path) => existsSync(path)) || candidates[1]
 }
 
 function getCodexAuthPath(): string {
@@ -232,7 +249,9 @@ function ensureObjectField(target: Record<string, unknown>, key: string): Record
   return target[key] as Record<string, unknown>
 }
 
-async function configureClaudeCode(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureClaudeCode(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const path = getClaudeSettingsPath()
   const config = await readJsonObject(path)
   const env = ensureObjectField(config, 'env')
@@ -241,8 +260,10 @@ async function configureClaudeCode(context: ProxyClientContext): Promise<Omit<Pr
   env.ANTHROPIC_API_KEY = context.apiKey
   env.ANTHROPIC_MODEL = context.modelId
   // 默认模型映射：让 Claude Code 的 haiku/opus/sonnet 快捷调用都走代理支持的模型
-  const haikuModel = context.models.find(m => m.id.toLowerCase().includes('haiku'))?.id || 'claude-haiku-4.5'
-  const opusModel = context.models.find(m => m.id.toLowerCase().includes('opus'))?.id || context.modelId
+  const haikuModel =
+    context.models.find((m) => m.id.toLowerCase().includes('haiku'))?.id || 'claude-haiku-4.5'
+  const opusModel =
+    context.models.find((m) => m.id.toLowerCase().includes('opus'))?.id || context.modelId
   env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel
   env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel
   env.ANTHROPIC_DEFAULT_SONNET_MODEL = context.modelId
@@ -258,7 +279,7 @@ function openCodeModelConfig(model: ProxyClientModel): Record<string, unknown> {
   const out = outputLimit(model)
   return {
     name: model.name || model.id,
-    attachment: modalities.some(item => item !== 'text'),
+    attachment: modalities.some((item) => item !== 'text'),
     reasoning: true,
     temperature: true,
     tool_call: true,
@@ -273,7 +294,9 @@ function openCodeModelConfig(model: ProxyClientModel): Record<string, unknown> {
   }
 }
 
-async function configureOpenCode(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureOpenCode(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const path = getOpenCodeConfigPath()
   const config = await readJsonObject(path)
   const provider = ensureObjectField(config, 'provider')
@@ -284,9 +307,12 @@ async function configureOpenCode(context: ProxyClientContext): Promise<Omit<Prox
       baseURL: context.openaiBaseUrl,
       apiKey: context.apiKey
     },
-    models: Object.fromEntries(context.models.map(model => [model.id, openCodeModelConfig(model)]))
+    models: Object.fromEntries(
+      context.models.map((model) => [model.id, openCodeModelConfig(model)])
+    )
   }
-  config.$schema = typeof config.$schema === 'string' ? config.$schema : 'https://opencode.ai/config.json'
+  config.$schema =
+    typeof config.$schema === 'string' ? config.$schema : 'https://opencode.ai/config.json'
   config.model = `kiro/${context.modelId}`
   if (typeof config.small_model !== 'string' || config.small_model.startsWith('kiro/')) {
     config.small_model = `kiro/${context.modelId}`
@@ -300,7 +326,7 @@ async function configureOpenCode(context: ProxyClientContext): Promise<Omit<Prox
 function upsertRootTomlString(content: string, key: string, value: string): string {
   const newline = content.includes('\r\n') ? '\r\n' : '\n'
   const lines = content.length === 0 ? [] : content.split(/\r?\n/)
-  const sectionIndex = lines.findIndex(line => /^\s*\[/.test(line))
+  const sectionIndex = lines.findIndex((line) => /^\s*\[/.test(line))
   const rootEnd = sectionIndex === -1 ? lines.length : sectionIndex
   const nextLines: string[] = []
   let written = false
@@ -345,13 +371,22 @@ function removeTomlSection(content: string, section: string): string {
 
 function upsertCodexConfig(content: string, context: ProxyClientContext): string {
   const newline = content.includes('\r\n') ? '\r\n' : '\n'
-  const withProvider = upsertRootTomlString(upsertRootTomlString(content, 'model_provider', 'kiro'), 'model', context.modelId)
-  const withoutKiro = removeTomlSection(removeTomlSection(withProvider, 'model_providers.kiro'), 'model_providers."kiro"')
+  const withProvider = upsertRootTomlString(
+    upsertRootTomlString(content, 'model_provider', 'kiro'),
+    'model',
+    context.modelId
+  )
+  const withoutKiro = removeTomlSection(
+    removeTomlSection(withProvider, 'model_providers.kiro'),
+    'model_providers."kiro"'
+  )
   const separator = withoutKiro.trim() ? `${newline}${newline}` : ''
   return `${withoutKiro.trimEnd()}${separator}[model_providers.kiro]${newline}name = "Kiro Proxy"${newline}base_url = "${escapeTomlString(context.openaiBaseUrl)}"${newline}wire_api = "responses"${newline}`
 }
 
-async function configureCodex(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureCodex(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const authPath = getCodexAuthPath()
   const configPath = getCodexConfigPath()
   const auth = await readJsonObject(authPath)
@@ -372,7 +407,11 @@ function getGeminiSettingsPath(): string {
 }
 
 function buildEnvContent(entries: Record<string, string>): string {
-  return Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('\n') + '\n'
+  return (
+    Object.entries(entries)
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n') + '\n'
+  )
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -386,7 +425,9 @@ function parseEnvFile(content: string): Record<string, string> {
   return result
 }
 
-async function configureGemini(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureGemini(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const envPath = getGeminiEnvPath()
   const settingsPath = getGeminiSettingsPath()
   const allPaths = [envPath, settingsPath]
@@ -397,14 +438,14 @@ async function configureGemini(context: ProxyClientContext): Promise<Omit<ProxyC
   existingEnv.GEMINI_API_KEY = context.apiKey
   existingEnv.GOOGLE_GEMINI_BASE_URL = `${context.proxyOrigin}/v1beta`
   existingEnv.GEMINI_MODEL = context.modelId
-  allBackups.push(...await writeText(envPath, buildEnvContent(existingEnv)))
+  allBackups.push(...(await writeText(envPath, buildEnvContent(existingEnv))))
 
   // settings.json
   const settings = await readJsonObject(settingsPath)
   const security = ensureObjectField(settings, 'security')
   const auth = ensureObjectField(security, 'auth')
   auth.selectedType = 'gemini-api-key'
-  allBackups.push(...await writeJsonObject(settingsPath, settings))
+  allBackups.push(...(await writeJsonObject(settingsPath, settings)))
 
   return { paths: allPaths, backupPaths: allBackups }
 }
@@ -414,16 +455,21 @@ function getHermesConfigPath(): string {
   return join(homedir(), '.hermes', 'config.yaml')
 }
 
-async function configureHermes(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureHermes(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const configPath = getHermesConfigPath()
   const existing = (await exists(configPath)) ? await readFile(configPath, 'utf-8') : ''
   const newline = existing.includes('\r\n') ? '\r\n' : '\n'
 
   // 构建 models dict
-  const modelsYaml = context.models.map(m => {
-    const ctx = typeof m.maxInputTokens === 'number' && m.maxInputTokens > 0 ? m.maxInputTokens : 200000
-    return `      ${m.id}:${newline}        context_length: ${ctx}`
-  }).join(newline)
+  const modelsYaml = context.models
+    .map((m) => {
+      const ctx =
+        typeof m.maxInputTokens === 'number' && m.maxInputTokens > 0 ? m.maxInputTokens : 200000
+      return `      ${m.id}:${newline}        context_length: ${ctx}`
+    })
+    .join(newline)
 
   const providerBlock = [
     `  - name: kiro`,
@@ -462,7 +508,9 @@ function getOpenClawConfigPath(): string {
   return join(homedir(), '.openclaw', 'openclaw.json')
 }
 
-async function configureOpenClaw(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
+async function configureOpenClaw(
+  context: ProxyClientContext
+): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
   const configPath = getOpenClawConfigPath()
   const config = await readJsonObject(configPath)
 
@@ -474,7 +522,12 @@ async function configureOpenClaw(context: ProxyClientContext): Promise<Omit<Prox
     base_url: context.openaiBaseUrl,
     api_key: context.apiKey,
     api: 'openai-chat',
-    models: context.models.map(m => ({ id: m.id, name: m.name || m.id, context_window: typeof m.maxInputTokens === 'number' && m.maxInputTokens > 0 ? m.maxInputTokens : 200000 }))
+    models: context.models.map((m) => ({
+      id: m.id,
+      name: m.name || m.id,
+      context_window:
+        typeof m.maxInputTokens === 'number' && m.maxInputTokens > 0 ? m.maxInputTokens : 200000
+    }))
   }
 
   // agents.defaults.model
@@ -486,23 +539,50 @@ async function configureOpenClaw(context: ProxyClientContext): Promise<Omit<Prox
   return { paths: [configPath], backupPaths: backups }
 }
 
-const ALL_CLIENT_TARGETS: ProxyClientTarget[] = ['claudeCode', 'opencode', 'codex', 'gemini', 'hermes', 'openclaw']
+const ALL_CLIENT_TARGETS: ProxyClientTarget[] = [
+  'claudeCode',
+  'opencode',
+  'codex',
+  'gemini',
+  'hermes',
+  'openclaw'
+]
 
-async function configureClient(client: ProxyClientTarget, context: ProxyClientContext): Promise<ProxyClientConfigResult> {
+async function configureClient(
+  client: ProxyClientTarget,
+  context: ProxyClientContext
+): Promise<ProxyClientConfigResult> {
   try {
-    const result = client === 'claudeCode' ? await configureClaudeCode(context)
-      : client === 'opencode' ? await configureOpenCode(context)
-      : client === 'codex' ? await configureCodex(context)
-      : client === 'gemini' ? await configureGemini(context)
-      : client === 'hermes' ? await configureHermes(context)
-      : await configureOpenClaw(context)
+    const result =
+      client === 'claudeCode'
+        ? await configureClaudeCode(context)
+        : client === 'opencode'
+          ? await configureOpenCode(context)
+          : client === 'codex'
+            ? await configureCodex(context)
+            : client === 'gemini'
+              ? await configureGemini(context)
+              : client === 'hermes'
+                ? await configureHermes(context)
+                : await configureOpenClaw(context)
     return { client, success: true, ...result }
   } catch (error) {
-    return { client, success: false, paths: [], backupPaths: [], error: error instanceof Error ? error.message : 'Unknown error' }
+    return {
+      client,
+      success: false,
+      paths: [],
+      backupPaths: [],
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }
   }
 }
 
-export async function configureProxyClients(input: ConfigureProxyClientsInput): Promise<{ success: boolean; proxyOrigin: string; openaiBaseUrl: string; results: ProxyClientConfigResult[] }> {
+export async function configureProxyClients(input: ConfigureProxyClientsInput): Promise<{
+  success: boolean
+  proxyOrigin: string
+  openaiBaseUrl: string
+  results: ProxyClientConfigResult[]
+}> {
   const modelId = input.modelId.trim()
   const apiKey = input.apiKey?.trim()
   if (!Array.isArray(input.clients)) throw new Error('Client targets are required')
@@ -510,11 +590,17 @@ export async function configureProxyClients(input: ConfigureProxyClientsInput): 
   if (!modelId) throw new Error('Model is required')
   if (!apiKey) throw new Error('API Key is required')
   if (clients.length === 0) throw new Error('At least one client is required')
-  if (clients.some(client => !ALL_CLIENT_TARGETS.includes(client))) throw new Error('Unsupported client target')
+  if (clients.some((client) => !ALL_CLIENT_TARGETS.includes(client)))
+    throw new Error('Unsupported client target')
 
   const proxyOrigin = buildProxyOrigin(input)
-  const modelMap = new Map((input.models?.length ? input.models : [{ id: modelId, name: input.modelName || modelId }]).map(model => [model.id, model]))
-  if (!modelMap.has(modelId)) modelMap.set(modelId, { id: modelId, name: input.modelName || modelId })
+  const modelMap = new Map(
+    (input.models?.length ? input.models : [{ id: modelId, name: input.modelName || modelId }]).map(
+      (model) => [model.id, model]
+    )
+  )
+  if (!modelMap.has(modelId))
+    modelMap.set(modelId, { id: modelId, name: input.modelName || modelId })
   const context: ProxyClientContext = {
     proxyOrigin,
     openaiBaseUrl: `${proxyOrigin.replace(/\/$/, '')}/v1`,
@@ -526,5 +612,10 @@ export async function configureProxyClients(input: ConfigureProxyClientsInput): 
   for (const client of clients) {
     results.push(await configureClient(client, context))
   }
-  return { success: results.every(result => result.success), proxyOrigin, openaiBaseUrl: context.openaiBaseUrl, results }
+  return {
+    success: results.every((result) => result.success),
+    proxyOrigin,
+    openaiBaseUrl: context.openaiBaseUrl,
+    results
+  }
 }

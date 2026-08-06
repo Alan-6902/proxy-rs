@@ -29,16 +29,20 @@ export default {
     const cacheKey = `e2e-opencode-${Date.now().toString(36)}`
     log(`promptCacheKey=${cacheKey}`)
 
-    const send = async (turn) => postOpenAI({
-      model: DEFAULT_OPENAI_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      promptCacheKey: cacheKey,
-      messages: [
-        { role: 'system', content: '你是简洁的助手, 一句话回答.' },
-        { role: 'user', content: turn === 1 ? '请说一句问候语.' : '再用同样风格说一句感谢.' }
-      ]
-    }, { base, token })
+    const send = async (turn) =>
+      postOpenAI(
+        {
+          model: DEFAULT_OPENAI_MODEL,
+          max_tokens: SMALL_MAX_TOKENS,
+          stream: true,
+          promptCacheKey: cacheKey,
+          messages: [
+            { role: 'system', content: '你是简洁的助手, 一句话回答.' },
+            { role: 'user', content: turn === 1 ? '请说一句问候语.' : '再用同样风格说一句感谢.' }
+          ]
+        },
+        { base, token }
+      )
 
     const r1 = await send(1)
     log(`turn1: status=${r1.status} kind=${r1.kind}`)

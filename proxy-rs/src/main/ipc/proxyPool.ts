@@ -22,7 +22,12 @@ export async function validateProxyEntry(params: {
   timeoutMs?: number
   upstreamProxy?: string
 }): Promise<ProxyValidationResult> {
-  const { url, testUrl = DEFAULT_PROXY_POOL_CONFIG.testUrl, timeoutMs = DEFAULT_PROXY_POOL_CONFIG.testTimeoutMs, upstreamProxy } = params || {}
+  const {
+    url,
+    testUrl = DEFAULT_PROXY_POOL_CONFIG.testUrl,
+    timeoutMs = DEFAULT_PROXY_POOL_CONFIG.testTimeoutMs,
+    upstreamProxy
+  } = params || {}
   if (!url) return { success: false, error: 'Missing proxy URL' }
 
   let chainRelay: ChainProxyRelay | null = null
@@ -32,7 +37,10 @@ export async function validateProxyEntry(params: {
       chainRelay = new ChainProxyRelay(upstreamProxy.trim(), url)
       proxyForAgent = await chainRelay.start()
     } catch (err) {
-      return { success: false, error: `代理链启动失败: ${err instanceof Error ? err.message : String(err)}` }
+      return {
+        success: false,
+        error: `代理链启动失败: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   }
 
@@ -66,13 +74,17 @@ export async function validateProxyEntry(params: {
             const ipStr = String(raw).trim()
             const m = ipStr.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/)
             if (m) externalIp = m[0]
-          } catch { /* JSON 解析失败走下面纯文本 */ }
+          } catch {
+            /* JSON 解析失败走下面纯文本 */
+          }
         }
         if (!externalIp) {
           const m = text.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/)
           if (m) externalIp = m[0]
         }
-      } catch { /* 出口 IP 提取失败不影响验活成功 */ }
+      } catch {
+        /* 出口 IP 提取失败不影响验活成功 */
+      }
       return { success: true, latencyMs, externalIp }
     }
     return { success: false, latencyMs, error: `HTTP ${resp.status}` }
@@ -87,18 +99,28 @@ export async function validateProxyEntry(params: {
   } finally {
     clearTimeout(timer)
     // 释放 agent 连接池：批量验活时不关闭会累积大量空闲连接/句柄直到 GC
-    try { await agent.close() } catch { /* ignore */ }
+    try {
+      await agent.close()
+    } catch {
+      /* ignore */
+    }
     if (chainRelay) await chainRelay.stop()
   }
 }
 
 function registerValidateHandler(): void {
-  ipcMain.handle('proxy-pool:validate', async (_event, params: {
-    url: string
-    testUrl?: string
-    timeoutMs?: number
-    upstreamProxy?: string
-  }) => validateProxyEntry(params || { url: '' }))
+  ipcMain.handle(
+    'proxy-pool:validate',
+    async (
+      _event,
+      params: {
+        url: string
+        testUrl?: string
+        timeoutMs?: number
+        upstreamProxy?: string
+      }
+    ) => validateProxyEntry(params || { url: '' })
+  )
 }
 
 /**
@@ -109,23 +131,29 @@ function registerValidateHandler(): void {
  * 定位问题精确到哪一层，比 validate 的"成功/失败"二元结果信息量大得多。
  */
 function registerDiagnoseChainHandler(): void {
-  ipcMain.handle('proxy-pool:diagnose-chain', async (_event, params: {
-    targetUrl: string
-    upstreamProxy: string
-    testHost?: string
-    testPort?: number
-  }) => {
-    const { targetUrl, upstreamProxy, testHost, testPort } = params || {}
-    if (!targetUrl) return { success: false, error: 'Missing target proxy URL' }
-    if (!upstreamProxy) return { success: false, error: 'Missing upstream proxy URL' }
-    try {
-      const relay = new ChainProxyRelay(upstreamProxy, targetUrl)
-      const diag = await relay.diagnose(testHost, testPort)
-      return { success: true, diagnose: diag }
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+  ipcMain.handle(
+    'proxy-pool:diagnose-chain',
+    async (
+      _event,
+      params: {
+        targetUrl: string
+        upstreamProxy: string
+        testHost?: string
+        testPort?: number
+      }
+    ) => {
+      const { targetUrl, upstreamProxy, testHost, testPort } = params || {}
+      if (!targetUrl) return { success: false, error: 'Missing target proxy URL' }
+      if (!upstreamProxy) return { success: false, error: 'Missing upstream proxy URL' }
+      try {
+        const relay = new ChainProxyRelay(upstreamProxy, targetUrl)
+        const diag = await relay.diagnose(testHost, testPort)
+        return { success: true, diagnose: diag }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
     }
-  })
+  )
 }
 
 /** 注册"代理池"模块下的全部 IPC handler */

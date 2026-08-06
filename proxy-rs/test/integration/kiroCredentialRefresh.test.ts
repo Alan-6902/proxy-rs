@@ -23,18 +23,12 @@ describe('Kiro credential refresh helpers', () => {
       groups: { preserved: true }
     }
 
-    const merged = mergeRotatedKiroCredentials(
-      original,
-      'account',
-      'refresh-before',
-      undefined,
-      {
-        accessToken: 'access-after',
-        refreshToken: 'refresh-after',
-        expiresAt: 2,
-        credentialRevision: 'main-revision-1'
-      }
-    )
+    const merged = mergeRotatedKiroCredentials(original, 'account', 'refresh-before', undefined, {
+      accessToken: 'access-after',
+      refreshToken: 'refresh-after',
+      expiresAt: 2,
+      credentialRevision: 'main-revision-1'
+    })
     expect(merged).toEqual({
       accounts: {
         account: {
@@ -134,9 +128,10 @@ describe('Kiro credential refresh helpers', () => {
     const singleflight = new KiroCredentialRefreshSingleflight<string>()
     let finish!: (value: string) => void
     const operation = vi.fn(
-      () => new Promise<string>((resolve) => {
-        finish = resolve
-      })
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve
+        })
     )
     const first = singleflight.run('account\0refresh', operation)
     const second = singleflight.run('account\0refresh', operation)

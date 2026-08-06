@@ -7,6 +7,8 @@ export const app = {
 export const ipcMain = { handle: () => undefined, on: () => undefined }
 
 export class BrowserWindow {
-  static getAllWindows(): BrowserWindow[] { return [] }
+  static getAllWindows(): BrowserWindow[] {
+    return []
+  }
   webContents = { send: () => undefined }
 }

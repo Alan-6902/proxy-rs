@@ -16,7 +16,7 @@ export default {
       headers: {
         'content-type': 'application/json',
         'anthropic-version': '2023-06-01',
-        'authorization': `Bearer ${token}`
+        authorization: `Bearer ${token}`
       },
       body: 'this is { definitely not } valid JSON ['
     })

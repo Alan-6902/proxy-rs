@@ -90,7 +90,7 @@ interface StatusResult {
     userStatus?: string // 用户状态：Active 等
     featureFlags?: string[] // 特性开关
     subscriptionTitle?: string
-    usage?: { 
+    usage?: {
       current: number
       limit: number
       percentUsed: number
@@ -104,7 +104,7 @@ interface StatusResult {
       nextResetDate?: string
       resourceDetail?: ResourceDetail
     }
-    subscription?: { 
+    subscription?: {
       type: string
       title?: string
       rawType?: string
@@ -144,72 +144,87 @@ interface KiroApi {
   saveAccounts: (data: AccountData) => Promise<void>
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
   checkAccountStatus: (account: unknown) => Promise<StatusResult>
-  
+
   // 后台批量刷新（主进程执行，不阻塞 UI）
-  backgroundBatchRefresh: (accounts: Array<{
-    id: string
-    email: string
-    idp?: string
-    profileArn?: string
-    needsTokenRefresh?: boolean
-    credentials: {
-      credentialKind?: 'oauth' | 'kiro_api_key'
-      kiroApiKey?: string
-      refreshToken?: string
-      credentialRevision?: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      accessToken?: string
-      provider?: string
+  backgroundBatchRefresh: (
+    accounts: Array<{
+      id: string
+      email: string
+      idp?: string
       profileArn?: string
-    }
-  }>, concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
-  onBackgroundRefreshResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
-  
+      needsTokenRefresh?: boolean
+      credentials: {
+        credentialKind?: 'oauth' | 'kiro_api_key'
+        kiroApiKey?: string
+        refreshToken?: string
+        credentialRevision?: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        accessToken?: string
+        provider?: string
+        profileArn?: string
+      }
+    }>,
+    concurrency?: number,
+    syncInfo?: boolean
+  ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
+  onBackgroundRefreshProgress: (
+    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
+  ) => () => void
+  onBackgroundRefreshResult: (
+    callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
+  ) => () => void
+
   // 后台批量检查账号状态（不刷新 Token）
-  backgroundBatchCheck: (accounts: Array<{
-    id: string
-    email: string
-    credentials: {
-      credentialKind?: 'oauth' | 'kiro_api_key'
-      accessToken?: string
-      kiroApiKey?: string
-      refreshToken?: string
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      provider?: string
-    }
-    idp?: string
-  }>, concurrency?: number) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundCheckProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
-  onBackgroundCheckResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
-  
+  backgroundBatchCheck: (
+    accounts: Array<{
+      id: string
+      email: string
+      credentials: {
+        credentialKind?: 'oauth' | 'kiro_api_key'
+        accessToken?: string
+        kiroApiKey?: string
+        refreshToken?: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        provider?: string
+      }
+      idp?: string
+    }>,
+    concurrency?: number
+  ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
+  onBackgroundCheckProgress: (
+    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
+  ) => () => void
+  onBackgroundCheckResult: (
+    callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
+  ) => () => void
+
   // 文件操作
   exportToFile: (data: string, filename: string) => Promise<boolean>
   importFromFile: () => Promise<{ content: string; format: string } | null>
 
   // 验证凭证并获取账号信息
-    verifyAccountCredentials: (credentials: {
-      refreshToken?: string
-      clientId?: string
-      clientSecret?: string
-      credentialKind?: 'oauth' | 'kiro_api_key'
-      kiroApiKey?: string
+  verifyAccountCredentials: (credentials: {
+    refreshToken?: string
+    clientId?: string
+    clientSecret?: string
+    credentialKind?: 'oauth' | 'kiro_api_key'
+    kiroApiKey?: string
     region?: string
-    authMethod?: string  // 'IdC' 或 'social'
-    provider?: string    // 'BuilderId', 'Github', 'Google'
+    authMethod?: string // 'IdC' 或 'social'
+    provider?: string // 'BuilderId', 'Github', 'Google'
   }) => Promise<{
     success: boolean
     data?: {
       email: string
       userId: string
-        accessToken: string
-        refreshToken: string
+      accessToken: string
+      refreshToken: string
       expiresIn?: number
       subscriptionType: string
       subscriptionTitle: string
@@ -219,7 +234,7 @@ interface KiroApi {
         upgradeCapability?: string
         overageCapability?: string
       }
-      usage: { 
+      usage: {
         current: number
         limit: number
         baseLimit?: number
@@ -227,7 +242,13 @@ interface KiroApi {
         freeTrialLimit?: number
         freeTrialCurrent?: number
         freeTrialExpiry?: string
-        bonuses?: Array<{ code: string; name: string; current: number; limit: number; expiresAt?: string }>
+        bonuses?: Array<{
+          code: string
+          name: string
+          current: number
+          limit: number
+          expiresAt?: string
+        }>
         nextResetDate?: string
         resourceDetail?: {
           displayName?: string
@@ -248,7 +269,10 @@ interface KiroApi {
   }>
 
   // 从 AWS SSO Token (x-amz-sso_authn) 导入账号
-  importFromSsoToken: (bearerToken: string, region?: string) => Promise<{
+  importFromSsoToken: (
+    bearerToken: string,
+    region?: string
+  ) => Promise<{
     success: boolean
     data?: {
       accessToken: string
@@ -276,7 +300,13 @@ interface KiroApi {
         freeTrialLimit?: number
         freeTrialCurrent?: number
         freeTrialExpiry?: string
-        bonuses?: Array<{ code: string; name: string; current: number; limit: number; expiresAt?: string }>
+        bonuses?: Array<{
+          code: string
+          name: string
+          current: number
+          limit: number
+          expiresAt?: string
+        }>
         nextResetDate?: string
         resourceDetail?: {
           displayName?: string
@@ -324,7 +354,10 @@ interface KiroApi {
   cancelBuilderIdLogin: () => Promise<{ success: boolean }>
 
   // 启动 IAM Identity Center SSO 登录 (Authorization Code flow)
-  startIamSsoLogin: (startUrl: string, region?: string) => Promise<{
+  startIamSsoLogin: (
+    startUrl: string,
+    region?: string
+  ) => Promise<{
     success: boolean
     authorizeUrl?: string
     expiresIn?: number
@@ -357,7 +390,10 @@ interface KiroApi {
   }>
 
   // 交换 Social Auth token
-  exchangeSocialToken: (code: string, state: string) => Promise<{
+  exchangeSocialToken: (
+    code: string,
+    state: string
+  ) => Promise<{
     success: boolean
     accessToken?: string
     refreshToken?: string
@@ -372,24 +408,52 @@ interface KiroApi {
   cancelSocialLogin: () => Promise<{ success: boolean }>
 
   // 监听 Social Auth 回调
-  onSocialAuthCallback: (callback: (data: { code?: string; state?: string; error?: string }) => void) => () => void
+  onSocialAuthCallback: (
+    callback: (data: { code?: string; state?: string; error?: string }) => void
+  ) => () => void
 
   // 代理设置
-  setProxy: (enabled: boolean, url: string) => Promise<{ success: boolean; error?: string; normalizedUrl?: string }>
+  setProxy: (
+    enabled: boolean,
+    url: string
+  ) => Promise<{ success: boolean; error?: string; normalizedUrl?: string }>
 
   // 获取当前账号可用模型（诊断功能使用）
-  getKiroAvailableModels: () => Promise<{ models: Array<{ id: string; name: string; description: string }>; error?: string }>
+  getKiroAvailableModels: () => Promise<{
+    models: Array<{ id: string; name: string; description: string }>
+    error?: string
+  }>
 
   // ============ Kiro API 反代服务器 ============
 
   // 启动反代服务器
-  proxyStart: (config?: { port?: number; host?: string; apiKey?: string; enableMultiAccount?: boolean; logRequests?: boolean; clientDrivenToolExecution?: boolean; disableTools?: boolean; modelThinkingMode?: Record<string, boolean>; thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think' }) => Promise<{ success: boolean; port?: number; error?: string }>
+  proxyStart: (config?: {
+    port?: number
+    host?: string
+    apiKey?: string
+    enableMultiAccount?: boolean
+    logRequests?: boolean
+    clientDrivenToolExecution?: boolean
+    disableTools?: boolean
+    modelThinkingMode?: Record<string, boolean>
+    thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think'
+  }) => Promise<{ success: boolean; port?: number; error?: string }>
 
   // 停止反代服务器
   proxyStop: () => Promise<{ success: boolean; error?: string }>
 
   // 获取反代服务器状态
-  proxyGetStatus: () => Promise<{ running: boolean; config: unknown; stats: unknown; sessionStats?: { totalRequests: number; successRequests: number; failedRequests: number; startTime: number } }>
+  proxyGetStatus: () => Promise<{
+    running: boolean
+    config: unknown
+    stats: unknown
+    sessionStats?: {
+      totalRequests: number
+      successRequests: number
+      failedRequests: number
+      startTime: number
+    }
+  }>
 
   // 重置累计 credits
   proxyResetCredits: () => Promise<{ success: boolean }>
@@ -401,7 +465,11 @@ interface KiroApi {
   proxyResetRequestStats: () => Promise<{ success: boolean }>
 
   // 获取反代详细日志
-  proxyGetLogs: (count?: number) => Promise<Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>>
+  proxyGetLogs: (
+    count?: number
+  ) => Promise<
+    Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
+  >
 
   // 清除反代详细日志
   proxyClearLogs: () => Promise<{ success: boolean }>
@@ -410,29 +478,90 @@ interface KiroApi {
   proxyGetLogsCount: () => Promise<number>
 
   // 更新反代服务器配置
-  proxyUpdateConfig: (config: Record<string, unknown>) => Promise<{ success: boolean; config?: unknown; error?: string }>
+  proxyUpdateConfig: (
+    config: Record<string, unknown>
+  ) => Promise<{ success: boolean; config?: unknown; error?: string }>
   proxyAdminKeyStatus: () => Promise<{ configured: boolean; success?: boolean; error?: string }>
   proxyAdminKeyRotate: () => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
-  proxyAdminKeySet: (adminApiKey: string) => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
+  proxyAdminKeySet: (
+    adminApiKey: string
+  ) => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
   proxyAdminKeyClear: () => Promise<{ success: boolean; error?: string }>
 
   // ============ v1.8 反代安全 / 可观测 IPC ============
-  proxySelfSignedCertInfo: () => Promise<{ success: boolean; cert?: string; key?: string; fingerprint?: string; notBefore?: number; notAfter?: number; subject?: string; altNames?: string[]; error?: string }>
-  proxySelfSignedCertRegenerate: () => Promise<{ success: boolean; cert?: string; key?: string; fingerprint?: string; notBefore?: number; notAfter?: number; subject?: string; altNames?: string[]; error?: string }>
+  proxySelfSignedCertInfo: () => Promise<{
+    success: boolean
+    cert?: string
+    key?: string
+    fingerprint?: string
+    notBefore?: number
+    notAfter?: number
+    subject?: string
+    altNames?: string[]
+    error?: string
+  }>
+  proxySelfSignedCertRegenerate: () => Promise<{
+    success: boolean
+    cert?: string
+    key?: string
+    fingerprint?: string
+    notBefore?: number
+    notAfter?: number
+    subject?: string
+    altNames?: string[]
+    error?: string
+  }>
   proxyNeedsRestart: () => Promise<{ needsRestart: boolean }>
   proxyRestart: () => Promise<{ success: boolean; error?: string }>
-  proxyAuditLog: () => Promise<{ entries: Array<{ ts: number; type: string; data: Record<string, unknown> }> }>
-  notifyLocal: (kind: 'registration-risk-paused' | 'registration-batch-completed', input?: { batchId?: string }) => Promise<void>
-  onLocalNotificationNavigate: (callback: (page: 'accounts' | 'proxy' | 'register') => void) => (() => void)
+  proxyAuditLog: () => Promise<{
+    entries: Array<{ ts: number; type: string; data: Record<string, unknown> }>
+  }>
+  notifyLocal: (
+    kind: 'registration-risk-paused' | 'registration-batch-completed',
+    input?: { batchId?: string }
+  ) => Promise<void>
+  onLocalNotificationNavigate: (
+    callback: (page: 'accounts' | 'proxy' | 'register') => void
+  ) => () => void
 
   // 添加账号到反代池
-  proxyAddAccount: (account: ({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyAddAccount: (
+    account: {
+      id: string
+      email?: string
+      refreshToken?: string
+      profileArn?: string
+      expiresAt?: number
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      provider?: string
+    } & UpstreamKiroCredentialInput
+  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 从反代池移除账号
-  proxyRemoveAccount: (accountId: string) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxyRemoveAccount: (
+    accountId: string
+  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (accounts: Array<({ id: string; email?: string; refreshToken?: string; profileArn?: string; expiresAt?: number; clientId?: string; clientSecret?: string; region?: string; authMethod?: string; provider?: string } & UpstreamKiroCredentialInput)>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
+  proxySyncAccounts: (
+    accounts: Array<
+      {
+        id: string
+        email?: string
+        refreshToken?: string
+        profileArn?: string
+        expiresAt?: number
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        provider?: string
+      } & UpstreamKiroCredentialInput
+    >
+  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 获取反代池账号列表
   proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>
@@ -447,45 +576,173 @@ interface KiroApi {
   proxyRefreshModels: () => Promise<{ success: boolean; error?: string }>
 
   // 获取可用模型列表
-  proxyGetModels: () => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache?: boolean }>
+  proxyGetModels: () => Promise<{
+    success: boolean
+    error?: string
+    models: Array<{
+      id: string
+      name: string
+      description: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+      rateMultiplier?: number
+      rateUnit?: string
+    }>
+    fromCache?: boolean
+  }>
 
-  proxyConfigureClients: (input: { clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>; modelId: string; modelName?: string; models?: Array<{ id: string; name?: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null }> }) => Promise<{ success: boolean; error?: string; proxyOrigin: string; openaiBaseUrl: string; results: Array<{ client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'; success: boolean; paths: string[]; backupPaths: string[]; error?: string }> }>
+  proxyConfigureClients: (input: {
+    clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>
+    modelId: string
+    modelName?: string
+    models?: Array<{
+      id: string
+      name?: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+    }>
+  }) => Promise<{
+    success: boolean
+    error?: string
+    proxyOrigin: string
+    openaiBaseUrl: string
+    results: Array<{
+      client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
+      success: boolean
+      paths: string[]
+      backupPaths: string[]
+      error?: string
+    }>
+  }>
 
   // 获取账户可用模型列表
-  accountGetModels: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }> }>
+  accountGetModels: (
+    credential: UpstreamKiroCredentialInput,
+    region?: string,
+    profileArn?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{
+    success: boolean
+    error?: string
+    models: Array<{
+      id: string
+      name: string
+      description: string
+      inputTypes?: string[]
+      maxInputTokens?: number | null
+      maxOutputTokens?: number | null
+      rateMultiplier?: number
+      rateUnit?: string
+    }>
+  }>
 
   // 获取可用订阅列表
-  accountGetSubscriptions: (credential: UpstreamKiroCredentialInput, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; plans: Array<{ name: string; qSubscriptionType: string; description: { title: string; billingInterval: string; featureHeader: string; features: string[] }; pricing: { amount: number; currency: string } }>; disclaimer?: string[] }>
+  accountGetSubscriptions: (
+    credential: UpstreamKiroCredentialInput,
+    region?: string,
+    profileArn?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{
+    success: boolean
+    error?: string
+    plans: Array<{
+      name: string
+      qSubscriptionType: string
+      description: {
+        title: string
+        billingInterval: string
+        featureHeader: string
+        features: string[]
+      }
+      pricing: { amount: number; currency: string }
+    }>
+    disclaimer?: string[]
+  }>
 
   // 获取订阅管理/支付链接
-  accountGetSubscriptionUrl: (credential: UpstreamKiroCredentialInput, subscriptionType?: string, region?: string, profileArn?: string, provider?: string, authMethod?: string, accountId?: string) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
+  accountGetSubscriptionUrl: (
+    credential: UpstreamKiroCredentialInput,
+    subscriptionType?: string,
+    region?: string,
+    profileArn?: string,
+    provider?: string,
+    authMethod?: string,
+    accountId?: string
+  ) => Promise<{ success: boolean; error?: string; url?: string; status?: string }>
 
   // 在新窗口打开订阅链接
   openSubscriptionWindow: (url: string) => Promise<{ success: boolean; error?: string }>
 
   // 保存代理日志
-  proxySaveLogs: (logs: Array<{ time: string; path: string; status: number; tokens?: number }>) => Promise<{ success: boolean; error?: string }>
+  proxySaveLogs: (
+    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
+  ) => Promise<{ success: boolean; error?: string }>
 
   // 加载代理日志
-  proxyLoadLogs: () => Promise<{ success: boolean; logs: Array<{ time: string; path: string; status: number; tokens?: number }> }>
+  proxyLoadLogs: () => Promise<{
+    success: boolean
+    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
+  }>
 
   // 监听反代请求事件
-  onProxyRequest: (callback: (info: { path: string; method: string; accountId?: string }) => void) => () => void
+  onProxyRequest: (
+    callback: (info: { path: string; method: string; accountId?: string }) => void
+  ) => () => void
 
   // 监听反代响应事件
-  onProxyResponse: (callback: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string }) => void) => () => void
+  onProxyResponse: (
+    callback: (info: {
+      path: string
+      model?: string
+      status: number
+      tokens?: number
+      inputTokens?: number
+      outputTokens?: number
+      cacheReadTokens?: number
+      cacheWriteTokens?: number
+      reasoningTokens?: number
+      credits?: number
+      responseTime?: number
+      error?: string
+    }) => void
+  ) => () => void
 
   // 监听反代错误事件
   onProxyError: (callback: (error: string) => void) => () => void
 
   // 监听反代状态变化事件
-  onProxyStatusChange: (callback: (status: { running: boolean; port: number }) => void) => () => void
+  onProxyStatusChange: (
+    callback: (status: { running: boolean; port: number }) => void
+  ) => () => void
 
   // 监听反代账号被封禁事件（TEMPORARILY_SUSPENDED / AccountSuspendedException）
-  onProxyAccountSuspended: (callback: (info: { id: string; email?: string; reason: string; message: string; suspendedAt: number }) => void) => () => void
+  onProxyAccountSuspended: (
+    callback: (info: {
+      id: string
+      email?: string
+      reason: string
+      message: string
+      suspendedAt: number
+    }) => void
+  ) => () => void
 
   // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
-  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string; profileArn?: string }) => void) => () => void
+  onProxyAccountUpdate: (
+    callback: (info: {
+      id: string
+      accessToken?: string
+      refreshToken?: string
+      expiresAt?: number
+      credentialRevision?: string
+      profileArn?: string
+    }) => void
+  ) => () => void
 
   // ============ Usage API 类型设置 ============
 
@@ -496,15 +753,88 @@ interface KiroApi {
   setUsageApiType: (type: 'rest' | 'cbor') => Promise<{ success: boolean; type: string }>
 
   // ============ API Key 管理 ============
-  
+
   // 获取所有 API Keys
-  proxyGetApiKeys: () => Promise<{ success: boolean; apiKeys: Array<{ id: string; name: string; key: string; enabled: boolean; createdAt: number; lastUsedAt?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }>; error?: string }>
+  proxyGetApiKeys: () => Promise<{
+    success: boolean
+    apiKeys: Array<{
+      id: string
+      name: string
+      key: string
+      enabled: boolean
+      createdAt: number
+      lastUsedAt?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }>
+    error?: string
+  }>
 
   // 添加 API Key
-  proxyAddApiKey: (apiKey: { name: string; key?: string; format?: 'sk' | 'simple' | 'token'; creditsLimit?: number }) => Promise<{ success: boolean; apiKey?: { id: string; name: string; key: string; format?: 'sk' | 'simple' | 'token'; enabled: boolean; createdAt: number; creditsLimit?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }; error?: string }>
+  proxyAddApiKey: (apiKey: {
+    name: string
+    key?: string
+    format?: 'sk' | 'simple' | 'token'
+    creditsLimit?: number
+  }) => Promise<{
+    success: boolean
+    apiKey?: {
+      id: string
+      name: string
+      key: string
+      format?: 'sk' | 'simple' | 'token'
+      enabled: boolean
+      createdAt: number
+      creditsLimit?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }
+    error?: string
+  }>
 
   // 更新 API Key
-  proxyUpdateApiKey: (id: string, updates: { name?: string; key?: string; enabled?: boolean; creditsLimit?: number | null }) => Promise<{ success: boolean; apiKey?: { id: string; name: string; key: string; format?: 'sk' | 'simple' | 'token'; enabled: boolean; createdAt: number; creditsLimit?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }; error?: string }>
+  proxyUpdateApiKey: (
+    id: string,
+    updates: { name?: string; key?: string; enabled?: boolean; creditsLimit?: number | null }
+  ) => Promise<{
+    success: boolean
+    apiKey?: {
+      id: string
+      name: string
+      key: string
+      format?: 'sk' | 'simple' | 'token'
+      enabled: boolean
+      createdAt: number
+      creditsLimit?: number
+      usage: {
+        totalRequests: number
+        totalCredits: number
+        totalInputTokens: number
+        totalOutputTokens: number
+        daily: Record<
+          string,
+          { requests: number; credits: number; inputTokens: number; outputTokens: number }
+        >
+      }
+    }
+    error?: string
+  }>
 
   // 删除 API Key
   proxyDeleteApiKey: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -543,28 +873,32 @@ interface KiroApi {
   }) => Promise<{ success: boolean; error?: string }>
 
   // 更新托盘当前账户信息
-  updateTrayAccount: (account: {
-    id: string
-    email: string
-    idp: string
-    status: string
-    subscription?: string
-    usage?: {
-      usedCredits: number
-      totalCredits: number
-      totalRequests: number
-      successRequests: number
-      failedRequests: number
-    }
-  } | null) => void
+  updateTrayAccount: (
+    account: {
+      id: string
+      email: string
+      idp: string
+      status: string
+      subscription?: string
+      usage?: {
+        usedCredits: number
+        totalCredits: number
+        totalRequests: number
+        successRequests: number
+        failedRequests: number
+      }
+    } | null
+  ) => void
 
   // 更新托盘账户列表
-  updateTrayAccountList: (accounts: {
-    id: string
-    email: string
-    idp: string
-    status: string
-  }[]) => void
+  updateTrayAccountList: (
+    accounts: {
+      id: string
+      email: string
+      idp: string
+      status: string
+    }[]
+  ) => void
 
   // 刷新托盘菜单
   refreshTrayMenu: () => void
@@ -582,7 +916,10 @@ interface KiroApi {
   onShowCloseConfirmDialog: (callback: () => void) => () => void
 
   // 发送关闭确认对话框响应
-  sendCloseConfirmResponse: (action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean) => void
+  sendCloseConfirmResponse: (
+    action: 'minimize' | 'quit' | 'cancel',
+    rememberChoice: boolean
+  ) => void
 
   // ============ 注册功能 API ============
 
@@ -617,15 +954,22 @@ interface KiroApi {
     fullName?: string
   }) => Promise<{ success: boolean; error?: string }>
 
-  registrationManualPhase2: (email: string, fullName?: string) => Promise<{ success: boolean; error?: string }>
+  registrationManualPhase2: (
+    email: string,
+    fullName?: string
+  ) => Promise<{ success: boolean; error?: string }>
 
-  registrationManualPhase3: (otp: string) => Promise<{ success: boolean; result?: unknown; error?: string }>
+  registrationManualPhase3: (
+    otp: string
+  ) => Promise<{ success: boolean; result?: unknown; error?: string }>
 
   registrationCancel: () => Promise<{ success: boolean }>
 
   registrationStatus: () => Promise<{ inProgress: boolean }>
 
-  protonOpenLogin: (proxy?: string) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
+  protonOpenLogin: (
+    proxy?: string
+  ) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
 
   protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
 
@@ -670,7 +1014,11 @@ interface KiroApi {
   onProxyPoolValidated: (callback: (payload: { entries: ProxyEntry[] }) => void) => () => void
 
   // 诊断：通用 HTTP 探测
-  diagnoseHttpProbe: (params: { url: string; method?: 'GET' | 'HEAD'; timeoutMs?: number }) => Promise<{
+  diagnoseHttpProbe: (params: {
+    url: string
+    method?: 'GET' | 'HEAD'
+    timeoutMs?: number
+  }) => Promise<{
     success: boolean
     latencyMs?: number
     status?: number
@@ -678,25 +1026,56 @@ interface KiroApi {
   }>
 
   // 账号-代理绑定（反代分桶）
-    accountSetProxyBinding: (accountId: string, proxyUrl: string | undefined) => Promise<{ success: boolean }>
-    accountSetEndpointConfig: (accountId: string, config: {
+  accountSetProxyBinding: (
+    accountId: string,
+    proxyUrl: string | undefined
+  ) => Promise<{ success: boolean }>
+  accountSetEndpointConfig: (
+    accountId: string,
+    config: {
       preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
       endpointFallbackAfterFailures?: number
-    }) => Promise<{ success: boolean }>
+    }
+  ) => Promise<{ success: boolean }>
 
   // 一键诊断
   diagnoseRun: (params: {
     proxyUrl?: string
-    targets: Array<{ id: string; label: string; url: string; timeoutMs?: number; expectStatus?: number[] }>
-  }) => Promise<{ results: Array<{ id: string; label: string; url: string; success: boolean; httpStatus?: number; latencyMs?: number; error?: string }> }>
+    targets: Array<{
+      id: string
+      label: string
+      url: string
+      timeoutMs?: number
+      expectStatus?: number[]
+    }>
+  }) => Promise<{
+    results: Array<{
+      id: string
+      label: string
+      url: string
+      success: boolean
+      httpStatus?: number
+      latencyMs?: number
+      error?: string
+    }>
+  }>
 
   // 账号测活：指定账号 + 模型走反代逻辑发测试消息
   diagnoseAccountLiveness: (params: {
     account: {
-      id?: string; email?: string; accessToken?: string; refreshToken?: string
-      clientId?: string; clientSecret?: string; region?: string
-      authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'; provider?: string
-      profileArn?: string; expiresAt?: number; credentialRevision?: string; proxyUrl?: string
+      id?: string
+      email?: string
+      accessToken?: string
+      refreshToken?: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: 'social' | 'idc' | 'IdC' | 'external_idp'
+      provider?: string
+      profileArn?: string
+      expiresAt?: number
+      credentialRevision?: string
+      proxyUrl?: string
     }
     model?: string
     message?: string
@@ -707,42 +1086,65 @@ interface KiroApi {
     model?: string
     content?: string
     usage?: { inputTokens: number; outputTokens: number; credits: number }
-    credentials?: { accessToken: string; refreshToken?: string; expiresAt?: number; credentialRevision?: string }
+    credentials?: {
+      accessToken: string
+      refreshToken?: string
+      expiresAt?: number
+      credentialRevision?: string
+    }
     error?: string
   }>
 
   onRegistrationLog: (callback: (msg: string) => void) => () => void
 
-  onRegistrationStep: (callback: (data: {
-    taskId?: string
-    event: {
-      name:
-        | 'init' | 'proxy-chain-ready' | 'tls-ready' | 'exit-ip'
-        | 'oidc' | 'device' | 'email-created'
-        | 'portal' | 'workflow-init' | 'submit-email'
-        | 'signup' | 'send-otp' | 'waiting-otp' | 'otp-received'
-        | 'create-identity' | 'set-password' | 'sso-workflow' | 'sso-token'
-        | 'verify-alive' | 'done'
-      ts: number
-      email?: string
-      exitIp?: string
-      extra?: Record<string, unknown>
-    }
-  }) => void) => () => void
+  onRegistrationStep: (
+    callback: (data: {
+      taskId?: string
+      event: {
+        name:
+          | 'init'
+          | 'proxy-chain-ready'
+          | 'tls-ready'
+          | 'exit-ip'
+          | 'oidc'
+          | 'device'
+          | 'email-created'
+          | 'portal'
+          | 'workflow-init'
+          | 'submit-email'
+          | 'signup'
+          | 'send-otp'
+          | 'waiting-otp'
+          | 'otp-received'
+          | 'create-identity'
+          | 'set-password'
+          | 'sso-workflow'
+          | 'sso-token'
+          | 'verify-alive'
+          | 'done'
+        ts: number
+        email?: string
+        exitIp?: string
+        extra?: Record<string, unknown>
+      }
+    }) => void
+  ) => () => void
 
-  onRegistrationComplete: (callback: (result: {
-    status: 'success' | 'failed'
-    email: string
-    password?: string
-    error?: string
-    clientId?: string
-    clientSecret?: string
-    refreshToken?: string
-    accessToken?: string
-    region?: string
-    provider?: string
-    verify?: Record<string, unknown>
-  }) => void) => () => void
+  onRegistrationComplete: (
+    callback: (result: {
+      status: 'success' | 'failed'
+      email: string
+      password?: string
+      error?: string
+      clientId?: string
+      clientSecret?: string
+      refreshToken?: string
+      accessToken?: string
+      region?: string
+      provider?: string
+      verify?: Record<string, unknown>
+    }) => void
+  ) => () => void
 
   // ===== AWS Identity Center 席位管理 =====
 
@@ -767,10 +1169,13 @@ interface KiroApi {
   idcListProfiles: () => Promise<IdcIpcResult<string[]>>
 
   /** 连通性自检：验证签名可用、能读到 Identity Center 实例 */
-  idcTestConnection: (
-    config: IdcCredentialConfig
-  ) => Promise<
-    IdcIpcResult<{ identityStoreId: string; region: string; seatCount: number; unsubscribedCount: number }>
+  idcTestConnection: (config: IdcCredentialConfig) => Promise<
+    IdcIpcResult<{
+      identityStoreId: string
+      region: string
+      seatCount: number
+      unsubscribedCount: number
+    }>
   >
 
   /** 生成席位预览（不触碰 AWS 写操作） */

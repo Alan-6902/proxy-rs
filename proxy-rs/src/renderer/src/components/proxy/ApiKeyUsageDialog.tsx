@@ -84,11 +84,11 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
 
   // 计算最大值用于图表
   const maxDailyCredits = useMemo(() => {
-    return Math.max(...dailyChartData.map(d => d.credits), 0.001)
+    return Math.max(...dailyChartData.map((d) => d.credits), 0.001)
   }, [dailyChartData])
 
   const maxModelRequests = useMemo(() => {
-    return Math.max(...modelStats.map(m => m.requests), 1)
+    return Math.max(...modelStats.map((m) => m.requests), 1)
   }, [modelStats])
 
   if (!open || !apiKey) return null
@@ -103,28 +103,49 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
               <BarChart3 className="h-5 w-5 text-primary" />
               {isEn ? 'Usage Details' : '用量详情'} - {apiKey.name}
             </CardTitle>
-            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => onOpenChange(false)}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors"
+              onClick={() => onOpenChange(false)}
+            >
               <X className="h-4 w-4" />
             </Button>
           </div>
-          
+
           {/* 总计统计 */}
           <div className="grid grid-cols-4 gap-4 mt-4">
             <div className="bg-primary/10 rounded-lg p-3">
-              <div className="text-xs text-muted-foreground mb-1">{isEn ? 'Total Requests' : '总请求数'}</div>
-              <div className="text-xl font-bold text-primary">{apiKey.usage.totalRequests.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mb-1">
+                {isEn ? 'Total Requests' : '总请求数'}
+              </div>
+              <div className="text-xl font-bold text-primary">
+                {apiKey.usage.totalRequests.toLocaleString()}
+              </div>
             </div>
             <div className="bg-success/10 rounded-lg p-3">
-              <div className="text-xs text-muted-foreground mb-1">{isEn ? 'Total Credits' : '总 Credits'}</div>
-              <div className="text-xl font-bold text-success">{apiKey.usage.totalCredits.toFixed(4)}</div>
+              <div className="text-xs text-muted-foreground mb-1">
+                {isEn ? 'Total Credits' : '总 Credits'}
+              </div>
+              <div className="text-xl font-bold text-success">
+                {apiKey.usage.totalCredits.toFixed(4)}
+              </div>
             </div>
             <div className="bg-primary/10 rounded-lg p-3">
-              <div className="text-xs text-muted-foreground mb-1">{isEn ? 'Input Tokens' : '输入 Tokens'}</div>
-              <div className="text-xl font-bold text-primary">{apiKey.usage.totalInputTokens.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mb-1">
+                {isEn ? 'Input Tokens' : '输入 Tokens'}
+              </div>
+              <div className="text-xl font-bold text-primary">
+                {apiKey.usage.totalInputTokens.toLocaleString()}
+              </div>
             </div>
             <div className="bg-[var(--gradient-to)]/10 rounded-lg p-3">
-              <div className="text-xs text-muted-foreground mb-1">{isEn ? 'Output Tokens' : '输出 Tokens'}</div>
-              <div className="text-xl font-bold text-[var(--gradient-to)]">{apiKey.usage.totalOutputTokens.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mb-1">
+                {isEn ? 'Output Tokens' : '输出 Tokens'}
+              </div>
+              <div className="text-xl font-bold text-[var(--gradient-to)]">
+                {apiKey.usage.totalOutputTokens.toLocaleString()}
+              </div>
             </div>
           </div>
 
@@ -156,7 +177,7 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
             </Button>
           </div>
         </CardHeader>
-        
+
         <CardContent className="p-4 max-h-[calc(85vh-280px)] overflow-y-auto">
           {/* 历史记录 */}
           {activeTab === 'history' && (
@@ -176,12 +197,27 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
                   <tbody className="font-mono">
                     {apiKey.usageHistory.map((record, idx) => (
                       <tr key={idx} className="border-b border-muted/30 hover:bg-muted/30">
-                        <td className="p-2 text-muted-foreground whitespace-nowrap text-xs">{formatTime(record.timestamp)}</td>
-                        <td className="p-2 truncate max-w-[150px]" title={record.model}>{formatModel(record.model)}</td>
-                        <td className="p-2 truncate max-w-[120px] text-muted-foreground" title={record.path}>{record.path}</td>
-                        <td className="p-2 text-right text-muted-foreground">{record.inputTokens.toLocaleString()}</td>
-                        <td className="p-2 text-right text-muted-foreground">{record.outputTokens.toLocaleString()}</td>
-                        <td className="p-2 text-right text-muted-foreground">{record.credits.toFixed(6)}</td>
+                        <td className="p-2 text-muted-foreground whitespace-nowrap text-xs">
+                          {formatTime(record.timestamp)}
+                        </td>
+                        <td className="p-2 truncate max-w-[150px]" title={record.model}>
+                          {formatModel(record.model)}
+                        </td>
+                        <td
+                          className="p-2 truncate max-w-[120px] text-muted-foreground"
+                          title={record.path}
+                        >
+                          {record.path}
+                        </td>
+                        <td className="p-2 text-right text-muted-foreground">
+                          {record.inputTokens.toLocaleString()}
+                        </td>
+                        <td className="p-2 text-right text-muted-foreground">
+                          {record.outputTokens.toLocaleString()}
+                        </td>
+                        <td className="p-2 text-right text-muted-foreground">
+                          {record.credits.toFixed(6)}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -205,18 +241,22 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
                         <Cpu className="h-4 w-4 text-primary" />
                         {stat.model}
                       </div>
-                      <Badge variant="secondary">{stat.requests} {isEn ? 'requests' : '次请求'}</Badge>
+                      <Badge variant="secondary">
+                        {stat.requests} {isEn ? 'requests' : '次请求'}
+                      </Badge>
                     </div>
                     {/* 进度条 */}
                     <div className="h-2 bg-muted rounded-full overflow-hidden mb-3">
-                      <div 
+                      <div
                         className="h-full bg-primary transition-all"
                         style={{ width: `${(stat.requests / maxModelRequests) * 100}%` }}
                       />
                     </div>
                     <div className="grid grid-cols-3 gap-4 text-sm">
                       <div>
-                        <span className="text-muted-foreground">{isEn ? 'Credits' : 'Credits'}:</span>
+                        <span className="text-muted-foreground">
+                          {isEn ? 'Credits' : 'Credits'}:
+                        </span>
                         <span className="ml-2 font-mono">{stat.credits.toFixed(4)}</span>
                       </div>
                       <div>
@@ -252,9 +292,12 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
                     <div className="flex items-end gap-2 h-32">
                       {dailyChartData.map((data, idx) => (
                         <div key={idx} className="flex-1 flex flex-col items-center">
-                          <div 
+                          <div
                             className="w-full bg-primary rounded-t transition-all hover:bg-primary/80"
-                            style={{ height: `${(data.credits / maxDailyCredits) * 100}%`, minHeight: '4px' }}
+                            style={{
+                              height: `${(data.credits / maxDailyCredits) * 100}%`,
+                              minHeight: '4px'
+                            }}
                             title={`${data.credits.toFixed(4)} credits`}
                           />
                           <div className="text-xs text-muted-foreground mt-2">{data.date}</div>
@@ -268,7 +311,9 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
                     <thead className="bg-muted/50">
                       <tr>
                         <th className="text-left p-2 font-medium">{isEn ? 'Date' : '日期'}</th>
-                        <th className="text-right p-2 font-medium">{isEn ? 'Requests' : '请求数'}</th>
+                        <th className="text-right p-2 font-medium">
+                          {isEn ? 'Requests' : '请求数'}
+                        </th>
                         <th className="text-right p-2 font-medium">Credits</th>
                         <th className="text-right p-2 font-medium">{isEn ? 'Input' : '输入'}</th>
                         <th className="text-right p-2 font-medium">{isEn ? 'Output' : '输出'}</th>
@@ -283,8 +328,12 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
                             <td className="p-2">{date}</td>
                             <td className="p-2 text-right">{stats.requests}</td>
                             <td className="p-2 text-right">{stats.credits.toFixed(4)}</td>
-                            <td className="p-2 text-right text-muted-foreground">{stats.inputTokens.toLocaleString()}</td>
-                            <td className="p-2 text-right text-muted-foreground">{stats.outputTokens.toLocaleString()}</td>
+                            <td className="p-2 text-right text-muted-foreground">
+                              {stats.inputTokens.toLocaleString()}
+                            </td>
+                            <td className="p-2 text-right text-muted-foreground">
+                              {stats.outputTokens.toLocaleString()}
+                            </td>
                           </tr>
                         ))}
                     </tbody>
@@ -302,5 +351,3 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
     </div>
   )
 }
-
-

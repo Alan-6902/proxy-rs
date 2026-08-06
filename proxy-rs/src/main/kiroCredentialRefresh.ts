@@ -54,11 +54,7 @@ export function mergeRotatedKiroCredentials(
   }
 }
 
-const ROTATED_KIRO_CREDENTIAL_FIELDS = [
-  'accessToken',
-  'refreshToken',
-  'expiresAt'
-] as const
+const ROTATED_KIRO_CREDENTIAL_FIELDS = ['accessToken', 'refreshToken', 'expiresAt'] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -92,7 +88,10 @@ export function mergeAccountDataPreservingRotatedKiroCredentials(
     if (!isRecord(currentCredentials)) continue
     const currentRevision = currentCredentials.credentialRevision
     if (typeof currentRevision !== 'string' || currentRevision.length === 0) continue
-    if (isRecord(incomingCredentials) && incomingCredentials.credentialRevision === currentRevision) {
+    if (
+      isRecord(incomingCredentials) &&
+      incomingCredentials.credentialRevision === currentRevision
+    ) {
       continue
     }
 

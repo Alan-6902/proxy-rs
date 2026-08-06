@@ -11,11 +11,7 @@ interface EditAccountDialogProps {
   account: Account | null
 }
 
-export function EditAccountDialog({
-  open,
-  onOpenChange,
-  account
-}: EditAccountDialogProps) {
+export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDialogProps) {
   const { updateAccount } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -25,6 +21,11 @@ export function EditAccountDialog({
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [region, setRegion] = useState('us-east-1')
+  const [kiroApiKey, setKiroApiKey] = useState('')
+  const [preferredEndpoint, setPreferredEndpoint] = useState<
+    '' | 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+  >('')
+  const [endpointFallbackAfterFailures, setEndpointFallbackAfterFailures] = useState(2)
 
   // 可编辑字段
   const [nickname, setNickname] = useState('')
@@ -36,7 +37,7 @@ export function EditAccountDialog({
     accessToken: string
     subscriptionType: string
     subscriptionTitle: string
-    usage: { 
+    usage: {
       current: number
       limit: number
       baseLimit?: number
@@ -71,8 +72,11 @@ export function EditAccountDialog({
       setClientId(account.credentials.clientId || '')
       setClientSecret(account.credentials.clientSecret || '')
       setRegion(account.credentials.region || 'us-east-1')
+      setKiroApiKey(account.credentials.kiroApiKey || '')
+      setPreferredEndpoint(account.credentials.preferredEndpoint || '')
+      setEndpointFallbackAfterFailures(account.credentials.endpointFallbackAfterFailures || 2)
       setNickname(account.nickname || '')
-      
+
       // 设置当前账号信息
       setAccountInfo({
         email: account.email,
@@ -93,12 +97,19 @@ export function EditAccountDialog({
 
   // 验证并刷新信息
   const handleVerifyAndRefresh = async () => {
+    const isApiKey =
+      account?.credentials.credentialKind === 'kiro_api_key' ||
+      Boolean(account?.credentials.kiroApiKey)
     const isSocial = account?.credentials.authMethod === 'social'
-    if (!refreshToken) {
+    if (isApiKey && !kiroApiKey.trim()) {
+      setError('请填写 Kiro API Key')
+      return
+    }
+    if (!isApiKey && !refreshToken) {
       setError('请填写 Refresh Token')
       return
     }
-    if (!isSocial && (!clientId || !clientSecret)) {
+    if (!isApiKey && !isSocial && (!clientId || !clientSecret)) {
       setError('请填写 Client ID 和 Client Secret')
       return
     }
@@ -108,9 +119,11 @@ export function EditAccountDialog({
 
     try {
       const result = await window.api.verifyAccountCredentials({
-        refreshToken,
-        clientId,
-        clientSecret,
+        refreshToken: isApiKey ? undefined : refreshToken,
+        clientId: isApiKey ? undefined : clientId,
+        clientSecret: isApiKey ? undefined : clientSecret,
+        credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
+        kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
         region,
         authMethod: account?.credentials.authMethod,
         provider: account?.credentials.provider || account?.idp
@@ -118,8 +131,8 @@ export function EditAccountDialog({
 
       if (result.success && result.data) {
         setAccountInfo({
-          email: result.data.email,
-          userId: result.data.userId,
+          email: result.data.email || account?.email || '',
+          userId: result.data.userId || account?.userId || '',
           accessToken: result.data.accessToken,
           subscriptionType: result.data.subscriptionType,
           subscriptionTitle: result.data.subscriptionTitle,
@@ -128,7 +141,7 @@ export function EditAccountDialog({
           expiresAt: result.data.expiresAt
         })
         // 更新 refreshToken（可能返回新的）
-        if (result.data.refreshToken) {
+        if (!isApiKey && result.data.refreshToken) {
           setRefreshToken(result.data.refreshToken)
         }
       } else {
@@ -146,6 +159,17 @@ export function EditAccountDialog({
     if (!account || !accountInfo) return
 
     const now = Date.now()
+    const isApiKey =
+      account.credentials.credentialKind === 'kiro_api_key' ||
+      Boolean(account.credentials.kiroApiKey)
+    const endpointFallbackOrder =
+      preferredEndpoint === 'codewhisperer'
+        ? (['amazonq'] as const)
+        : preferredEndpoint === 'amazonq'
+          ? (['codewhisperer'] as const)
+          : preferredEndpoint === 'amazonq-cli'
+            ? (['amazonq', 'codewhisperer'] as const)
+            : undefined
 
     updateAccount(account.id, {
       email: accountInfo.email,
@@ -153,13 +177,18 @@ export function EditAccountDialog({
       nickname: nickname || undefined,
       credentials: {
         ...account.credentials,
-        accessToken: accountInfo.accessToken,
+        credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
+        kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
+        accessToken: isApiKey ? undefined : accountInfo.accessToken,
         csrfToken: '',
-        refreshToken,
-        clientId,
-        clientSecret,
+        refreshToken: isApiKey ? undefined : refreshToken,
+        clientId: isApiKey ? undefined : clientId,
+        clientSecret: isApiKey ? undefined : clientSecret,
         region,
-        expiresAt: now + 3600 * 1000
+        expiresAt: isApiKey ? undefined : now + 3600 * 1000,
+        preferredEndpoint: preferredEndpoint || undefined,
+        endpointFallbackOrder: endpointFallbackOrder ? [...endpointFallbackOrder] : undefined,
+        endpointFallbackAfterFailures
       },
       subscription: {
         type: accountInfo.subscriptionType as SubscriptionType,
@@ -170,9 +199,8 @@ export function EditAccountDialog({
       usage: {
         current: accountInfo.usage.current,
         limit: accountInfo.usage.limit,
-        percentUsed: accountInfo.usage.limit > 0 
-          ? accountInfo.usage.current / accountInfo.usage.limit 
-          : 0,
+        percentUsed:
+          accountInfo.usage.limit > 0 ? accountInfo.usage.current / accountInfo.usage.limit : 0,
         lastUpdated: now,
         baseLimit: accountInfo.usage.baseLimit,
         baseCurrent: accountInfo.usage.baseCurrent,
@@ -185,10 +213,17 @@ export function EditAccountDialog({
       status: 'active'
     })
 
+    void window.api.accountSetEndpointConfig(account.id, {
+      preferredEndpoint: preferredEndpoint || undefined,
+      endpointFallbackAfterFailures
+    })
+
     onOpenChange(false)
   }
 
   if (!open || !account) return null
+  const isApiKey =
+    account.credentials.credentialKind === 'kiro_api_key' || Boolean(account.credentials.kiroApiKey)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -198,12 +233,21 @@ export function EditAccountDialog({
         {/* 头部 */}
         <CardHeader className="pb-4 border-b sticky top-0 bg-background z-20">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-xl font-bold">{isEn ? 'Edit Account' : '编辑账号'}</CardTitle>
-            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full hover:bg-red-500 hover:text-white transition-colors" onClick={() => onOpenChange(false)}>
+            <CardTitle className="text-xl font-bold">
+              {isEn ? 'Edit Account' : '编辑账号'}
+            </CardTitle>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-full hover:bg-red-500 hover:text-white transition-colors"
+              onClick={() => onOpenChange(false)}
+            >
               <X className="h-4 w-4" />
             </Button>
           </div>
-          <p className="text-sm text-muted-foreground mt-1">{isEn ? 'Modify account settings or update credentials' : '修改账号配置或更新凭证'}</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {isEn ? 'Modify account settings or update credentials' : '修改账号配置或更新凭证'}
+          </p>
         </CardHeader>
 
         <CardContent className="p-6 space-y-6">
@@ -211,7 +255,9 @@ export function EditAccountDialog({
           {accountInfo && (
             <div className="p-4 bg-primary/5 rounded-xl border border-primary/10 space-y-3">
               <div className="flex items-center justify-between border-b border-primary/10 pb-2">
-                <span className="text-sm font-semibold text-foreground/80">{isEn ? 'Account Status' : '当前账号状态'}</span>
+                <span className="text-sm font-semibold text-foreground/80">
+                  {isEn ? 'Account Status' : '当前账号状态'}
+                </span>
                 <div className="px-2.5 py-0.5 rounded-full bg-success/10 text-success text-xs font-medium flex items-center gap-1.5">
                   <CheckCircle className="h-3.5 w-3.5" />
                   {isEn ? 'Verified' : '已验证'}
@@ -219,22 +265,38 @@ export function EditAccountDialog({
               </div>
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
-                  <span className="text-muted-foreground text-xs block mb-1">{isEn ? 'Email' : '邮箱'}</span>
-                  <span className="font-medium font-mono text-xs truncate block" title={accountInfo.email}>{accountInfo.email}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground text-xs block mb-1">{isEn ? 'Plan' : '订阅计划'}</span>
-                  <span className="font-medium">{accountInfo.subscriptionTitle}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground text-xs block mb-1">{isEn ? 'Usage' : '使用额度'}</span>
-                  <span className="font-medium">
-                    {accountInfo.usage.current.toLocaleString()} / {accountInfo.usage.limit.toLocaleString()}
+                  <span className="text-muted-foreground text-xs block mb-1">
+                    {isEn ? 'Email' : '邮箱'}
+                  </span>
+                  <span
+                    className="font-medium font-mono text-xs truncate block"
+                    title={accountInfo.email}
+                  >
+                    {accountInfo.email}
                   </span>
                 </div>
                 <div>
-                  <span className="text-muted-foreground text-xs block mb-1">{isEn ? 'Days Left' : '剩余天数'}</span>
-                  <span className="font-medium">{accountInfo.daysRemaining ?? '-'} {isEn ? 'd' : '天'}</span>
+                  <span className="text-muted-foreground text-xs block mb-1">
+                    {isEn ? 'Plan' : '订阅计划'}
+                  </span>
+                  <span className="font-medium">{accountInfo.subscriptionTitle}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground text-xs block mb-1">
+                    {isEn ? 'Usage' : '使用额度'}
+                  </span>
+                  <span className="font-medium">
+                    {accountInfo.usage.current.toLocaleString()} /{' '}
+                    {accountInfo.usage.limit.toLocaleString()}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground text-xs block mb-1">
+                    {isEn ? 'Days Left' : '剩余天数'}
+                  </span>
+                  <span className="font-medium">
+                    {accountInfo.daysRemaining ?? '-'} {isEn ? 'd' : '天'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -257,7 +319,15 @@ export function EditAccountDialog({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold">
-                  {account?.credentials.authMethod === 'social' ? (isEn ? 'Social Login' : '社交登录凭证') : (isEn ? 'OIDC Credentials' : 'OIDC 凭证配置')}
+                  {isApiKey
+                    ? 'Kiro API Key'
+                    : account?.credentials.authMethod === 'social'
+                      ? isEn
+                        ? 'Social Login'
+                        : '社交登录凭证'
+                      : isEn
+                        ? 'OIDC Credentials'
+                        : 'OIDC 凭证配置'}
                 </h3>
                 {account?.credentials.authMethod === 'social' && (
                   <span className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">
@@ -267,15 +337,17 @@ export function EditAccountDialog({
               </div>
             </div>
 
-            {account?.credentials.authMethod === 'social' && (
+            {!isApiKey && account?.credentials.authMethod === 'social' && (
               <p className="text-xs text-muted-foreground">
-                {isEn ? 'Social login only needs Refresh Token' : '社交登录账号只需要 Refresh Token，不需要 Client ID 和 Client Secret'}
+                {isEn
+                  ? 'Social login only needs Refresh Token'
+                  : '社交登录账号只需要 Refresh Token，不需要 Client ID 和 Client Secret'}
               </p>
             )}
 
             <div className="space-y-4">
               {/* Access Token (只读，可复制) */}
-              {accountInfo?.accessToken && (
+              {!isApiKey && accountInfo?.accessToken && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-medium">Access Token</label>
@@ -286,8 +358,12 @@ export function EditAccountDialog({
                       className="h-7 px-2 text-xs"
                       onClick={handleCopyAccessToken}
                     >
-                      {copiedToken ? <Check className="h-3 w-3 mr-1 text-success" /> : <Copy className="h-3 w-3 mr-1" />}
-                      {copiedToken ? (isEn ? 'Copied' : '已复制') : (isEn ? 'Copy' : '复制')}
+                      {copiedToken ? (
+                        <Check className="h-3 w-3 mr-1 text-success" />
+                      ) : (
+                        <Copy className="h-3 w-3 mr-1" />
+                      )}
+                      {copiedToken ? (isEn ? 'Copied' : '已复制') : isEn ? 'Copy' : '复制'}
                     </Button>
                   </div>
                   <div className="w-full px-3 py-2.5 text-sm rounded-xl border border-input bg-muted/50 font-mono text-muted-foreground truncate">
@@ -296,19 +372,35 @@ export function EditAccountDialog({
                 </div>
               )}
 
-              <div className="space-y-2">
-                <label className="text-sm font-medium">
-                  Refresh Token <span className="text-destructive">*</span>
-                </label>
-                <textarea
-                  value={refreshToken}
-                  onChange={(e) => setRefreshToken(e.target.value)}
-                  placeholder="aorAAAAA..."
-                  className="w-full min-h-[80px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
-                />
-              </div>
+              {isApiKey && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">
+                    Kiro API Key <span className="text-destructive">*</span>
+                  </label>
+                  <textarea
+                    value={kiroApiKey}
+                    onChange={(event) => setKiroApiKey(event.target.value)}
+                    placeholder="ksk_..."
+                    className="w-full min-h-[80px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 resize-none font-mono"
+                  />
+                </div>
+              )}
 
-              {account?.credentials.authMethod !== 'social' && (
+              {!isApiKey && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">
+                    Refresh Token <span className="text-destructive">*</span>
+                  </label>
+                  <textarea
+                    value={refreshToken}
+                    onChange={(e) => setRefreshToken(e.target.value)}
+                    placeholder="aorAAAAA..."
+                    className="w-full min-h-[80px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
+                  />
+                </div>
+              )}
+
+              {!isApiKey && account?.credentials.authMethod !== 'social' && (
                 <>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
@@ -353,19 +445,74 @@ export function EditAccountDialog({
                 </>
               )}
 
-              <Button 
-                type="button" 
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">
+                    {isEn ? 'Preferred Endpoint' : '首选上游端点'}
+                  </label>
+                  <select
+                    value={preferredEndpoint}
+                    onChange={(event) =>
+                      setPreferredEndpoint(event.target.value as typeof preferredEndpoint)
+                    }
+                    className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50"
+                  >
+                    <option value="">{isEn ? 'Use global setting' : '使用全局设置'}</option>
+                    <option value="codewhisperer">CodeWhisperer</option>
+                    <option value="amazonq">Amazon Q</option>
+                    <option value="amazonq-cli">Amazon Q CLI</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">
+                    {isEn ? 'Failure threshold' : '熔断失败阈值'}
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={endpointFallbackAfterFailures}
+                    onChange={(event) =>
+                      setEndpointFallbackAfterFailures(
+                        Math.min(10, Math.max(1, Number(event.target.value) || 2))
+                      )
+                    }
+                    className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {isEn
+                  ? 'Transient failures open the endpoint circuit for 60 seconds, then fall back to the remaining endpoints.'
+                  : '连续瞬时错误达到阈值后熔断该端点 60 秒，并按剩余端点顺序回退。'}
+              </p>
+
+              <Button
+                type="button"
                 variant="secondary"
                 className="w-full h-10 rounded-xl font-medium"
                 onClick={handleVerifyAndRefresh}
-                disabled={isVerifying || !refreshToken || (account?.credentials.authMethod !== 'social' && (!clientId || !clientSecret))}
+                disabled={
+                  isVerifying ||
+                  (isApiKey
+                    ? !kiroApiKey.trim()
+                    : !refreshToken ||
+                      (account?.credentials.authMethod !== 'social' &&
+                        (!clientId || !clientSecret)))
+                }
               >
                 {isVerifying ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                 ) : (
                   <RefreshCw className="h-4 w-4 mr-2" />
                 )}
-                {isEn ? 'Verify & Refresh' : '验证并刷新凭证信息'}
+                {isApiKey
+                  ? isEn
+                    ? 'Validate & Query Quota'
+                    : '验活并查询余额'
+                  : isEn
+                    ? 'Verify & Refresh'
+                    : '验证并刷新凭证信息'}
               </Button>
             </div>
           </div>
@@ -381,7 +528,11 @@ export function EditAccountDialog({
 
         {/* 底部按钮 */}
         <div className="sticky bottom-0 bg-background/95 backdrop-blur p-4 border-t flex justify-end gap-3 z-20">
-          <Button variant="outline" onClick={() => onOpenChange(false)} className="rounded-xl h-10 px-6">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="rounded-xl h-10 px-6"
+          >
             {isEn ? 'Cancel' : '取消'}
           </Button>
           <Button onClick={handleSave} disabled={!accountInfo} className="rounded-xl h-10 px-6">
@@ -392,5 +543,3 @@ export function EditAccountDialog({
     </div>
   )
 }
-
-

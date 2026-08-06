@@ -34,7 +34,7 @@ export interface RegistrationConfig {
 
   // TempMail.Plus + 自建域名
   useTempMailPlus: boolean
-  tempMailPlusEmail: string  // tempmail.plus 用户名（不含 @mailto.plus）
+  tempMailPlusEmail: string // tempmail.plus 用户名（不含 @mailto.plus）
   tempMailPlusEpin: string
   tempMailPlusDomain: string // 自建域名
 
@@ -46,11 +46,11 @@ export interface RegistrationConfig {
   //   A. 私有域名直收：MX 解析到 GPTmail，inboxEmail 留空（私有域名需密码解锁则填 privatePassword）
   //   B. CF Email Routing 转发：inboxEmail 填一个固定 GPTmail 邮箱
   useGptMail: boolean
-  gptMailBaseURL: string      // 可选，默认 https://mail.chatgpt.org.uk；私有部署可改
-  gptMailInboxEmail: string   // 可选：填了 = CF 转发模式（所有 prefix@domain 转发到此邮箱）；留空 = 私有域名直收
-  gptMailDomain: string       // 必填：用户自己的域名池，多个用空格/逗号
-  gptMailPrefix: string       // 可选：固定前缀，留空则 randomEmailPrefix() 生成
-  gptMailPrivatePassword: string  // 可选：仅私有域名模式有效。在 GPTmail 设私有域名时设的密码
+  gptMailBaseURL: string // 可选，默认 https://mail.chatgpt.org.uk；私有部署可改
+  gptMailInboxEmail: string // 可选：填了 = CF 转发模式（所有 prefix@domain 转发到此邮箱）；留空 = 私有域名直收
+  gptMailDomain: string // 必填：用户自己的域名池，多个用空格/逗号
+  gptMailPrefix: string // 可选：固定前缀，留空则 randomEmailPrefix() 生成
+  gptMailPrivatePassword: string // 可选：仅私有域名模式有效。在 GPTmail 设私有域名时设的密码
 
   // 手动模式
   manualMode: boolean

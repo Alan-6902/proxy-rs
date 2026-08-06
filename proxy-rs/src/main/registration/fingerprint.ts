@@ -138,56 +138,112 @@ function getStartTime(ctx: FingerprintContext, nowMs: number): number {
 
 function genMetricsFirstLoad(pageType: string): Record<string, number> {
   const m: Record<string, number> = {
-    el: 0, script: 0, h: 0, batt: 0, perf: 0, auto: 0,
-    tz: 0, fp2: 0, lsubid: 0, browser: 0, capabilities: 0,
-    gpu: 0, dnt: 0, math: 0, tts: 0, input: 0, canvas: 0,
-    captchainput: 0, pow: 0
+    el: 0,
+    script: 0,
+    h: 0,
+    batt: 0,
+    perf: 0,
+    auto: 0,
+    tz: 0,
+    fp2: 0,
+    lsubid: 0,
+    browser: 0,
+    capabilities: 0,
+    gpu: 0,
+    dnt: 0,
+    math: 0,
+    tts: 0,
+    input: 0,
+    canvas: 0,
+    captchainput: 0,
+    pow: 0
   }
   switch (pageType) {
     case 'profile':
-      m.batt = 5 + randInt(21); m.fp2 = 1 + randInt(8)
-      m.browser = randInt(4); m.capabilities = 1 + randInt(8)
-      m.dnt = randInt(4); m.input = 8 + randInt(23); m.canvas = 5 + randInt(16)
+      m.batt = 5 + randInt(21)
+      m.fp2 = 1 + randInt(8)
+      m.browser = randInt(4)
+      m.capabilities = 1 + randInt(8)
+      m.dnt = randInt(4)
+      m.input = 8 + randInt(23)
+      m.canvas = 5 + randInt(16)
       break
     case 'signup':
-      m.script = randInt(3); m.batt = randInt(6)
-      m.fp2 = randInt(4); m.gpu = 3 + randInt(6)
+      m.script = randInt(3)
+      m.batt = randInt(6)
+      m.fp2 = randInt(4)
+      m.gpu = 3 + randInt(6)
       break
     default:
-      m.script = randInt(3); m.auto = randInt(3)
-      m.browser = randInt(3); m.gpu = 3 + randInt(6)
+      m.script = randInt(3)
+      m.auto = randInt(3)
+      m.browser = randInt(3)
+      m.gpu = 3 + randInt(6)
   }
   return m
 }
 
 function genMetricsPageSubmit(): Record<string, number> {
   return {
-    el: 0, script: 0, h: 0, batt: 0, perf: randInt(3),
-    auto: 0, tz: 0, fp2: 0, lsubid: 0, browser: 0,
-    capabilities: 0, gpu: 0, dnt: 0, math: 0, tts: 0,
-    input: 0, canvas: 0, captchainput: 0, pow: 0
+    el: 0,
+    script: 0,
+    h: 0,
+    batt: 0,
+    perf: randInt(3),
+    auto: 0,
+    tz: 0,
+    fp2: 0,
+    lsubid: 0,
+    browser: 0,
+    capabilities: 0,
+    gpu: 0,
+    dnt: 0,
+    math: 0,
+    tts: 0,
+    input: 0,
+    canvas: 0,
+    captchainput: 0,
+    pow: 0
   }
 }
 
 function genInteraction(eventType: string): Record<string, unknown> {
   if (eventType === 'PageLoad' || eventType === 'first_load') {
     return {
-      clicks: 0, touches: 0, keyPresses: 0,
-      cuts: 0, copies: 0, pastes: 0,
-      keyPressTimeIntervals: [], mouseClickPositions: [],
-      keyCycles: [], mouseCycles: [], touchCycles: []
+      clicks: 0,
+      touches: 0,
+      keyPresses: 0,
+      cuts: 0,
+      copies: 0,
+      pastes: 0,
+      keyPressTimeIntervals: [],
+      mouseClickPositions: [],
+      keyCycles: [],
+      mouseCycles: [],
+      touchCycles: []
     }
   }
   const nClicks = 1 + randInt(3)
   const nKeys = 3 + randInt(8)
-  const nIntervals = Math.max(1, Math.floor(nKeys / 3)) + randInt(Math.max(1, Math.floor(nKeys / 2) - Math.floor(nKeys / 3) + 1))
-  const nCycles = Math.max(2, Math.floor(nKeys / 2)) + randInt(Math.max(1, Math.floor(nKeys * 2 / 3) - Math.floor(nKeys / 2) + 1))
+  const nIntervals =
+    Math.max(1, Math.floor(nKeys / 3)) +
+    randInt(Math.max(1, Math.floor(nKeys / 2) - Math.floor(nKeys / 3) + 1))
+  const nCycles =
+    Math.max(2, Math.floor(nKeys / 2)) +
+    randInt(Math.max(1, Math.floor((nKeys * 2) / 3) - Math.floor(nKeys / 2) + 1))
 
   return {
-    clicks: nClicks, touches: 0, keyPresses: nKeys,
-    cuts: 0, copies: 0, pastes: 0,
+    clicks: nClicks,
+    touches: 0,
+    keyPresses: nKeys,
+    cuts: 0,
+    copies: 0,
+    pastes: 0,
     keyPressTimeIntervals: Array.from({ length: nIntervals }, () => 80 + randInt(621)),
-    mouseClickPositions: Array.from({ length: nClicks }, () => `${400 + randInt(401)},${300 + randInt(201)}`),
+    mouseClickPositions: Array.from(
+      { length: nClicks },
+      () => `${400 + randInt(401)},${300 + randInt(201)}`
+    ),
     keyCycles: Array.from({ length: nCycles }, () => 20 + randInt(281)),
     mouseCycles: Array.from({ length: nClicks }, () => 50 + randInt(101)),
     touchCycles: []
@@ -195,7 +251,9 @@ function genInteraction(eventType: string): Record<string, unknown> {
 }
 
 function genFormField(
-  startMs: number, emailLen: number, email: string,
+  startMs: number,
+  emailLen: number,
+  email: string,
   interaction: Record<string, unknown>
 ): Record<string, unknown> {
   const fieldTs = startMs - (10 + randInt(41))
@@ -215,13 +273,23 @@ function genFormField(
 
   return {
     [fieldName]: {
-      clicks: 1, touches: 0, keyPresses: nKeys,
-      cuts: 0, copies: 0, pastes: 0,
+      clicks: 1,
+      touches: 0,
+      keyPresses: nKeys,
+      cuts: 0,
+      copies: 0,
+      pastes: 0,
       keyPressTimeIntervals: intervals,
       mouseClickPositions: [`${100 + randInt(151)}.5,${10 + randInt(11)}.5`],
-      keyCycles, mouseCycles: [80 + randInt(71)], touchCycles: [],
-      width: 180, height: 32, totalFocusTime: 0,
-      checksum: cksum, autocomplete: false, prefilled: false
+      keyCycles,
+      mouseCycles: [80 + randInt(71)],
+      touchCycles: [],
+      width: 180,
+      height: 32,
+      totalFocusTime: 0,
+      checksum: cksum,
+      autocomplete: false,
+      prefilled: false
     }
   }
 }
@@ -269,7 +337,7 @@ export function buildFingerprintData(
     case 'profile':
       dynamicURLs = [`/dist/main/app_${identity.webpackHash}.min.js`]
       scriptsElapsed = 0
-      historyLength = (eventType === 'PageLoad' || eventType === 'first_load') ? 2 : 3
+      historyLength = eventType === 'PageLoad' || eventType === 'first_load' ? 2 : 3
       isCompatible = true
       break
     case 'signup':
@@ -318,8 +386,11 @@ export function buildFingerprintData(
   result.set('start', startTime)
   result.set('interaction', interaction)
   result.set('scripts', {
-    dynamicUrls: dynamicURLs, inlineHashes: [],
-    elapsed: scriptsElapsed, dynamicUrlCount: dynamicURLs.length, inlineHashesCount: 0
+    dynamicUrls: dynamicURLs,
+    inlineHashes: [],
+    elapsed: scriptsElapsed,
+    dynamicUrlCount: dynamicURLs.length,
+    inlineHashesCount: 0
   })
   result.set('history', { length: historyLength })
   result.set('battery', {})
@@ -341,18 +412,28 @@ export function buildFingerprintData(
   result.set('webDriver', false)
   result.set('capabilities', {
     css: {
-      textShadow: 1, WebkitTextStroke: 1, boxShadow: 1,
-      borderRadius: 1, borderImage: 1, opacity: 1,
-      transform: 1, transition: 1
+      textShadow: 1,
+      WebkitTextStroke: 1,
+      boxShadow: 1,
+      borderRadius: 1,
+      borderImage: 1,
+      opacity: 1,
+      transform: 1,
+      transition: 1
     },
     js: {
-      audio: true, geolocation: true, localStorage: 'supported',
-      touch: false, video: true, webWorker: true
+      audio: true,
+      geolocation: true,
+      localStorage: 'supported',
+      touch: false,
+      video: true,
+      webWorker: true
     },
     elapsed: 0
   })
   result.set('gpu', {
-    vendor: identity.gpuVendor, model: identity.gpuModel,
+    vendor: identity.gpuVendor,
+    model: identity.gpuModel,
     extensions: identity.webGLExts
   })
   result.set('dnt', null)
@@ -368,7 +449,12 @@ export function buildFingerprintData(
     }
   }
 
-  if (pageType === 'profile' && eventType !== 'PageLoad' && eventType !== 'first_load' && emailLen > 0) {
+  if (
+    pageType === 'profile' &&
+    eventType !== 'PageLoad' &&
+    eventType !== 'first_load' &&
+    emailLen > 0
+  ) {
     result.set('form', genFormField(nowMs, emailLen, email, interaction))
   } else {
     result.set('form', {})
@@ -397,8 +483,16 @@ export function generateFingerprint(
 ): string {
   const nowMs = Date.now()
   const fpData = buildFingerprintData(
-    identity, locationURL, referrer, nowMs, ctx,
-    pageType, eventType, timeOnPage, emailLen, email
+    identity,
+    locationURL,
+    referrer,
+    nowMs,
+    ctx,
+    pageType,
+    eventType,
+    timeOnPage,
+    emailLen,
+    email
   )
   const jsonStr = fpData.toJSON()
   return encryptFingerprint(jsonStr)

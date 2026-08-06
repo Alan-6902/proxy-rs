@@ -115,7 +115,9 @@ export function getSystemProxy(): string | null {
       }
       // macOS 仅配 SOCKS 时 undici 不支持，静默回退直连（safeCreateProxyAgent 也会兜底）
     }
-  } catch { /* 检测失败静默回退直连 */ }
+  } catch {
+    /* 检测失败静默回退直连 */
+  }
   _cachedSystemProxy = null
   _systemProxyCacheTime = now
   return null
@@ -131,9 +133,7 @@ export function getSystemProxy(): string | null {
  * URL 无效或协议无法支持时返回 undefined，让调用方回退直连，
  * 而不会让异常向上传播阻塞业务流程。
  */
-export function safeCreateProxyAgent(
-  proxyUrl: string | null | undefined
-): Dispatcher | undefined {
+export function safeCreateProxyAgent(proxyUrl: string | null | undefined): Dispatcher | undefined {
   if (!proxyUrl) return undefined
 
   // 校验 URL
@@ -158,7 +158,12 @@ export function safeCreateProxyAgent(
   }
 
   // SOCKS 走自定义 connect
-  if (protocol === 'socks5:' || protocol === 'socks5h:' || protocol === 'socks4:' || protocol === 'socks4a:') {
+  if (
+    protocol === 'socks5:' ||
+    protocol === 'socks5h:' ||
+    protocol === 'socks4:' ||
+    protocol === 'socks4a:'
+  ) {
     try {
       return createSocksDispatcher(u)
     } catch (err) {

@@ -38,12 +38,12 @@ Claude Code
 
 本机落点（仅作迁移参考，勿当长期架构）：
 
-| 路径 | 作用 |
-|------|------|
-| `~/agy-proxy/{start,stop,status}.sh` | 固定 `PORT=65530` 启停 |
+| 路径                                      | 作用                                |
+| ----------------------------------------- | ----------------------------------- |
+| `~/agy-proxy/{start,stop,status}.sh`      | 固定 `PORT=65530` 启停              |
 | `~/.config/antigravity-proxy/config.json` | `port` / `apiKey` / `webuiPassword` |
-| `~/Desktop/doc/agy->ccswitch/README.md` | 操作说明 |
-| CC Switch DB `agy-opus46` | 写入 `~/.claude/settings.json` |
+| `~/Desktop/doc/agy->ccswitch/README.md`   | 操作说明                            |
+| CC Switch DB `agy-opus46`                 | 写入 `~/.claude/settings.json`      |
 
 踩过的坑（内化时必须规避）：
 
@@ -200,13 +200,13 @@ curl -sS "http://127.0.0.1:<PORT>/v1/messages" \
 
 ### 7.1 建议落点
 
-| 模块 | 建议路径 |
-|------|----------|
-| agy 协议适配 | `src/main/proxy/providers/agy/`（新建） |
-| 账号存储 | 扩展现有账号模型：`provider: 'kiro' \| 'agy'` |
-| UI | 反代页增加 Provider Tab；或独立「Antigravity」账号页 |
-| 一键配置 | 扩展 `clientConfig.ts` 的模型默认值与 Base URL 生成 |
-| 测试 | `test/integration/proxy.agy-*.test.ts`（mock 上游） |
+| 模块         | 建议路径                                             |
+| ------------ | ---------------------------------------------------- |
+| agy 协议适配 | `src/main/proxy/providers/agy/`（新建）              |
+| 账号存储     | 扩展现有账号模型：`provider: 'kiro' \| 'agy'`        |
+| UI           | 反代页增加 Provider Tab；或独立「Antigravity」账号页 |
+| 一键配置     | 扩展 `clientConfig.ts` 的模型默认值与 Base URL 生成  |
+| 测试         | `test/integration/proxy.agy-*.test.ts`（mock 上游）  |
 
 ### 7.2 设计约束
 
@@ -230,13 +230,13 @@ curl -sS "http://127.0.0.1:<PORT>/v1/messages" \
 
 ## 8. 里程碑建议
 
-| 阶段 | 交付 | 验收 |
-|------|------|------|
-| M1 | agy 适配器 + 单账号 + `/v1/messages` 非流式/流式 | curl 冒烟通过 |
-| M2 | 多账号轮询 + 配额面板 + 启停/假死检测 | 账号耗尽可切换；挂起可重启 |
-| M3 | 一键配置 Claude Code + 导出 CC Switch 字段 | 新终端 `claude` 可用 |
-| M4 | 与 Kiro Provider 并存路由 + 出站代理绑定 | 同端口或分 path 稳定分流 |
-| M5 | 迁移向导（从 acc/本机配置导入）+ 文档更新 | 可卸载外部 acc |
+| 阶段 | 交付                                             | 验收                       |
+| ---- | ------------------------------------------------ | -------------------------- |
+| M1   | agy 适配器 + 单账号 + `/v1/messages` 非流式/流式 | curl 冒烟通过              |
+| M2   | 多账号轮询 + 配额面板 + 启停/假死检测            | 账号耗尽可切换；挂起可重启 |
+| M3   | 一键配置 Claude Code + 导出 CC Switch 字段       | 新终端 `claude` 可用       |
+| M4   | 与 Kiro Provider 并存路由 + 出站代理绑定         | 同端口或分 path 稳定分流   |
+| M5   | 迁移向导（从 acc/本机配置导入）+ 文档更新        | 可卸载外部 acc             |
 
 ---
 

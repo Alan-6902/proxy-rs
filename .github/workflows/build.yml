@@ -6,7 +6,7 @@ on:
 
 # 设置工作目录
 env:
-  WORKING_DIR: Kiro-account-manager
+  WORKING_DIR: proxy-rs
 
 jobs:
   # 获取版本号
@@ -39,9 +39,9 @@ jobs:
         id: extract_changelog
         run: |
           # 提取英文更新日志（从 ### v 开始到下一个 ### 或文件结束）
-          CHANGELOG_EN=$(awk '/^### v[0-9]+\.[0-9]+\.[0-9]+/{if(found) exit; found=1} found' README.md)
+          CHANGELOG_EN=$(awk '/^### v[0-9]+\.[0-9]+\.[0-9]+/{if(found) exit; found=1} found' "${WORKING_DIR}/README.md")
           # 提取中文更新日志
-          CHANGELOG_CN=$(awk '/^### v[0-9]+\.[0-9]+\.[0-9]+/{if(found) exit; found=1} found' README_CN.md)
+          CHANGELOG_CN=$(awk '/^### v[0-9]+\.[0-9]+\.[0-9]+/{if(found) exit; found=1} found' "${WORKING_DIR}/README_CN.md")
           
           # 使用 EOF 处理多行输出
           echo "changelog_en<<EOF" >> $GITHUB_OUTPUT

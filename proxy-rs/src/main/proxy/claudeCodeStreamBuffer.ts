@@ -34,8 +34,12 @@ export class ClaudeCodeStreamBuffer {
     this.maxBufferBytes = options.maxBufferBytes ?? CLAUDE_CODE_MAX_BUFFER_BYTES
     const pingIntervalMs = options.pingIntervalMs ?? CLAUDE_CODE_PING_INTERVAL_MS
     const maxWaitMs = options.maxWaitMs ?? CLAUDE_CODE_MAX_WAIT_MS
-    this.pingTimer = setInterval(() => { void this.sendPing() }, pingIntervalMs)
-    this.timeoutTimer = setTimeout(() => { void this.release(this.fallbackInputTokens) }, maxWaitMs)
+    this.pingTimer = setInterval(() => {
+      void this.sendPing()
+    }, pingIntervalMs)
+    this.timeoutTimer = setTimeout(() => {
+      void this.release(this.fallbackInputTokens)
+    }, maxWaitMs)
   }
 
   write(frame: string): Promise<void> {
@@ -136,7 +140,9 @@ export class ClaudeCodeStreamBuffer {
     const jsonEnd = frame.indexOf('\n', jsonStart)
     if (jsonEnd < 0) return frame
     try {
-      const event = JSON.parse(frame.slice(jsonStart, jsonEnd)) as { message?: { usage?: { input_tokens?: number } } }
+      const event = JSON.parse(frame.slice(jsonStart, jsonEnd)) as {
+        message?: { usage?: { input_tokens?: number } }
+      }
       if (!event.message?.usage) return frame
       event.message.usage.input_tokens = inputTokens
       return `${frame.slice(0, jsonStart)}${JSON.stringify(event)}${frame.slice(jsonEnd)}`

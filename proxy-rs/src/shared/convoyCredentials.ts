@@ -359,10 +359,7 @@ export function sanitizeConvoyKey(value: string): string {
  * HTTPS 门禁：默认拒绝向 http:// 发送登录 Key。
  * 返回 null 表示通过，否则返回拒绝原因。
  */
-export function checkBaseUrlSecurity(
-  baseUrl: string,
-  allowInsecureHttp: boolean
-): string | null {
+export function checkBaseUrlSecurity(baseUrl: string, allowInsecureHttp: boolean): string | null {
   let parsed: URL
   try {
     parsed = new URL(baseUrl)
@@ -459,10 +456,7 @@ export function evaluateBillingGuard(input: BillingGuardInput): BillingGuardDeci
 
 /** 退避等待毫秒数：按连续失败次数取序列值，叠加 ±20% 抖动 */
 export function backoffDelayMs(consecutiveFailures: number, random = Math.random): number {
-  const index = Math.min(
-    Math.max(consecutiveFailures, 1) - 1,
-    CONVOY_BACKOFF_SECONDS.length - 1
-  )
+  const index = Math.min(Math.max(consecutiveFailures, 1) - 1, CONVOY_BACKOFF_SECONDS.length - 1)
   const baseMs = CONVOY_BACKOFF_SECONDS[index] * 1000
   const jitter = baseMs * CONVOY_BACKOFF_JITTER_RATIO * (random() * 2 - 1)
   return Math.max(1000, Math.round(baseMs + jitter))

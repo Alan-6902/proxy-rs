@@ -64,8 +64,8 @@ function normalizeModelId(id: string): string {
   return id
     .toLowerCase()
     .replace(/[-._]/g, '')
-    .replace(/\d{8}/g, '')   // 移除日期 (20251001)
-    .replace(/v\d+$/g, '')    // 移除尾部版本号 (v1)
+    .replace(/\d{8}/g, '') // 移除日期 (20251001)
+    .replace(/v\d+$/g, '') // 移除尾部版本号 (v1)
     .replace(/v\d+_\d+$/g, '') // 移除 v1_0 形式
 }
 
@@ -116,10 +116,16 @@ export function getModelContextLength(modelId: string | undefined | null): numbe
   if (/^gpt-5[.-]6(?:[.-](?:sol|terra|luna))?$/.test(id)) return 272000
 
   // Sonnet/Opus 4.6+ (including 5+) are 1M; 4.5 and all Haiku stay 200K.
-  if (/^claude-(?:sonnet|opus)-(?:4[.-](?:[6-9]|[1-9][0-9]+)|[5-9][0-9]*)(?:$|[.-])/.test(id)) return 1000000
+  if (/^claude-(?:sonnet|opus)-(?:4[.-](?:[6-9]|[1-9][0-9]+)|[5-9][0-9]*)(?:$|[.-])/.test(id))
+    return 1000000
 
   // Claude 系列（Haiku 和未列出的 Claude 保持 200K）。
-  if (id.includes('claude-opus-4') || id.includes('claude-sonnet-4') || id.includes('claude-haiku-4')) return 200000
+  if (
+    id.includes('claude-opus-4') ||
+    id.includes('claude-sonnet-4') ||
+    id.includes('claude-haiku-4')
+  )
+    return 200000
   if (id.includes('claude-3-7') || id.includes('claude-3.7')) return 200000
   if (id.includes('claude-3-5') || id.includes('claude-3.5')) return 200000
   if (id.includes('claude-3')) return 200000
@@ -137,7 +143,8 @@ export function getModelContextLength(modelId: string | undefined | null): numbe
   if (id.includes('o1') || id.includes('o3')) return 128000
 
   // Gemini 系列。
-  if (id.includes('gemini-2.5') || id.includes('gemini-2.0') || id.includes('gemini-1.5')) return 1000000
+  if (id.includes('gemini-2.5') || id.includes('gemini-2.0') || id.includes('gemini-1.5'))
+    return 1000000
   if (id.includes('gemini')) return 32768
 
   // Amazon Titan / Nova 系列。

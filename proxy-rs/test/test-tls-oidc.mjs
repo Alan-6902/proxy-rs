@@ -10,7 +10,13 @@ const echoUrl = 'https://httpbin.org/post'
 const body = JSON.stringify({
   clientName: 'Amazon Q Developer for command line',
   clientType: 'public',
-  scopes: ['codewhisperer:completions', 'codewhisperer:analysis', 'codewhisperer:conversations', 'codewhisperer:transformations', 'codewhisperer:taskassist']
+  scopes: [
+    'codewhisperer:completions',
+    'codewhisperer:analysis',
+    'codewhisperer:conversations',
+    'codewhisperer:transformations',
+    'codewhisperer:taskassist'
+  ]
 })
 
 async function main() {

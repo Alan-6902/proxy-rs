@@ -17,7 +17,13 @@ const CONVOY_KEY = 'convoy-login-key-9999'
 const API_KEY = 'ksk_pulledKey123456'
 
 interface PoolInput {
-  credentials: { id: string; apiKey?: string; accessToken?: string; region?: string; expiresAt?: number }[]
+  credentials: {
+    id: string
+    apiKey?: string
+    accessToken?: string
+    region?: string
+    expiresAt?: number
+  }[]
   manualKeys: { id: string; apiKey: string; region: string; email?: string }[]
 }
 
@@ -93,7 +99,10 @@ function summaryBody(activeIds: string[], fare = 2.0): Record<string, unknown> {
   }
 }
 
-function credentialsBody(ids: string[], overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function credentialsBody(
+  ids: string[],
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     autoConvoyId: 42,
     credentials: ids.map((id) => ({
@@ -183,10 +192,7 @@ describe('正常同步路径', () => {
   it('合法空列表清空可分配池', async () => {
     const { fetchImpl } = routedFetch({
       '/me/auto-ride': [{ body: summaryBody(['1']) }, { body: summaryBody([]) }],
-      '/me/auto-ride/credentials': [
-        { body: credentialsBody(['1']) },
-        { body: credentialsBody([]) }
-      ]
+      '/me/auto-ride/credentials': [{ body: credentialsBody(['1']) }, { body: credentialsBody([]) }]
     })
     const { manager, poolInputs } = makeManager({ fetchImpl })
 
@@ -327,8 +333,20 @@ describe('失败不破坏最后有效快照', () => {
     const { manager, goodVersion } = await primeThenFail({
       body: {
         credentials: [
-          { credentialId: '1', status: 'active', newlyCharged: false, charged: 0, credential: { type: 'api_key', apiKey: 'ksk_ok1' } },
-          { credentialId: '2', status: 'active', newlyCharged: false, charged: 0, credential: { type: 'magic' } }
+          {
+            credentialId: '1',
+            status: 'active',
+            newlyCharged: false,
+            charged: 0,
+            credential: { type: 'api_key', apiKey: 'ksk_ok1' }
+          },
+          {
+            credentialId: '2',
+            status: 'active',
+            newlyCharged: false,
+            charged: 0,
+            credential: { type: 'magic' }
+          }
         ],
         newlyChargedCount: 0,
         totalCharged: 0

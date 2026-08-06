@@ -51,14 +51,8 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
     return () => resizeObserver.disconnect()
   }, [])
 
-  const {
-    getFilteredAccounts,
-    tags,
-    groups,
-    selectedIds,
-    toggleSelection,
-    checkAccountStatus
-  } = useAccountsStore()
+  const { getFilteredAccounts, tags, groups, selectedIds, toggleSelection, checkAccountStatus } =
+    useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
 
@@ -73,7 +67,7 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
       await checkAccountStatus(detailAccount.id)
       // 刷新后重新获取账号数据
       const accounts = getFilteredAccounts()
-      const updated = accounts.find(a => a.id === detailAccount.id)
+      const updated = accounts.find((a) => a.id === detailAccount.id)
       if (updated) setDetailAccount(updated)
     } finally {
       setIsRefreshing(false)
@@ -102,11 +96,7 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
   const items = virtualizer.getVirtualItems()
 
   return (
-    <div
-      ref={parentRef}
-      className="h-full overflow-auto"
-      style={{ contain: 'strict' }}
-    >
+    <div ref={parentRef} className="h-full overflow-auto" style={{ contain: 'strict' }}>
       <div
         style={{
           height: `${virtualizer.getTotalSize() + 8}px`,
@@ -130,7 +120,7 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
               }}
             >
               <div className="flex gap-4 items-start px-1">
-                {row.map((item) => 
+                {row.map((item) =>
                   item === 'add' ? (
                     <div
                       key="add-button"
@@ -144,7 +134,11 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
                       </div>
                     </div>
                   ) : (
-                    <div key={item.id} className="flex-shrink-0" style={{ width: cardWidth, height: CARD_HEIGHT - GAP }}>
+                    <div
+                      key={item.id}
+                      className="flex-shrink-0"
+                      style={{ width: cardWidth, height: CARD_HEIGHT - GAP }}
+                    >
                       <AccountCard
                         account={item}
                         tags={tags}

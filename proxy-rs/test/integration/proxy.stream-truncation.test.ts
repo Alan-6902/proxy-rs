@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { streamMock, requestMock } = vi.hoisted(() => ({ streamMock: vi.fn(), requestMock: vi.fn() }))
+const { streamMock, requestMock } = vi.hoisted(() => ({
+  streamMock: vi.fn(),
+  requestMock: vi.fn()
+}))
 
-vi.mock('../../src/main/proxy/kiroApi', async importOriginal => ({
-  ...await importOriginal<typeof import('../../src/main/proxy/kiroApi')>(),
+vi.mock('../../src/main/proxy/kiroApi', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/main/proxy/kiroApi')>()),
   callKiroApi: requestMock,
   callKiroApiStream: streamMock
 }))
@@ -139,7 +142,14 @@ describe('流式响应中途失败的收尾', () => {
     it('正常完成的流不受影响：stop_reason 为 end_turn 且有 message_stop', async () => {
       streamMock.mockImplementation(async (_a, _p, onChunk, onComplete) => {
         await onChunk('all good')
-        await onComplete({ inputTokens: 10, outputTokens: 2, credits: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 })
+        await onComplete({
+          inputTokens: 10,
+          outputTokens: 2,
+          credits: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0
+        })
       })
 
       const sse = await claudeStream()

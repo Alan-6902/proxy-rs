@@ -29,56 +29,59 @@ export default {
   tags: ['anthropic', 'skill', 'multi-turn', 'regression', 'stream'],
   run: async ({ base, token, log }) => {
     const toolUseId = 'toolu_e2e_test_skill1'
-    const result = await postAnthropic({
-      model: DEFAULT_ANTHROPIC_MODEL,
-      max_tokens: SMALL_MAX_TOKENS,
-      stream: true,
-      system: SYSTEM_CLAUDECODE_STYLE,
-      tools: [TOOL_SKILL],
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: '<system-reminder>\nThe following skills are available for use with the Skill tool:\n- find-skills: 帮助发现可用的 skills\n</system-reminder>\n'
-            },
-            { type: 'text', text: '使用 find-skills 查询有哪些技能' }
-          ]
-        },
-        {
-          role: 'assistant',
-          content: [
-            {
-              type: 'thinking',
-              thinking: '用户请求列出可用 skills, 我应该调用 find-skills.',
-              signature: 'sig_e2e_test_truncated'
-            },
-            { type: 'text', text: '我来使用 `find-skills` 技能查询.' },
-            {
-              type: 'tool_use',
-              id: toolUseId,
-              name: 'Skill',
-              input: { skill: 'find-skills', args: '列出所有可用的技能' }
-            }
-          ]
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: toolUseId,
-              content: 'Launching skill: find-skills'
-            },
-            {
-              type: 'text',
-              text: 'Base directory for this skill: ~/.claude/skills/find-skills\n\n# Find Skills\nThis skill helps you discover skills.\n\nPlease summarize this skill in one sentence.'
-            }
-          ]
-        }
-      ]
-    }, { base, token })
+    const result = await postAnthropic(
+      {
+        model: DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: SMALL_MAX_TOKENS,
+        stream: true,
+        system: SYSTEM_CLAUDECODE_STYLE,
+        tools: [TOOL_SKILL],
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: '<system-reminder>\nThe following skills are available for use with the Skill tool:\n- find-skills: 帮助发现可用的 skills\n</system-reminder>\n'
+              },
+              { type: 'text', text: '使用 find-skills 查询有哪些技能' }
+            ]
+          },
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: '用户请求列出可用 skills, 我应该调用 find-skills.',
+                signature: 'sig_e2e_test_truncated'
+              },
+              { type: 'text', text: '我来使用 `find-skills` 技能查询.' },
+              {
+                type: 'tool_use',
+                id: toolUseId,
+                name: 'Skill',
+                input: { skill: 'find-skills', args: '列出所有可用的技能' }
+              }
+            ]
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: 'Launching skill: find-skills'
+              },
+              {
+                type: 'text',
+                text: 'Base directory for this skill: ~/.claude/skills/find-skills\n\n# Find Skills\nThis skill helps you discover skills.\n\nPlease summarize this skill in one sentence.'
+              }
+            ]
+          }
+        ]
+      },
+      { base, token }
+    )
     log(`status=${result.status} kind=${result.kind} total=${result.timing?.total}ms`)
     if (result.kind === 'stream-error') {
       log(`upstream err body: ${result.text?.slice(0, 500)}`)

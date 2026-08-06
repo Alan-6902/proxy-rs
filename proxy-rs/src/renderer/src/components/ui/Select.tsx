@@ -14,13 +14,22 @@ interface SelectProps {
   onChange: (value: string) => void
   placeholder?: string
   className?: string
+  /** 禁用态：加载中/不可修改时阻止展开。 */
+  disabled?: boolean
 }
 
-export function Select({ value, options, onChange, placeholder = '请选择', className }: SelectProps) {
+export function Select({
+  value,
+  options,
+  onChange,
+  placeholder = '请选择',
+  className,
+  disabled = false
+}: SelectProps) {
   const [isOpen, setIsOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
-  const selectedOption = options.find(opt => opt.value === value)
+  const selectedOption = options.find((opt) => opt.value === value)
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -32,15 +41,22 @@ export function Select({ value, options, onChange, placeholder = '请选择', cl
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  // 禁用态切换时收起已展开的下拉，避免停留在不可操作的展开状态
+  useEffect(() => {
+    if (disabled) setIsOpen(false)
+  }, [disabled])
+
   return (
     <div ref={ref} className={cn('relative', className)}>
       {/* Trigger */}
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setIsOpen(!isOpen)}
         className={cn(
           'flex items-center justify-between gap-2 px-3 py-2 w-full rounded-lg border bg-[var(--glass-bg)] backdrop-blur-md text-sm transition-all duration-200 shadow-sm',
-          'hover:border-primary/50 hover:bg-[var(--glass-bg-strong)]',
+          'disabled:cursor-not-allowed disabled:opacity-50',
+          !disabled && 'hover:border-primary/50 hover:bg-[var(--glass-bg-strong)]',
           isOpen && 'border-primary/50 ring-2 ring-primary/30',
           !isOpen && 'border-foreground/15'
         )}
@@ -48,10 +64,12 @@ export function Select({ value, options, onChange, placeholder = '请选择', cl
         <span className={cn(!selectedOption && 'text-muted-foreground')}>
           {selectedOption?.label || placeholder}
         </span>
-        <ChevronDown className={cn(
-          'h-4 w-4 text-muted-foreground transition-transform duration-200',
-          isOpen && 'rotate-180'
-        )} />
+        <ChevronDown
+          className={cn(
+            'h-4 w-4 text-muted-foreground transition-transform duration-200',
+            isOpen && 'rotate-180'
+          )}
+        />
       </button>
 
       {/* Dropdown */}
@@ -72,19 +90,14 @@ export function Select({ value, options, onChange, placeholder = '请选择', cl
               )}
             >
               <div>
-                <p className={cn(
-                  'font-medium',
-                  option.value === value && 'text-primary'
-                )}>
+                <p className={cn('font-medium', option.value === value && 'text-primary')}>
                   {option.label}
                 </p>
                 {option.description && (
                   <p className="text-xs text-muted-foreground mt-0.5">{option.description}</p>
                 )}
               </div>
-              {option.value === value && (
-                <Check className="h-4 w-4 text-primary shrink-0" />
-              )}
+              {option.value === value && <Check className="h-4 w-4 text-primary shrink-0" />}
             </button>
           ))}
         </div>

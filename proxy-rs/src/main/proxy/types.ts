@@ -15,7 +15,10 @@ export interface OpenAIChatRequest {
   metadata?: Record<string, unknown>
   kiro_context?: KiroRequestContext
   reasoning_effort?: 'low' | 'medium' | 'high' | 'max' | string
-  thinking?: { type: 'enabled'; budget_tokens?: number } | { type: 'adaptive' } | { type: 'disabled' }
+  thinking?:
+    | { type: 'enabled'; budget_tokens?: number }
+    | { type: 'adaptive' }
+    | { type: 'disabled' }
 }
 
 export interface OpenAIMessage {
@@ -155,7 +158,12 @@ export interface OpenAIResponsesResponse {
 }
 
 export type OpenAIResponseOutputItem =
-  | { type: 'message'; id: string; role: 'assistant'; content: { type: 'output_text'; text: string }[] }
+  | {
+      type: 'message'
+      id: string
+      role: 'assistant'
+      content: { type: 'output_text'; text: string }[]
+    }
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
 
 // ============ Claude 兼容格式 ============
@@ -169,12 +177,18 @@ export interface ClaudeRequest {
   system?: string | ClaudeSystemBlock[]
   tools?: ClaudeTool[]
   tool_choice?: { type: string; name?: string }
-  thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive'; display?: string } | { type: 'disabled' }
+  thinking?:
+    | { type: 'enabled'; budget_tokens: number }
+    | { type: 'adaptive'; display?: string }
+    | { type: 'disabled' }
   conversation_id?: string
   metadata?: Record<string, unknown>
   kiro_context?: KiroRequestContext
   anthropic_beta?: string[]
-  output_config?: { effort?: string; task_budget?: { type: 'tokens'; total: number; remaining?: number } }
+  output_config?: {
+    effort?: string
+    task_budget?: { type: 'tokens'; total: number; remaining?: number }
+  }
   context_management?: { type?: string; [key: string]: unknown }
 }
 
@@ -191,12 +205,22 @@ export interface ClaudeSystemBlock {
 }
 
 export interface ClaudeContentBlock {
-  type: 'text' | 'image' | 'document' | 'tool_use' | 'tool_result' | 'thinking' | 'redacted_thinking'
+  type:
+    | 'text'
+    | 'image'
+    | 'document'
+    | 'tool_use'
+    | 'tool_result'
+    | 'thinking'
+    | 'redacted_thinking'
   text?: string
   thinking?: string
   signature?: string
   data?: string
-  source?: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } | ClaudeDocumentSource
+  source?:
+    | { type: 'base64'; media_type: string; data: string }
+    | { type: 'url'; url: string }
+    | ClaudeDocumentSource
   id?: string
   name?: string
   input?: unknown
@@ -237,12 +261,34 @@ export interface ClaudeResponse {
 }
 
 export interface ClaudeStreamEvent {
-  type: 'message_start' | 'content_block_start' | 'content_block_delta' | 'content_block_stop' | 'message_delta' | 'message_stop' | 'ping' | 'error'
+  type:
+    | 'message_start'
+    | 'content_block_start'
+    | 'content_block_delta'
+    | 'content_block_stop'
+    | 'message_delta'
+    | 'message_stop'
+    | 'ping'
+    | 'error'
   message?: Partial<ClaudeResponse>
   index?: number
   content_block?: ClaudeContentBlock
-  delta?: { type: string; text?: string; thinking?: string; signature?: string; data?: string; reasoning_content?: string; stop_reason?: string; stop_sequence?: string }
-  usage?: { input_tokens?: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
+  delta?: {
+    type: string
+    text?: string
+    thinking?: string
+    signature?: string
+    data?: string
+    reasoning_content?: string
+    stop_reason?: string
+    stop_sequence?: string
+  }
+  usage?: {
+    input_tokens?: number
+    output_tokens: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  }
   error?: { type: string; message: string }
 }
 
@@ -269,7 +315,7 @@ export interface KiroCurrentMessage {
 
 export interface KiroUserInputMessage {
   content: string
-  modelId?: string  // 可选，占位消息不需要
+  modelId?: string // 可选，占位消息不需要
   origin: string
   images?: KiroImage[]
   documents?: KiroDocument[]
@@ -305,15 +351,17 @@ export interface KiroToolResult {
   toolUseId: string
 }
 
-export type KiroToolWrapper = {
-  toolSpecification: {
-    name: string
-    description: string
-    inputSchema: { json: unknown }
-  }
-} | {
-  cachePoint: KiroCachePoint
-}
+export type KiroToolWrapper =
+  | {
+      toolSpecification: {
+        name: string
+        description: string
+        inputSchema: { json: unknown }
+      }
+    }
+  | {
+      cachePoint: KiroCachePoint
+    }
 
 export interface KiroHistoryMessage {
   userInputMessage?: KiroUserInputMessage
@@ -399,6 +447,12 @@ export interface ProxyAccount {
   expiresAt?: number
   /** 账号绑定的出口代理 URL（http/https）；为空则使用全局代理逻辑 */
   proxyUrl?: string
+  /** 账号级首选 Kiro 上游端点；优先级高于全局 preferredEndpoint。 */
+  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+  /** 账号级端点回退顺序；未配置时沿用内置顺序。 */
+  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
+  /** 连续多少次可重试端点错误后开启熔断；默认 2。 */
+  endpointFallbackAfterFailures?: number
   /** 账号所属分组 ID；与 multiAccountSelectionMode='groups' + multiAccountGroupIds 配合做轮询分组过滤 */
   groupId?: string
   // 运行时状态
@@ -415,9 +469,9 @@ export interface ProxyAccount {
   // 长期封禁追踪（区分于临时 errorCount 冷却）
   // Kiro 后端 TEMPORARILY_SUSPENDED / AccountSuspendedException 等风控触发时设置
   // 需要联系 AWS Support 人工解封，账号池会持续跳过直到 clearSuspended
-  suspendedAt?: number       // 封禁时间戳
-  suspendReason?: string     // 封禁原因 (如 'TEMPORARILY_SUSPENDED')
-  suspendMessage?: string    // 封禁完整错误消息 (含联系链接)
+  suspendedAt?: number // 封禁时间戳
+  suspendReason?: string // 封禁原因 (如 'TEMPORARILY_SUSPENDED')
+  suspendMessage?: string // 封禁完整错误消息 (含联系链接)
 }
 
 // API Key 格式类型
@@ -438,12 +492,12 @@ export interface ApiKey {
   id: string
   name: string
   key: string
-  format: ApiKeyFormat  // 密钥格式
+  format: ApiKeyFormat // 密钥格式
   enabled: boolean
   createdAt: number
   lastUsedAt?: number
   // 额度限制
-  creditsLimit?: number  // Credits 上限（undefined 表示无限制）
+  creditsLimit?: number // Credits 上限（undefined 表示无限制）
   // 用量统计
   usage: {
     totalRequests: number
@@ -451,19 +505,25 @@ export interface ApiKey {
     totalInputTokens: number
     totalOutputTokens: number
     // 按日期统计（YYYY-MM-DD -> usage）
-    daily: Record<string, {
-      requests: number
-      credits: number
-      inputTokens: number
-      outputTokens: number
-    }>
+    daily: Record<
+      string,
+      {
+        requests: number
+        credits: number
+        inputTokens: number
+        outputTokens: number
+      }
+    >
     // 按模型统计
-    byModel?: Record<string, {
-      requests: number
-      credits: number
-      inputTokens: number
-      outputTokens: number
-    }>
+    byModel?: Record<
+      string,
+      {
+        requests: number
+        credits: number
+        inputTokens: number
+        outputTokens: number
+      }
+    >
   }
   // 用量历史记录（最近 100 条）
   usageHistory?: ApiKeyUsageRecord[]
@@ -472,7 +532,7 @@ export interface ApiKey {
 // 模型映射规则
 export interface ModelMappingRule {
   id: string
-  name: string  // 规则名称
+  name: string // 规则名称
   enabled: boolean
   // 映射类型：replace(替换), alias(别名), loadbalance(负载均衡)
   type: 'replace' | 'alias' | 'loadbalance'
@@ -492,8 +552,8 @@ export interface ProxyConfig {
   enabled: boolean
   port: number
   host: string
-  apiKey?: string  // 保留兼容性
-  apiKeys?: ApiKey[]  // 多 API Key 支持
+  apiKey?: string // 保留兼容性
+  apiKeys?: ApiKey[] // 多 API Key 支持
   /** 管理 API 专用密钥；绝不参与业务 API 鉴权或普通密钥统计 */
   adminApiKey?: string
   enableMultiAccount: boolean
@@ -571,7 +631,6 @@ export interface ProxyConfig {
   fallbackPort?: number
   /** 启用审计日志（管理 API 操作、config 变更） */
   enableAuditLog?: boolean
-
 }
 
 export interface TlsConfig {
@@ -604,6 +663,9 @@ export interface StoredProxyAccount {
     region?: string
     authMethod?: ProxyAccount['authMethod']
     provider?: string
+    preferredEndpoint?: ProxyAccount['preferredEndpoint']
+    endpointFallbackOrder?: ProxyAccount['endpointFallbackOrder']
+    endpointFallbackAfterFailures?: number
   }
 }
 
@@ -625,7 +687,9 @@ export function buildBackgroundRefreshPlan(
   return resolveBackgroundRefreshPlan(credentials, needsTokenRefresh)
 }
 
-function getProxyAccountCredentials(account: StoredProxyAccount | ProxyAccount): Partial<ProxyAccount> {
+function getProxyAccountCredentials(
+  account: StoredProxyAccount | ProxyAccount
+): Partial<ProxyAccount> {
   if ('credentials' in account) return account.credentials || {}
   return account
 }
@@ -635,14 +699,17 @@ export function buildProxyAccounts(
   getProxyUrl: (accountId: string) => string | undefined = () => undefined
 ): ProxyAccount[] {
   return Array.from(accounts)
-    .filter(account => {
+    .filter((account) => {
       if ('isActive' in account && account.isActive === false) return false
-      if ('status' in account && account.status !== undefined && account.status !== 'active') return false
+      if ('status' in account && account.status !== undefined && account.status !== 'active')
+        return false
 
       const plan = buildBackgroundRefreshPlan(getProxyAccountCredentials(account), false)
-      return plan.credentialKind === 'kiro_api_key' ? Boolean(plan.kiroApiKey) : Boolean(plan.accessToken)
+      return plan.credentialKind === 'kiro_api_key'
+        ? Boolean(plan.kiroApiKey)
+        : Boolean(plan.accessToken)
     })
-    .map(account => {
+    .map((account) => {
       const credentials = getProxyAccountCredentials(account)
       const plan = buildBackgroundRefreshPlan(credentials, false)
       return {
@@ -661,6 +728,9 @@ export function buildProxyAccounts(
         authMethod: credentials.authMethod,
         provider: credentials.provider || ('idp' in account ? account.idp : undefined),
         proxyUrl: getProxyUrl(account.id),
+        preferredEndpoint: credentials.preferredEndpoint,
+        endpointFallbackOrder: credentials.endpointFallbackOrder,
+        endpointFallbackAfterFailures: credentials.endpointFallbackAfterFailures,
         groupId: account.groupId
       }
     })

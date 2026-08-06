@@ -45,7 +45,9 @@ function positiveInt(value: unknown, fallback: number, min = 0): number {
 }
 
 /** 归一化外部传入的配置，避免非法值把轮询打成死循环或绕过门禁 */
-export function normalizeConvoyConfig(input: Partial<ConvoySyncConfig> | null | undefined): ConvoySyncConfig {
+export function normalizeConvoyConfig(
+  input: Partial<ConvoySyncConfig> | null | undefined
+): ConvoySyncConfig {
   const source = input || {}
   return {
     enabled: source.enabled === true,
@@ -84,7 +86,10 @@ export function normalizeConvoyConfig(input: Partial<ConvoySyncConfig> | null | 
 
 /** 读取配置与登录 Key；文件不存在或解密失败时回落到默认配置 + 空 Key */
 export async function loadConvoyState(): Promise<PersistedConvoyConfig> {
-  const fallback: PersistedConvoyConfig = { config: { ...DEFAULT_CONVOY_SYNC_CONFIG }, convoyKey: '' }
+  const fallback: PersistedConvoyConfig = {
+    config: { ...DEFAULT_CONVOY_SYNC_CONFIG },
+    convoyKey: ''
+  }
   if (!isConvoyStoreAvailable()) return fallback
   try {
     const buffer = await fs.readFile(storePath())
@@ -115,7 +120,8 @@ export async function saveConvoyState(input: {
   const current = await loadConvoyState()
   const next: PersistedConvoyConfig = {
     config: normalizeConvoyConfig({ ...current.config, ...input.config }),
-    convoyKey: input.convoyKey === undefined ? current.convoyKey : sanitizeConvoyKey(input.convoyKey)
+    convoyKey:
+      input.convoyKey === undefined ? current.convoyKey : sanitizeConvoyKey(input.convoyKey)
   }
   const encrypted = safeStorage.encryptString(JSON.stringify(next))
   await fs.writeFile(storePath(), encrypted, { mode: 0o600 })

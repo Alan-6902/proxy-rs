@@ -14,7 +14,7 @@ export default {
   tags: ['admin', 'apikey', 'config'],
   run: async ({ base, token, log }) => {
     const url = `${base.replace(/\/$/, '')}/admin/config`
-    const r = await fetch(url, { headers: { 'authorization': `Bearer ${token}` } })
+    const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
     log(`status=${r.status}`)
     assertTrue(r.status === 200, `admin/config 应 200, 实际 ${r.status}`)
     const json = await r.json()

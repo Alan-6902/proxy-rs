@@ -109,3 +109,131 @@ skills.json
 # super-* 证据矩阵临时声明（不入库）
 .hit-rows-*.txt
 .super-x/
+# -----------------------------
+# Turborepo + pnpm Monorepo
+# -----------------------------
+
+# Node modules
+node_modules/
+.pnpm-store/
+.npmrc
+.nvmrc
+
+# Build outputs
+dist/
+build/
+#lib/
+.esm/
+.cjs/
+coverage/
+out/
+output/
+public/build/
+
+# Turbo build cache
+.turbo/
+turbo/
+turbo-cache/
+turbo-out/
+
+# Vite / Next / Nuxt / React build
+.vite/
+.next/
+.nuxt/
+.cache/
+.svelte-kit/
+
+# Design HTML local cache (external design repo checkout; do not commit)
+.design-cache/
+
+# Logs & temp files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+node_modules/
+dist
+public/config.json
+*.local
+
+
+# Editor directories and files
+.vscode/*
+.turbo/*
+.history/*
+!.vscode/extensions.json
+.idea
+.history/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# Editor settings
+.idea/
+.history/
+!/.vscode/
+*.swp
+*.swo
+
+
+# Test coverage & reports
+coverage/
+__snapshots__/
+*.lcov
+playwright-report/
+test-results/
+
+# delivery-test 本地运行证据（MCP snapshot / verdict 等）
+docs/ai-task-state/**/delivery-test/runs/*
+!docs/ai-task-state/**/delivery-test/runs/README.md
+# delivery-report 按需生成，不入库
+docs/ai-task-state/**/delivery-test/report.html
+docs/ai-task-state/**/delivery-test/report.md
+docs/ai-task-state/**/delivery-test/report.html.open.lock
+ui-automation.local.json
+
+# Local preview / lock
+*.pid
+*.seed
+*.lock
+
+# Misc
+*.tgz
+*.zip
+*.tar.gz
+
+# Ignore local lint cache
+.eslintcache
+.stylelintcache
+
+# Ignore pnpm store (global)
+.pnpm-store/
+
+# Skills CLI may recreate this; project canonical path is /.cursor/skills/
+.agents/
+
+# Playwright cached auth state
+apps/*/.playwright/
+apps/*/test-results/
+
+.worktrees/
+
+# Local UI automation configuration derived from the tracked template.
+ui-automation.local.json
+
+# CodeGraph local indexes (per sub-project)
+**/.codegraph/
+.codegraph-target
+.cursor/tmp/
+.mr-payload.json
+
+# Trae files
+.trae/

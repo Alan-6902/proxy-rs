@@ -3,7 +3,6 @@ import { Button, Badge, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { AccountFilterPanel } from './AccountFilter'
-import { toRgba } from './_helpers'
 import { cn } from '@/lib/utils'
 import { Network as NetworkIcon, Link2 as Link2Icon, Unlink as UnlinkIcon } from 'lucide-react'
 import {
@@ -13,9 +12,6 @@ import {
   Download,
   Trash2,
   Tag,
-  FolderPlus,
-  CheckSquare,
-  Square,
   Loader2,
   Eye,
   EyeOff,
@@ -26,9 +22,6 @@ import {
   Minus,
   LayoutGrid,
   List as ListIcon,
-  Users,
-  Inbox,
-  ArrowRightLeft,
   Zap
 } from 'lucide-react'
 
@@ -40,7 +33,6 @@ interface AccountToolbarProps {
   onExport: () => void
   viewMode: AccountViewMode
   onViewModeChange: (mode: AccountViewMode) => void
-  onManageGroups: () => void
   onManageTags: () => void
   isFilterExpanded: boolean
   onToggleFilter: () => void
@@ -54,7 +46,6 @@ export function AccountToolbar({
   onExport,
   viewMode,
   onViewModeChange,
-  onManageGroups,
   onManageTags,
   isFilterExpanded,
   onToggleFilter,
@@ -64,8 +55,6 @@ export function AccountToolbar({
     filter,
     setFilter,
     selectedIds,
-    selectionGroupId,
-    selectAll,
     deselectAll,
     removeAccounts,
     batchRefreshTokens,
@@ -74,14 +63,10 @@ export function AccountToolbar({
     getStats,
     privacyMode,
     setPrivacyMode,
-    groups,
     tags,
     accounts,
-    moveAccountsToGroup,
     addTagToAccounts,
     removeTagFromAccounts,
-    activeGroupTab,
-    setActiveGroupTab,
     proxyPool,
     accountProxyBindings,
     bindAccountsToProxy,
@@ -139,21 +124,6 @@ export function AccountToolbar({
     setShowProxyMenu(false)
   }
 
-  // 获取选中账户的分组状态（useMemo 缓存，避免每次渲染重算 O(N)）
-  const selectedGroupStatus = useMemo(() => {
-    const selectedAccounts = Array.from(selectedIds)
-      .map((id) => accounts.get(id))
-      .filter(Boolean)
-    const groupCounts = new Map<string | undefined, number>()
-    selectedAccounts.forEach((acc) => {
-      if (acc) {
-        const gid = acc.groupId
-        groupCounts.set(gid, (groupCounts.get(gid) || 0) + 1)
-      }
-    })
-    return { selectedAccounts, groupCounts }
-  }, [selectedIds, accounts])
-
   const selectedTagStatus = useMemo(() => {
     const selectedAccounts = Array.from(selectedIds)
       .map((id) => accounts.get(id))
@@ -171,12 +141,6 @@ export function AccountToolbar({
 
   // 兼容入口：保持现有调用签名
   const getSelectedAccountsTagStatus = useCallback(() => selectedTagStatus, [selectedTagStatus])
-
-  // 处理分组操作
-  const handleMoveToGroup = (groupId: string | undefined): void => {
-    if (selectedIds.size === 0) return
-    moveAccountsToGroup(Array.from(selectedIds), groupId)
-  }
 
   // 处理标签操作
   const handleAddTag = (tagId: string): void => {
@@ -208,33 +172,6 @@ export function AccountToolbar({
   const filteredAccounts = getFilteredAccounts()
   const filteredCount = filteredAccounts.length
   const selectedCount = selectedIds.size
-  /** 当前分组内可选的账号（锁定分组后只有同组账号能被勾） */
-  const selectableCount = useMemo(() => {
-    if (selectedCount === 0) return filteredCount
-    return filteredAccounts.filter((a) => a.groupId === selectionGroupId).length
-  }, [filteredAccounts, filteredCount, selectedCount, selectionGroupId])
-  const isAllSelected = selectedCount > 0 && selectedCount === selectableCount
-
-  // 分组 Tab 计数（全部 / 未分组 / 各分组）
-  const tabCounts = useMemo(() => {
-    const all = accounts.size
-    let ungrouped = 0
-    const byGroup = new Map<string, number>()
-    for (const acc of accounts.values()) {
-      if (!acc.groupId) {
-        ungrouped++
-      } else {
-        byGroup.set(acc.groupId, (byGroup.get(acc.groupId) || 0) + 1)
-      }
-    }
-    return { all, ungrouped, byGroup }
-  }, [accounts])
-
-  // 用户分组按 order 升序
-  const sortedGroups = useMemo(
-    () => Array.from(groups.values()).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
-    [groups]
-  )
 
   const handleSearch = (value: string): void => {
     setFilter({ ...filter, search: value || undefined })
@@ -284,109 +221,6 @@ export function AccountToolbar({
       removeAccounts(Array.from(selectedIds))
     }
   }
-
-  const handleToggleSelectAll = (): void => {
-    if (isAllSelected) {
-      deselectAll()
-    } else {
-      selectAll()
-    }
-  }
-
-  // 分组 chip（平铺行）：点击切换视图，hover 行尾 ⇄ 批量移入选中账号
-  const renderGroupChip = ({
-    key,
-    isActive,
-    onSwitch,
-    icon,
-    label,
-    count,
-    accentColor,
-    moveAction
-  }: {
-    key: string
-    isActive: boolean
-    onSwitch: () => void
-    icon: React.ReactNode
-    label: string
-    count: number
-    accentColor?: string
-    moveAction?: { isAllInGroup: boolean; onMove: () => void }
-  }): React.ReactNode => (
-    <div key={key} className="group relative flex-shrink-0">
-      <button
-        type="button"
-        onClick={onSwitch}
-        className={cn(
-          'flex items-center gap-1.5 h-7 pl-2 rounded-lg border text-xs font-medium transition-colors',
-          moveAction ? 'pr-7' : 'pr-2',
-          isActive
-            ? accentColor
-              ? ''
-              : 'bg-primary text-primary-foreground border-primary'
-            : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted'
-        )}
-        style={
-          isActive && accentColor
-            ? {
-                color: accentColor,
-                backgroundColor: accentColor.replace(/[\d.]+\)$/, '0.12)'),
-                borderColor: accentColor.replace(/[\d.]+\)$/, '0.45)')
-              }
-            : undefined
-        }
-        title={label}
-      >
-        {icon}
-        <span className="truncate max-w-[120px]">{label}</span>
-        <span
-          className={cn(
-            'text-2xs tabular-nums',
-            isActive
-              ? accentColor
-                ? 'opacity-80'
-                : 'text-primary-foreground/80'
-              : 'text-muted-foreground/70'
-          )}
-        >
-          {count}
-        </span>
-        {isActive && <Check className="h-3 w-3" />}
-      </button>
-      {/* 批量移入按钮 — 仅选中账号时出现 */}
-      {moveAction && (
-        <button
-          type="button"
-          className={cn(
-            'absolute right-1 top-1/2 -translate-y-1/2 h-5 w-5 rounded flex items-center justify-center transition-all',
-            'opacity-0 group-hover:opacity-100',
-            moveAction.isAllInGroup
-              ? 'bg-success/15 text-success'
-              : 'bg-background/80 text-muted-foreground hover:text-primary hover:bg-primary/10 shadow-sm'
-          )}
-          onClick={(e) => {
-            e.stopPropagation()
-            moveAction.onMove()
-          }}
-          title={
-            moveAction.isAllInGroup
-              ? isEn
-                ? 'All selected already in this group'
-                : '所有选中账号已在该组'
-              : isEn
-                ? `Move ${selectedCount} selected here`
-                : `移动选中 ${selectedCount} 个账号到此`
-          }
-        >
-          {moveAction.isAllInGroup ? (
-            <Check className="h-3 w-3" />
-          ) : (
-            <ArrowRightLeft className="h-3 w-3" />
-          )}
-        </button>
-      )}
-    </div>
-  )
 
   return (
     <div className="flex-1 min-w-0 space-y-3">
@@ -448,11 +282,11 @@ export function AccountToolbar({
         </div>
       </div>
 
-      {/* 统计和选择操作 */}
-      <div className="flex items-center justify-between">
-        {/* 左侧：统计信息 */}
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-muted-foreground">
+      {/* 统计和选择操作 —— 图标组紧跟统计文字，不做右对齐 */}
+      <div className="flex items-center gap-3">
+        {/* 统计信息 */}
+        <div className="flex items-center gap-4 text-sm flex-shrink-0">
+          <span className="text-muted-foreground whitespace-nowrap">
             {isEn ? '' : '共 '}
             <span className="font-medium text-foreground">{stats.total}</span>{' '}
             {isEn ? 'accounts' : '个账号'}
@@ -471,7 +305,7 @@ export function AccountToolbar({
           )}
         </div>
 
-        {/* 右侧：选择操作和管理 - 缩小间距 */}
+        {/* 选择操作和管理 - 缩小间距 */}
         <div className="flex items-center gap-1">
           {/* 标签下拉菜单 — 纯图标 + tooltip，选中时右上角小红点提示有可操作下拉 */}
           <div className="relative" ref={tagMenuRef}>
@@ -602,8 +436,8 @@ export function AccountToolbar({
                 )
                 const { proxyCounts, total } = getSelectedProxyBindingStatus()
                 return (
-                  <div className="absolute right-0 top-full mt-2 z-50 w-[320px] max-h-[80vh] overflow-y-auto bg-popover border rounded-lg shadow-lg p-2">
-                    <div className="absolute -top-2 right-4 w-4 h-4 bg-popover border-l border-t rotate-45" />
+                  <div className="absolute left-0 top-full mt-2 z-50 w-[320px] max-h-[80vh] overflow-y-auto bg-popover border rounded-lg shadow-lg p-2">
+                    <div className="absolute -top-2 left-4 w-4 h-4 bg-popover border-l border-t rotate-45" />
 
                     <div className="flex items-center justify-between px-2 py-1 mb-1">
                       <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -736,9 +570,9 @@ export function AccountToolbar({
             </Button>
             {/* 筛选气泡面板 */}
             {isFilterExpanded && (
-              <div className="absolute right-0 top-full mt-2 z-50 min-w-[600px] bg-popover border rounded-lg shadow-lg">
+              <div className="absolute left-0 top-full mt-2 z-50 min-w-[600px] bg-popover border rounded-lg shadow-lg">
                 {/* 气泡箭头 */}
-                <div className="absolute -top-2 right-4 w-4 h-4 bg-popover border-l border-t rotate-45" />
+                <div className="absolute -top-2 left-4 w-4 h-4 bg-popover border-l border-t rotate-45" />
                 <AccountFilterPanel />
               </div>
             )}
@@ -827,118 +661,6 @@ export function AccountToolbar({
             </Button>
           )}
         </div>
-      </div>
-
-      {/* 分组平铺行 — 横向 chips，超宽横向滚动。全选放在行首，与分组 chip 同排 */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mb-0.5">
-        {/* 全选 / 取消全选 —— 作用范围是当前分组筛选出的账号 */}
-        <button
-          type="button"
-          onClick={handleToggleSelectAll}
-          disabled={filteredCount === 0}
-          className={cn(
-            'flex items-center gap-1.5 h-7 px-2 rounded-lg border text-xs font-medium transition-colors flex-shrink-0',
-            'disabled:opacity-40 disabled:cursor-not-allowed',
-            selectedCount > 0
-              ? 'border-primary/45 bg-primary/12 text-primary'
-              : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted'
-          )}
-          title={
-            isAllSelected
-              ? isEn
-                ? 'Deselect all'
-                : '取消全选'
-              : isEn
-                ? 'Select all in current group'
-                : '全选当前分组'
-          }
-        >
-          {isAllSelected ? (
-            <CheckSquare className="h-3.5 w-3.5 flex-shrink-0" />
-          ) : (
-            <Square className="h-3.5 w-3.5 flex-shrink-0" />
-          )}
-          <span>
-            {selectedCount > 0
-              ? isEn
-                ? `${selectedCount} sel`
-                : `已选 ${selectedCount}`
-              : isEn
-                ? 'All'
-                : '全选'}
-          </span>
-        </button>
-
-        <div className="w-px h-5 bg-border flex-shrink-0" />
-
-        {renderGroupChip({
-          key: 'all',
-          isActive: activeGroupTab === 'all',
-          onSwitch: () => setActiveGroupTab('all'),
-          icon: <Users className="h-3.5 w-3.5 flex-shrink-0" />,
-          label: isEn ? 'All' : '全部',
-          count: tabCounts.all
-        })}
-        {renderGroupChip({
-          key: 'ungrouped',
-          isActive: activeGroupTab === 'ungrouped',
-          onSwitch: () => setActiveGroupTab('ungrouped'),
-          icon: <Inbox className="h-3.5 w-3.5 flex-shrink-0" />,
-          label: isEn ? 'Ungrouped' : '未分组',
-          count: tabCounts.ungrouped,
-          moveAction:
-            selectedCount > 0
-              ? {
-                  isAllInGroup:
-                    (selectedGroupStatus.groupCounts.get(undefined) || 0) === selectedCount,
-                  onMove: () => handleMoveToGroup(undefined)
-                }
-              : undefined
-        })}
-        {sortedGroups.map((group) => {
-          const color = group.color ? toRgba(group.color) : undefined
-          const selCountInGroup = selectedGroupStatus.groupCounts.get(group.id) || 0
-          return renderGroupChip({
-            key: group.id,
-            isActive: activeGroupTab === group.id,
-            onSwitch: () => setActiveGroupTab(group.id),
-            icon: (
-              <span
-                className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: color || 'var(--color-muted-foreground)' }}
-              />
-            ),
-            label: group.name,
-            count: tabCounts.byGroup.get(group.id) || 0,
-            accentColor: color,
-            moveAction:
-              selectedCount > 0
-                ? {
-                    isAllInGroup: selCountInGroup === selectedCount,
-                    onMove: () => handleMoveToGroup(group.id)
-                  }
-                : undefined
-          })
-        })}
-
-        {/* 管理分组入口 */}
-        <button
-          type="button"
-          onClick={onManageGroups}
-          className="flex items-center gap-1 h-7 px-2 rounded-lg border border-dashed border-border text-2xs text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors flex-shrink-0"
-          title={isEn ? 'Manage groups' : '管理分组'}
-        >
-          <FolderPlus className="h-3.5 w-3.5" />
-          <span>{isEn ? 'Manage' : '管理分组'}</span>
-        </button>
-
-        {selectedCount > 0 && (
-          <span className="ml-1 text-2xs text-muted-foreground italic flex-shrink-0">
-            {isEn
-              ? 'Hover a group and click ⇄ to move selected here'
-              : '悬停分组点 ⇄ 可把选中账号移入'}
-          </span>
-        )}
       </div>
     </div>
   )

@@ -122,7 +122,7 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
   }
 
   return (
-    <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.04] px-3 py-2.5 space-y-2.5">
+    <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.04] px-3 py-2.5 space-y-2.5 flex-shrink-0">
       {/* 标题行 */}
       <div className="flex items-center gap-2">
         <Zap className="h-4 w-4 text-emerald-600 flex-shrink-0" />

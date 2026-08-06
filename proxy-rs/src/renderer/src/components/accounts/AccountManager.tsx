@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { AccountToolbar, type AccountViewMode } from './AccountToolbar'
+import { AccountGroupBar } from './AccountGroupBar'
 import { AccountGrid } from './AccountGrid'
 import { AccountList } from './AccountList'
 import { AddAccountDialog } from './AddAccountDialog'
@@ -273,7 +274,7 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
     <div className="flex flex-col h-full">
       {/* 顶部工具栏 - 玻璃态（relative z-20 抬升 stacking context，确保下拉菜单浮在卡片之上）
        * 注意：这里刻意不用 PageHeader/.page-hero —— 后者带 overflow:hidden，
-       * 会裁掉 AccountToolbar 的 6 处 top-full 下拉浮层。改为复用同一套排版类
+       * 会裁掉 AccountToolbar 的 top-full 下拉浮层。改为复用同一套排版类
        * （type-eyebrow / type-display / accent 图标盒），视觉与其余页面对齐但保留溢出。 */}
       <header className="relative z-20 flex items-center justify-between gap-4 px-4 py-3.5 glass-toolbar">
         <div className="flex items-center gap-4">
@@ -307,7 +308,6 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
           onExport={handleExport}
           viewMode={viewMode}
           onViewModeChange={setViewMode}
-          onManageGroups={handleManageGroups}
           onManageTags={handleManageTags}
           isFilterExpanded={isFilterExpanded}
           onToggleFilter={() => setIsFilterExpanded(!isFilterExpanded)}
@@ -317,6 +317,9 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
 
       {/* 主内容区域 */}
       <div className="flex-1 overflow-hidden flex flex-col px-3 py-3 gap-3">
+        {/* 分组平铺行 —— 放在 header 之外，左边缘对齐账号列表 */}
+        <AccountGroupBar onManageGroups={handleManageGroups} />
+
         {/* 批量验活面板 */}
         {isLivenessExpanded && <LivenessPanel onClose={() => setIsLivenessExpanded(false)} />}
 

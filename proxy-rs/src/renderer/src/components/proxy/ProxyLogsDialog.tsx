@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { X, Trash2, Download, AlertCircle, RotateCcw } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface LogEntry {
   time: string
@@ -41,6 +42,8 @@ export function ProxyLogsDialog({
   isEn
 }: ProxyLogsDialogProps) {
   const [expandedError, setExpandedError] = useState<number | null>(null)
+
+  useEscapeClose(open, () => onOpenChange(false))
 
   if (!open) return null
 

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { X, Minimize2, LogOut, XCircle, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '../hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 export function CloseConfirmDialog() {
   const { t } = useTranslation()
@@ -22,6 +23,9 @@ export function CloseConfirmDialog() {
     window.api.sendCloseConfirmResponse(action, rememberChoice)
     setOpen(false)
   }
+
+  // Esc 等同于「取消关闭」：不退出也不最小化
+  useEscapeClose(open, () => handleAction('cancel'))
 
   if (!open) return null
 

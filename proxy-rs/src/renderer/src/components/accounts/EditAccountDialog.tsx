@@ -3,6 +3,7 @@ import { X, Loader2, RefreshCw, CheckCircle, Copy, Check } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
 import { useAccountsStore } from '@/store'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { Account, SubscriptionType } from '@/types/account'
 
 interface EditAccountDialogProps {
@@ -56,6 +57,8 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
   const [isVerifying, setIsVerifying] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copiedToken, setCopiedToken] = useState(false)
+
+  useEscapeClose(open && !!account, () => onOpenChange(false))
 
   const handleCopyAccessToken = (): void => {
     if (accountInfo?.accessToken) {

@@ -24,6 +24,7 @@ import {
   Switch
 } from '../ui'
 import { cn } from '@/lib/utils'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface ModelMappingRule {
   id: string
@@ -69,6 +70,8 @@ export function ModelMappingDialog({
   const [localMappings, setLocalMappings] = useState<ModelMappingRule[]>(mappings)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+
+  useEscapeClose(open, () => onOpenChange(false))
 
   useEffect(() => {
     if (open) {

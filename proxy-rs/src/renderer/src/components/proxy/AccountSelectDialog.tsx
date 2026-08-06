@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { X, Search, Check, User, CreditCard, Zap, Mail, AlertCircle, Ban } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Badge } from '../ui'
 import type { Account } from '../../types/account'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface AccountSelectDialogProps {
   open: boolean
@@ -21,6 +22,8 @@ export function AccountSelectDialog({
   isEn
 }: AccountSelectDialogProps) {
   const [searchQuery, setSearchQuery] = useState('')
+
+  useEscapeClose(open, () => onOpenChange(false))
 
   const accountList = useMemo(() => {
     return Array.from(accounts.values())

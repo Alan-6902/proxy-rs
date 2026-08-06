@@ -38,6 +38,7 @@ import {
 import { ProxySecurityPanel } from './ProxySecurityPanel'
 import { useAccountsStore } from '../../store/accounts'
 import { useTranslation } from '../../hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import { ProxyLogsDialog } from './ProxyLogsDialog'
 import { ProxyDetailedLogsDialog } from './ProxyDetailedLogsDialog'
 import { ModelsDialog } from './ModelsDialog'
@@ -225,6 +226,8 @@ export function ProxyPanel() {
   const [apiKeyFormat, setApiKeyFormat] = useState<'sk' | 'simple' | 'token'>('sk')
   const [apiKeyCopied, setApiKeyCopied] = useState(false)
   const [apiKeyGenerated, setApiKeyGenerated] = useState(false)
+
+  useEscapeClose(showApiKeyManager, () => setShowApiKeyManager(false))
 
   const accounts = useAccountsStore((state) => state.accounts)
   const groups = useAccountsStore((state) => state.groups)

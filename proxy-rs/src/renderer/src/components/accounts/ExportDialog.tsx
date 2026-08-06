@@ -5,6 +5,7 @@ import { X, FileJson, FileText, Table, Clipboard, Check, Download, Key, Braces }
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { Account } from '@/types/account'
 
 type ExportFormat = 'json' | 'oidc' | 'txt' | 'csv' | 'kami' | 'clipboard'
@@ -23,6 +24,8 @@ export function ExportDialog({ open, onClose, accounts, selectedCount }: ExportD
   const { exportAccounts } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+
+  useEscapeClose(open, onClose)
 
   if (!open) return null
 

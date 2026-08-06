@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Card, CardContent, Badge, Button, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { Account, AccountTag, AccountGroup } from '@/types/account'
 import {
   Check,
@@ -338,6 +339,17 @@ export const AccountCard = memo(function AccountCard({
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null)
   // 订阅成功提示
   const [subscriptionSuccess, setSubscriptionSuccess] = useState<string | null>(null)
+
+  // 关闭订阅弹窗：连带清空本次会话的选择态与提示，下次打开是干净的
+  const closeSubscriptionDialog = (): void => {
+    setShowSubscriptionDialog(false)
+    setIsFirstTimeUser(false)
+    setSubscriptionError(null)
+    setSubscriptionSuccess(null)
+  }
+
+  useEscapeClose(showBanDialog && isUnauthorized, () => setShowBanDialog(false))
+  useEscapeClose(showSubscriptionDialog, closeSubscriptionDialog)
 
   // 点击订阅标签打开订阅管理
   const handleSubscriptionClick = async (e: React.MouseEvent): Promise<void> => {
@@ -1109,15 +1121,7 @@ export const AccountCard = memo(function AccountCard({
       {showSubscriptionDialog &&
         createPortal(
           <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div
-              className="absolute inset-0 bg-black/50"
-              onClick={() => {
-                setShowSubscriptionDialog(false)
-                setIsFirstTimeUser(false)
-                setSubscriptionError(null)
-                setSubscriptionSuccess(null)
-              }}
-            />
+            <div className="absolute inset-0 bg-black/50" onClick={closeSubscriptionDialog} />
             <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl m-4 animate-in fade-in zoom-in-95 duration-200 border overflow-hidden">
               <div className="p-4 border-b flex items-center justify-between bg-gradient-to-r from-primary/10 to-[var(--gradient-to)]/10">
                 <div className="flex items-center gap-2 text-primary">
@@ -1136,12 +1140,7 @@ export const AccountCard = memo(function AccountCard({
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 rounded-lg hover:bg-red-500 hover:text-white transition-colors"
-                  onClick={() => {
-                    setShowSubscriptionDialog(false)
-                    setIsFirstTimeUser(false)
-                    setSubscriptionError(null)
-                    setSubscriptionSuccess(null)
-                  }}
+                  onClick={closeSubscriptionDialog}
                 >
                   <X className="h-4 w-4" />
                 </Button>
@@ -1275,16 +1274,7 @@ export const AccountCard = memo(function AccountCard({
                       </>
                     )}
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setShowSubscriptionDialog(false)
-                      setIsFirstTimeUser(false)
-                      setSubscriptionError(null)
-                      setSubscriptionSuccess(null)
-                    }}
-                  >
+                  <Button size="sm" variant="ghost" onClick={closeSubscriptionDialog}>
                     {isEn ? 'Close' : '关闭'}
                   </Button>
                 </div>

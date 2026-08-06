@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { AccountGroup } from '@/types/account'
 import { X, Plus, Edit2, Trash2, Users, Check, FolderOpen } from 'lucide-react'
 
@@ -30,6 +31,8 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
 
   // 分配账号状态
   const [assigningGroupId, setAssigningGroupId] = useState<string | null>(null)
+
+  useEscapeClose(isOpen, onClose)
 
   // 获取分组内的账号数量
   const getGroupAccountCount = (groupId: string): number => {

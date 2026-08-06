@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { SubscriptionType } from '@/types/account'
 import { X, Loader2, Copy, Check, ExternalLink, Info } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
@@ -171,6 +172,8 @@ export function AddAccountDialog({
       }
     }
   }, [])
+
+  useEscapeClose(isOpen, onClose)
 
   // 打开弹窗时默认选中"当前打开的分组"（activeGroupTab 为真实分组时），否则未分组
   useEffect(() => {

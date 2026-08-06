@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { AccountTag } from '@/types/account'
 import { X, Plus, Edit2, Trash2, Tag, Check, Palette } from 'lucide-react'
 
@@ -76,6 +77,8 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
 
   // 分配账号状态
   const [assigningTagId, setAssigningTagId] = useState<string | null>(null)
+
+  useEscapeClose(isOpen, onClose)
 
   // 获取标签的账号数量
   const getTagAccountCount = (tagId: string): number => {

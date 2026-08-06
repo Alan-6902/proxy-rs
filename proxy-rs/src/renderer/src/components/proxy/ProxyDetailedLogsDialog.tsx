@@ -14,6 +14,7 @@ import {
   Filter
 } from 'lucide-react'
 import { useTranslation } from '../../hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import { useVirtualizer } from '@tanstack/react-virtual'
 
 interface LogEntry {
@@ -125,6 +126,8 @@ export function ProxyDetailedLogsDialog({ open, onOpenChange }: ProxyDetailedLog
   const [newLogCount, setNewLogCount] = useState(0)
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(new Set())
   const prevLogCount = useRef(0)
+
+  useEscapeClose(open, () => onOpenChange(false))
   const [timeRange, setTimeRange] = useState<string>(() => {
     return localStorage.getItem('proxyLogs_timeRange') || 'all'
   })

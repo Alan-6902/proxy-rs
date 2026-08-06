@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { AlertTriangle, Trash2, Info } from 'lucide-react'
 import { Button } from './button'
 import { registerConfirmHost, type ConfirmTone, type PendingConfirm } from './confirmDialogStore'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 /**
  * 应用内确认对话框宿主，替代原生 `window.confirm`。
@@ -64,14 +65,12 @@ export function ConfirmDialogHost(): React.ReactNode {
     })
   }, [])
 
+  // Esc 关闭走公共栈：确认框叠在其它弹窗之上时，只关自己这一层
+  useEscapeClose(!!pending, () => settle(false))
+
   useEffect(() => {
     if (!pending) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        settle(false)
-        return
-      }
       // 焦点陷阱：Tab 只在取消/确认两个按钮间循环，不会退到对话框背后的页面
       if (event.key === 'Tab') {
         const focusable = [cancelButtonRef.current, confirmButtonRef.current].filter(

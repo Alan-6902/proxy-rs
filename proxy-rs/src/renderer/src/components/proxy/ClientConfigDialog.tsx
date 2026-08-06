@@ -17,6 +17,7 @@ import {
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Select } from '../ui'
 import { useAccountsStore } from '../../store/accounts'
 import { cn } from '@/lib/utils'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 type ClientTarget = 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
 
@@ -78,6 +79,8 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [results, setResults] = useState<ConfigureResult[]>([])
+
+  useEscapeClose(open, () => onOpenChange(false))
   const [proxyBase, setProxyBase] = useState('')
 
   const clientOptions: ClientOption[] = useMemo(

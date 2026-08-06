@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 import {
   Activity,
   X,
@@ -109,6 +110,8 @@ function TaskCenterDrawer({ open, onClose }: TaskCenterDrawerProps): React.React
   const cancelTask = useTaskStore((s) => s.cancelTask)
   const removeTask = useTaskStore((s) => s.removeTask)
   const clearFinished = useTaskStore((s) => s.clearFinished)
+
+  useEscapeClose(open, onClose)
 
   // 取消所有正在进行的任务
   const cancelAllActive = async (): Promise<void> => {

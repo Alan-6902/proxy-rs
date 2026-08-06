@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
 import { cn } from '@/lib/utils'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface ModelInfo {
   id: string
@@ -61,6 +62,8 @@ export function ModelsDialog({
     localStorage.setItem('models_dialog_ip_tip_dismissed', '1')
     setShowIpTip(false)
   }
+
+  useEscapeClose(open, () => onOpenChange(false))
 
   const fetchModels = async () => {
     setLoading(true)

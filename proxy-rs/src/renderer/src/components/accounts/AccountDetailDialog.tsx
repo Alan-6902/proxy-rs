@@ -21,6 +21,7 @@ import type { Account } from '@/types/account'
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface ModelInfo {
   id: string
@@ -114,6 +115,8 @@ export function AccountDetailDialog({
     useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+
+  useEscapeClose(open && !!account, () => onOpenChange(false))
 
   // 获取账户可用模型
   useEffect(() => {

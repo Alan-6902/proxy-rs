@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { X, BarChart3, Clock, Cpu, Coins, TrendingUp } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
 import { useTranslation } from '../../hooks/useTranslation'
+import { useEscapeClose } from '@/hooks/useEscapeClose'
 
 interface UsageRecord {
   timestamp: number
@@ -48,6 +49,8 @@ export function ApiKeyUsageDialog({ open, onOpenChange, apiKey }: ApiKeyUsageDia
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const [activeTab, setActiveTab] = useState<'history' | 'model' | 'daily'>('history')
+
+  useEscapeClose(open && !!apiKey, () => onOpenChange(false))
 
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp)

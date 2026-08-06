@@ -583,9 +583,9 @@ export function AccountToolbar({
           {/* 批量刷新 — 唯一的刷新入口：Token + 账号信息一起刷。
               未选中账号时作用于当前分组筛选出的全部账号。 */}
           <Button
-            variant="outline"
-            size="sm"
-            className="h-8"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 relative"
             onClick={handleBatchRefreshAll}
             disabled={isBatchRefreshing || refreshTargetIds.length === 0}
             title={
@@ -599,22 +599,20 @@ export function AccountToolbar({
             }
           >
             {isBatchRefreshing ? (
-              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
-              <RefreshCw className="h-4 w-4 mr-1" />
+              <RefreshCw className="h-4 w-4" />
             )}
-            {isEn ? 'Refresh' : '批量刷新'}
-            {refreshTargetIds.length > 0 && (
-              <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-2xs tabular-nums">
-                {refreshTargetIds.length}
-              </Badge>
+            {/* 选中时右上角小红点，与标签 / 代理按钮一致：提示本次操作只作用于选中账号 */}
+            {selectedCount > 0 && (
+              <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary" />
             )}
           </Button>
 
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 text-emerald-600 hover:text-emerald-600 hover:bg-emerald-500/10"
+            className="h-8 w-8 relative text-emerald-600 hover:text-emerald-600 hover:bg-emerald-500/10"
             onClick={onToggleLiveness}
             disabled={livenessTargetIds.length === 0}
             title={
@@ -628,6 +626,9 @@ export function AccountToolbar({
             }
           >
             <Zap className="h-4 w-4" />
+            {selectedCount > 0 && (
+              <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary" />
+            )}
           </Button>
           <Button
             variant="ghost"

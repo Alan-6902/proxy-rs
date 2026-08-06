@@ -575,8 +575,8 @@ function AccountListRowComponent({
         </div>
       </div>
 
-      {/* === 操作区（hover 显示） === */}
-      <div className="flex-shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 border-l border-border/40 pl-2 ml-1">
+      {/* === 操作区（常驻显示） === */}
+      <div className="flex-shrink-0 flex items-center gap-0.5 border-l border-border/40 pl-2 ml-1">
         {isUnauthorized && (
           <>
             <Button

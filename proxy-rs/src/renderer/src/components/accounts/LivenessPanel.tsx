@@ -139,12 +139,12 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
         <div className="ml-auto flex items-center gap-1.5">
           {stats.total > 0 && (
             <>
-              <Badge variant="outline" className="h-5 text-2xs text-green-600 border-green-200">
+              <Badge variant="outline" className="h-6 text-2xs text-green-600 border-green-200">
                 <CheckCircle2 className="h-3 w-3 mr-1" />
                 {stats.ok}
               </Badge>
               {stats.fail > 0 && (
-                <Badge variant="outline" className="h-5 text-2xs text-red-600 border-red-200">
+                <Badge variant="outline" className="h-6 text-2xs text-red-600 border-red-200">
                   <XCircle className="h-3 w-3 mr-1" />
                   {stats.fail}
                 </Badge>
@@ -173,10 +173,11 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
         </div>
       </div>
 
-      {/* 参数行 */}
+      {/* 参数行 —— 两列的 Label 行套同高容器（h-4），否则模型列的刷新按钮会把
+          Label 行撑高，与测试消息列的裸 Label 基线错位 */}
       <div className="flex flex-wrap items-end gap-2">
         <div className="space-y-1 w-[200px]">
-          <div className="flex items-center justify-between">
+          <div className="flex h-4 items-center justify-between">
             <Label className="text-2xs">{isEn ? 'Model' : '模型'}</Label>
             <button
               type="button"
@@ -207,7 +208,9 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
         </div>
 
         <div className="space-y-1 flex-1 min-w-[200px]">
-          <Label className="text-2xs">{isEn ? 'Test message' : '测试消息'}</Label>
+          <div className="flex h-4 items-center">
+            <Label className="text-2xs">{isEn ? 'Test message' : '测试消息'}</Label>
+          </div>
           <Input
             value={message}
             onChange={(e) => setMessage(e.target.value)}

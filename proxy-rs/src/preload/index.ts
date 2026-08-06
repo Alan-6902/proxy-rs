@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { ProxyEntry } from '../shared/proxyPool'
+import type {
+  BatchOpResult as IdcBatchOpResult,
+  BatchOpTarget as IdcBatchTarget,
+  IdcCredentialConfig,
+  IdcIpcResult,
+  PlannedSeat as IdcPlannedSeat,
+  ProvisionSummary as IdcProvisionSummary,
+  SeatInventory as IdcSeatInventory,
+  SeatProgressEvent as IdcProgressEvent
+} from '../shared/idcSeats'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -985,6 +995,96 @@ const api = {
     ipcRenderer.on('registration-complete', handler)
     return () => {
       ipcRenderer.removeListener('registration-complete', handler)
+    }
+  },
+
+  // ===== AWS Identity Center 席位管理 =====
+
+  /** 查询凭据保存状态（不回传密钥本体，仅回传尾 4 位用于识别） */
+  idcCredentialStatus: (): Promise<IdcIpcResult<{
+    encryptionAvailable: boolean
+    hasSaved: boolean
+    source?: 'manual' | 'profile'
+    region?: string
+    profile?: string
+    accessKeyIdTail?: string
+  }>> => ipcRenderer.invoke('idc-credential-status'),
+
+  /** 保存凭据配置。系统加密不可用时会失败（拒绝明文落盘 AK/SK） */
+  idcSaveCredentials: (config: IdcCredentialConfig): Promise<IdcIpcResult<{ saved: boolean }>> =>
+    ipcRenderer.invoke('idc-save-credentials', config),
+
+  idcClearCredentials: (): Promise<IdcIpcResult<{ cleared: boolean }>> =>
+    ipcRenderer.invoke('idc-clear-credentials'),
+
+  /** 列出本机 ~/.aws 下可用 profile */
+  idcListProfiles: (): Promise<IdcIpcResult<string[]>> => ipcRenderer.invoke('idc-list-profiles'),
+
+  /** 连通性自检：验证签名可用、能读到 Identity Center 实例 */
+  idcTestConnection: (
+    config: IdcCredentialConfig
+  ): Promise<IdcIpcResult<{ identityStoreId: string; region: string; seatCount: number; unsubscribedCount: number }>> =>
+    ipcRenderer.invoke('idc-test-connection', config),
+
+  /** 生成席位预览（不触碰 AWS 写操作） */
+  idcPlanSeats: (input: {
+    credentials: IdcCredentialConfig
+    quotas: { tier: string; count: number }[]
+    domains: string
+    avoidExisting?: boolean
+  }): Promise<IdcIpcResult<{ seats: IdcPlannedSeat[]; maxPerPlan: number }>> =>
+    ipcRenderer.invoke('idc-plan-seats', input),
+
+  /** 执行开通：建号 →（可选）发密码邮件 → 挂档位 */
+  idcProvision: (input: {
+    credentials: IdcCredentialConfig
+    seats: IdcPlannedSeat[]
+    sendPasswordEmail: boolean
+    concurrency?: number
+  }): Promise<IdcIpcResult<IdcProvisionSummary>> => ipcRenderer.invoke('idc-provision', input),
+
+  idcCancelProvision: (): Promise<IdcIpcResult<{ cancelled: boolean }>> =>
+    ipcRenderer.invoke('idc-cancel-provision'),
+
+  /** 拉取现有席位全景 */
+  idcInventory: (config: IdcCredentialConfig): Promise<IdcIpcResult<IdcSeatInventory>> =>
+    ipcRenderer.invoke('idc-inventory', config),
+
+  idcChangeTier: (input: {
+    credentials: IdcCredentialConfig
+    targets: IdcBatchTarget[]
+    tier: string
+    concurrency?: number
+  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-change-tier', input),
+
+  idcUnsubscribe: (input: {
+    credentials: IdcCredentialConfig
+    targets: IdcBatchTarget[]
+    concurrency?: number
+  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-unsubscribe', input),
+
+  /** 删除用户（不可逆）。会先尝试取消订阅再删号 */
+  idcDeleteSeats: (input: {
+    credentials: IdcCredentialConfig
+    targets: IdcBatchTarget[]
+    concurrency?: number
+  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-delete-seats', input),
+
+  /** 重发密码设置邮件（链接 1 小时过期） */
+  idcResendPassword: (input: {
+    credentials: IdcCredentialConfig
+    targets: IdcBatchTarget[]
+    concurrency?: number
+  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-resend-password', input),
+
+  /** 监听席位操作进度 */
+  onIdcProgress: (callback: (event: IdcProgressEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: IdcProgressEvent): void => {
+      callback(data)
+    }
+    ipcRenderer.on('idc-progress', handler)
+    return () => {
+      ipcRenderer.removeListener('idc-progress', handler)
     }
   }
 }

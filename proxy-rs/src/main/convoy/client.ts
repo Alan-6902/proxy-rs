@@ -246,7 +246,9 @@ export class ConvoyCredentialClient {
     if (status === 401) {
       return new ConvoyClientError(
         CONVOY_ERROR.UNAUTHORIZED,
-        `登录 Key 无效或已失效（HTTP 401）${suffix}`,
+        // 上游对「没带 Key」和「Key 不被认可」都回 401，把它的 message 带出来，
+        // 否则用户无法区分是本地没发出去还是服务端拒绝了这把 Key
+        `登录 Key 未通过上游校验（HTTP 401）${suffix || '：上游未给出原因'}`,
         status
       )
     }

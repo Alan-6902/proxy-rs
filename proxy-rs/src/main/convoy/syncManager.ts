@@ -18,6 +18,7 @@ import {
   checkBaseUrlSecurity,
   evaluateBillingGuard,
   maskSecretTail,
+  sanitizeConvoyKey,
   type ConvoySyncConfig,
   type ConvoySyncStatus,
   type ManualConvoyKey,
@@ -150,7 +151,8 @@ export class ConvoySyncManager {
     this.manualKeys = keys
       .map((entry) => ({
         id: entry.id,
-        key: entry.key.trim(),
+        // 与登录 Key 同样清洗：粘贴带入的零宽字符会让上游直接拒绝
+        key: sanitizeConvoyKey(entry.key),
         region: entry.region?.trim().toLowerCase() || undefined
       }))
       .filter((entry) => entry.key.length > 0)

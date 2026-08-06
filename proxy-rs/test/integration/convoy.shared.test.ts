@@ -15,6 +15,7 @@ import {
   maskSecretTail,
   resolveExpiresAt,
   resolveRegionProbeOrder,
+  sanitizeConvoyKey,
   toCents
 } from '../../src/shared/convoyCredentials'
 
@@ -223,6 +224,19 @@ describe('安全门禁', () => {
     expect(maskSecretTail('convoy-key-abcdefgh')).toBe('***efgh')
     expect(maskSecretTail('ab')).toBe('***')
     expect(maskSecretTail('')).toBe('')
+  })
+
+  it('清洗粘贴带入的不可见字符：否则上游会判 Key 无效且极难排查', () => {
+    // 零宽空格 / 零宽连字 / BOM / 不换行空格，肉眼都看不出来
+    expect(sanitizeConvoyKey('\u200Bconvoy-key-1234\u200D')).toBe('convoy-key-1234')
+    expect(sanitizeConvoyKey('\uFEFFconvoy-key-1234')).toBe('convoy-key-1234')
+    expect(sanitizeConvoyKey('convoy\u00A0key\u00A01234')).toBe('convoykey1234')
+    // 包裹引号与常规空白同样剥掉
+    expect(sanitizeConvoyKey('  "convoy-key-1234"  ')).toBe('convoy-key-1234')
+    expect(sanitizeConvoyKey("'convoy-key-1234'\n")).toBe('convoy-key-1234')
+    // 干净的 Key 不受影响
+    expect(sanitizeConvoyKey('convoy-key-1234')).toBe('convoy-key-1234')
+    expect(sanitizeConvoyKey('')).toBe('')
   })
 
   it('URL 拼接容忍两侧多余斜杠', () => {

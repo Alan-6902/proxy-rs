@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import {
   DEFAULT_CONVOY_SYNC_CONFIG,
   MIN_POLL_INTERVAL_SECONDS,
+  sanitizeConvoyKey,
   type ConvoySyncConfig
 } from '../../shared/convoyCredentials'
 
@@ -90,7 +91,8 @@ export async function loadConvoyState(): Promise<PersistedConvoyConfig> {
     const parsed = JSON.parse(safeStorage.decryptString(buffer)) as Partial<PersistedConvoyConfig>
     return {
       config: normalizeConvoyConfig(parsed.config),
-      convoyKey: typeof parsed.convoyKey === 'string' ? parsed.convoyKey : ''
+      // 旧版本可能存进了带零宽字符的 Key，读回来时一并清洗
+      convoyKey: typeof parsed.convoyKey === 'string' ? sanitizeConvoyKey(parsed.convoyKey) : ''
     }
   } catch {
     return fallback
@@ -113,7 +115,7 @@ export async function saveConvoyState(input: {
   const current = await loadConvoyState()
   const next: PersistedConvoyConfig = {
     config: normalizeConvoyConfig({ ...current.config, ...input.config }),
-    convoyKey: input.convoyKey === undefined ? current.convoyKey : input.convoyKey.trim()
+    convoyKey: input.convoyKey === undefined ? current.convoyKey : sanitizeConvoyKey(input.convoyKey)
   }
   const encrypted = safeStorage.encryptString(JSON.stringify(next))
   await fs.writeFile(storePath(), encrypted, { mode: 0o600 })

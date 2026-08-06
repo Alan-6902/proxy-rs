@@ -342,6 +342,20 @@ export function maskSecretTail(value: string, tail = 4): string {
 }
 
 /**
+ * 清洗从聊天记录/网页复制来的 Key。
+ *
+ * trim() 只去掉常规空白，管不了零宽字符（U+200B/200C/200D/FEFF）与不换行空格
+ * （U+00A0）——它们肉眼不可见，但会让上游判定 Key 无效，排查起来极其费时。
+ * 同时去掉包裹的引号和内部空白：粘贴时常带上。
+ */
+export function sanitizeConvoyKey(value: string): string {
+  return value
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
+    .replace(/["'\s]/g, '')
+    .trim()
+}
+
+/**
  * HTTPS 门禁：默认拒绝向 http:// 发送登录 Key。
  * 返回 null 表示通过，否则返回拒绝原因。
  */

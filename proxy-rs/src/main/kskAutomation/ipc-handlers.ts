@@ -18,6 +18,7 @@ import {
   type KskAutomationSecrets,
   type PersistedKskAutomationTask
 } from './configStore'
+import { parseKskEmailRecipients } from './emailNotifier'
 import { resolveLocalAdminApiBase } from './localAdminClient'
 import type { KskAutomationManager } from './syncManager'
 
@@ -88,7 +89,8 @@ async function validateEnabledTask(task: PersistedKskAutomationTask): Promise<vo
     if (providerUrl.protocol !== 'https:') throw new Error('KSK Provider URL 必须使用 HTTPS')
   }
   if (task.config.emailEnabled) {
-    if (!task.config.smtpHost || !task.config.smtpFrom || !task.config.smtpTo) {
+    const hasRecipient = parseKskEmailRecipients(task.config.smtpTo).length > 0
+    if (!task.config.smtpHost || !task.config.smtpFrom || !hasRecipient) {
       throw new Error('开启邮件通知前请填写 SMTP Host、发件人和收件人')
     }
     if (task.config.smtpUsername && !task.secrets.smtpPassword) {

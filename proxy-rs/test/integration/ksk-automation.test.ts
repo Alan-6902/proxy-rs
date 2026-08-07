@@ -700,7 +700,7 @@ describe('KSK 自动拉取调度', () => {
   })
 })
 
-describe('KSK 新增邮件抄送', () => {
+describe('KSK 新增邮件收件人', () => {
   const credentials = [{ key: KSK_ONE, region: 'us-east-1' }]
 
   afterEach(() => {
@@ -722,17 +722,39 @@ describe('KSK 新增邮件抄送', () => {
     }
   }
 
-  it('抄送发件邮箱', async () => {
+  it('只按收件人列表投递，不再隐式抄送发件邮箱', async () => {
     await sendKskAddedEmail(emailConfig(), credentials)
     expect(mailer.sendMail.mock.calls[0][0]).toMatchObject({
-      to: 'owner@example.com',
-      cc: 'Proxy RS <bot@example.com>'
+      from: 'Proxy RS <bot@example.com>',
+      to: ['owner@example.com']
     })
+    expect(mailer.sendMail.mock.calls[0][0].cc).toBeUndefined()
   })
 
-  it('收件人与发件邮箱相同时不抄送，忽略显示名与大小写', async () => {
-    await sendKskAddedEmail(emailConfig({ to: 'BOT@example.com' }), credentials)
-    expect(mailer.sendMail.mock.calls[0][0].cc).toBeUndefined()
+  it('收件邮箱支持逗号分隔多个地址', async () => {
+    await sendKskAddedEmail(
+      emailConfig({ to: 'owner@example.com, Me <bot@example.com>' }),
+      credentials
+    )
+    expect(mailer.sendMail.mock.calls[0][0].to).toEqual([
+      'owner@example.com',
+      'Me <bot@example.com>'
+    ])
+  })
+
+  it('同一地址重复填写只投递一次，忽略显示名与大小写', async () => {
+    await sendKskAddedEmail(
+      emailConfig({ to: 'owner@example.com, Owner <OWNER@example.com>' }),
+      credentials
+    )
+    expect(mailer.sendMail.mock.calls[0][0].to).toEqual(['owner@example.com'])
+  })
+
+  it('收件邮箱只填分隔符时拒绝发送', async () => {
+    await expect(sendKskAddedEmail(emailConfig({ to: ' , ' }), credentials)).rejects.toThrow(
+      '收件人'
+    )
+    expect(mailer.sendMail).not.toHaveBeenCalled()
   })
 
   it('没有新增时不发信', async () => {

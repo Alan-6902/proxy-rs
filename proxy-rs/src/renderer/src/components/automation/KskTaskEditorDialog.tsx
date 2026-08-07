@@ -277,10 +277,13 @@ export function KskTaskEditorDialog({
                 <div className="sm:col-span-2">
                   <Label>指定收件邮箱</Label>
                   <Input
-                    type="email"
                     value={config.smtpTo}
                     onChange={(event) => setConfig({ ...config, smtpTo: event.target.value })}
+                    placeholder="owner@example.com, me@example.com"
                   />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    多个收件人用英文逗号分隔；想自己也留一份就把发件邮箱一起写进来。
+                  </p>
                 </div>
               </div>
             )}

@@ -15,10 +15,25 @@ export interface KskEmailConfig {
   to: string
 }
 
-/** 从 `Name <addr@host>` 或裸地址中取出邮箱地址，用于比较收发是否同一邮箱。 */
+/** 从 `Name <addr@host>` 或裸地址中取出邮箱地址，用于判断是否同一邮箱。 */
 function extractAddress(value: string): string {
   const match = /<([^>]+)>/.exec(value)
   return (match ? match[1] : value).trim().toLowerCase()
+}
+
+/** 收件邮箱支持逗号分隔多个地址；同一地址只保留一次，避免同一信箱收到多份。 */
+export function parseKskEmailRecipients(value: string): string[] {
+  const seen = new Set<string>()
+  const recipients: string[] = []
+  for (const entry of value.split(',')) {
+    const recipient = entry.trim()
+    if (!recipient) continue
+    const address = extractAddress(recipient)
+    if (seen.has(address)) continue
+    seen.add(address)
+    recipients.push(recipient)
+  }
+  return recipients
 }
 
 export async function sendKskAddedEmail(
@@ -26,7 +41,8 @@ export async function sendKskAddedEmail(
   credentials: KskEmailCredential[]
 ): Promise<number> {
   if (credentials.length === 0) return 0
-  if (!config.host.trim() || !config.from.trim() || !config.to.trim()) {
+  const recipients = parseKskEmailRecipients(config.to)
+  if (!config.host.trim() || !config.from.trim() || recipients.length === 0) {
     throw new Error('邮件通知缺少 SMTP Host、发件人或收件人')
   }
   if (config.username.trim() && !config.password) throw new Error('SMTP 用户名已配置但密码为空')
@@ -45,13 +61,9 @@ export async function sendKskAddedEmail(
     socketTimeout: 30_000
   })
   try {
-    const from = config.from.trim()
-    const to = config.to.trim()
     await transporter.sendMail({
-      from,
-      to,
-      // 抄送发件邮箱留档；收件人本就是发件邮箱时不重复投递
-      cc: extractAddress(to) === extractAddress(from) ? undefined : from,
+      from: config.from.trim(),
+      to: recipients,
       subject: 'Proxy RS 新增 KSK',
       text: credentials.map((credential) => `${credential.key} (${credential.region})`).join('\n')
     })

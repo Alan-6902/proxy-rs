@@ -28,6 +28,14 @@ export function formatPercentage(value: number): string {
   return `${(value * 100).toFixed(1)}%`
 }
 
+/** 大数字压成 K/M/B，用于 KPI 卡与列表里宽度受限的用量列。 */
+export function compactNumber(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 100_000) return `${(n / 1_000).toFixed(0)}K`
+  return n.toLocaleString()
+}
+
 export function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
   const codeVerifier = generateRandomString(64)
   const codeChallenge = base64UrlEncode(sha256(codeVerifier))

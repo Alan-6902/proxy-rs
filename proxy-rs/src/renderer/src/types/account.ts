@@ -34,7 +34,7 @@ export interface AccountCredentials {
   profileArn?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
-  /** 该凭据首选的 Kiro 上游端点；为空时使用反代全局配置。 */
+  /** 该凭据首选的 Kiro 上游端点；为空时使用内置默认顺序。 */
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
   /** 首选端点不可用时的账号级回退顺序。 */
   endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
@@ -42,55 +42,10 @@ export interface AccountCredentials {
   endpointFallbackAfterFailures?: number
 }
 
-/**
- * 参与反代轮询的账号集合签名。
- * 入池资格只看 status + 上游凭据：`Account.isActive` 表示「当前使用的账号」（单选互斥），
- * 不是启用开关，拿它过滤会导致除当前账号外全部不入池。
- *
- * proxyEnabled 进签名但**不进 filter**：被禁用的账号仍要入池（在池里标为不可用，
- * 这样反代页能看到它、开关也还能点回来），所以切换开关必须让签名变化以触发重同步。
- */
-export function buildAccountsSyncSignature<
-  T extends {
-    id: string
-    groupId?: string
-    status: string
-    proxyEnabled?: boolean
-    credentials?: {
-      accessToken?: string
-      kiroApiKey?: string
-      preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-      endpointFallbackAfterFailures?: number
-    }
-  }
->(accounts: Iterable<T>): string {
-  return Array.from(accounts)
-    .filter((a) => a.status === 'active' && hasUpstreamKiroCredential(a.credentials))
-    .map((a) => {
-      const keyFingerprint = a.credentials?.kiroApiKey
-        ? Array.from(a.credentials.kiroApiKey)
-            .reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 0)
-            .toString(16)
-        : ''
-      return `${a.id}:${a.groupId || ''}:${isProxyRotationEnabled(a) ? 1 : 0}:${keyFingerprint}:${a.credentials?.preferredEndpoint || ''}:${a.credentials?.endpointFallbackAfterFailures || ''}`
-    })
-    .sort()
-    .join('|')
-}
-
 export function hasUpstreamKiroCredential(
   credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
 ): boolean {
   return Boolean(credentials?.accessToken || credentials?.kiroApiKey)
-}
-
-/**
- * 账号是否参与反代轮询。缺省视为参与 —— 老数据没有 proxyEnabled 字段，
- * 用 `=== true` 判定会让所有历史账号一夜之间全被禁用。
- * 这个默认值只在这里定义一次，主进程侧的同名逻辑必须与它保持一致。
- */
-export function isProxyRotationEnabled(account?: { proxyEnabled?: boolean }): boolean {
-  return account?.proxyEnabled !== false
 }
 
 export function canRefreshUpstreamCredential(
@@ -213,16 +168,57 @@ export interface Account {
   status: AccountStatus
   lastError?: string
   isActive: boolean // 是否为当前激活账号
-  /**
-   * 是否参与 API 反代轮询。缺省（undefined）视为参与 —— 老数据没有这个字段，
-   * 不能把它们当成已禁用。这与 isActive 无关：isActive 是「当前使用的账号」单选标记。
-   */
-  proxyEnabled?: boolean
 
   // 时间戳
   createdAt: number
   lastUsedAt: number
   lastCheckedAt?: number // 上次状态检查时间
+}
+
+export function buildAccountLivenessRequestAccount(
+  account: Account,
+  proxyUrl?: string
+): {
+  id: string
+  email: string
+  accessToken?: string
+  refreshToken?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authMethod?: 'IdC' | 'social'
+  provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'
+  profileArn?: string
+  expiresAt?: number
+  credentialRevision?: string
+  proxyUrl?: string
+  credentialKind?: 'oauth' | 'kiro_api_key'
+  kiroApiKey?: string
+  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
+  endpointFallbackAfterFailures?: number
+} {
+  const credentials = account.credentials
+  return {
+    id: account.id,
+    email: account.email,
+    accessToken: credentials.accessToken,
+    refreshToken: credentials.refreshToken,
+    clientId: credentials.clientId,
+    clientSecret: credentials.clientSecret,
+    region: credentials.region,
+    authMethod: credentials.authMethod,
+    provider: credentials.provider,
+    profileArn: account.profileArn,
+    expiresAt: credentials.expiresAt,
+    credentialRevision: credentials.credentialRevision,
+    proxyUrl,
+    credentialKind: credentials.credentialKind,
+    kiroApiKey: credentials.kiroApiKey,
+    preferredEndpoint: credentials.preferredEndpoint,
+    endpointFallbackOrder: credentials.endpointFallbackOrder,
+    endpointFallbackAfterFailures: credentials.endpointFallbackAfterFailures
+  }
 }
 
 /**
@@ -327,7 +323,7 @@ export interface AccountStats {
 }
 
 /**
- * 账号验活结果：走反代底层调用给指定模型发一条真实消息的返回。
+ * 账号验活结果：给指定模型发一条真实消息的返回。
  * 与 window.api.diagnoseAccountLiveness 的返回结构一致，供账号管理页与诊断页共用。
  */
 export interface AccountLivenessResult {

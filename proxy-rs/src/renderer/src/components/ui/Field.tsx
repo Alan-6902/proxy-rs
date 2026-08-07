@@ -6,7 +6,7 @@ import { switchKnobClass, switchTrackClass } from '@/lib/switchStyles'
 /**
  * 配置字段：小标签 + 控件（+ 标签右侧的辅助操作区）。
  *
- * 反代面板里 10 处「Label(text-xs) + space-y-1.5 + 控件」的重复外壳收敛到这里，
+ * 多处「Label(text-xs) + space-y-1.5 + 控件」的重复外壳收敛到这里，
  * 顺带统一 hint（title tooltip）与 label 右侧工具区的排布。
  */
 interface FieldProps {

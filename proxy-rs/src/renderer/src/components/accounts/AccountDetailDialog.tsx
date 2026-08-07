@@ -717,7 +717,7 @@ function ProxyBindingSection({
   return (
     <div className="space-y-1 mt-3">
       <label className="text-xs font-medium text-muted-foreground">
-        {isEn ? 'Bound Proxy (Reverse Proxy)' : '反代绑定代理'}
+        {isEn ? 'Bound Proxy' : '绑定代理'}
       </label>
       {boundProxy ? (
         <div className="flex items-center gap-2 bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 rounded-lg">

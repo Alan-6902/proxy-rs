@@ -1,6 +1,6 @@
 /**
  * useLivenessModels hook
- * 验活可用模型列表：优先代理缓存模型，回退 Kiro 可用模型，结果持久化到 localStorage
+ * 验活可用模型列表：拉取 Kiro 可用模型，结果持久化到 localStorage
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -65,18 +65,10 @@ export function useLivenessModels(): UseLivenessModels {
     try {
       let models: string[] = []
       try {
-        const r = await window.api.proxyGetModels()
-        if (r.success && r.models?.length) models = r.models.map((m) => m.id)
+        const r = await window.api.getKiroAvailableModels()
+        if (r.models?.length) models = r.models.map((m) => m.id)
       } catch {
-        /* 代理未启动则忽略，走下面回退 */
-      }
-      if (models.length === 0) {
-        try {
-          const r = await window.api.getKiroAvailableModels()
-          if (r.models?.length) models = r.models.map((m) => m.id)
-        } catch {
-          /* 无 active 账号则忽略 */
-        }
+        /* 无 active 账号则忽略，保留上次缓存 */
       }
       // 拉取失败时保留上次缓存，离线也能用
       if (models.length > 0) {

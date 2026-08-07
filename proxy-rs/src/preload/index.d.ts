@@ -11,11 +11,10 @@ import type {
   SeatProgressEvent as IdcProgressEvent
 } from '../shared/idcSeats'
 import type {
-  ConvoySyncConfig,
-  ConvoySyncStatus,
-  ManualConvoyKey,
-  ManualConvoyKeyResult
-} from '../shared/convoyCredentials'
+  KskAutomationStatusEvent,
+  KskAutomationTaskInput,
+  KskAutomationTaskView
+} from '../shared/kskAutomation'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -60,7 +59,7 @@ interface RefreshResult {
   error?: { message: string }
 }
 
-/** Kiro IDE 自己 refresh 完写回 token 文件、被反代检测到后通知 renderer 的 payload */
+/** Kiro IDE 自己 refresh 完写回 token 文件、被检测到后通知 renderer 的 payload */
 interface BonusData {
   code: string
   name: string
@@ -136,6 +135,7 @@ type UpstreamKiroCredentialInput =
 interface KiroApi {
   openExternal: (url: string) => void
   openIncognitoBrowser: (url: string) => void
+  closeIncognitoBrowser: () => void
   getAppVersion: () => Promise<string>
   onAuthCallback: (callback: (data: { code: string; state: string }) => void) => () => void
 
@@ -424,198 +424,26 @@ interface KiroApi {
     error?: string
   }>
 
-  // ============ Kiro API 反代服务器 ============
+  // ============ 应用日志 ============
 
-  // 启动反代服务器
-  proxyStart: (config?: {
-    port?: number
-    host?: string
-    apiKey?: string
-    enableMultiAccount?: boolean
-    logRequests?: boolean
-    clientDrivenToolExecution?: boolean
-    disableTools?: boolean
-    modelThinkingMode?: Record<string, boolean>
-    thinkingOutputFormat?: 'auto' | 'reasoning_content' | 'thinking' | 'think'
-  }) => Promise<{ success: boolean; port?: number; error?: string }>
-
-  // 停止反代服务器
-  proxyStop: () => Promise<{ success: boolean; error?: string }>
-
-  // 获取反代服务器状态
-  proxyGetStatus: () => Promise<{
-    running: boolean
-    config: unknown
-    stats: unknown
-    sessionStats?: {
-      totalRequests: number
-      successRequests: number
-      failedRequests: number
-      startTime: number
-    }
-  }>
-
-  // 重置累计 credits
-  proxyResetCredits: () => Promise<{ success: boolean }>
-
-  // 重置累计 tokens
-  proxyResetTokens: () => Promise<{ success: boolean }>
-
-  // 重置请求统计
-  proxyResetRequestStats: () => Promise<{ success: boolean }>
-
-  // 获取反代详细日志
-  proxyGetLogs: (
+  // 获取应用运行日志
+  appLogsGet: (
     count?: number
   ) => Promise<
     Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
   >
 
-  // 清除反代详细日志
-  proxyClearLogs: () => Promise<{ success: boolean }>
+  // 清除应用运行日志
+  appLogsClear: () => Promise<{ success: boolean }>
 
-  // 获取反代日志数量
-  proxyGetLogsCount: () => Promise<number>
+  // 获取应用运行日志数量
+  appLogsCount: () => Promise<number>
 
-  // 更新反代服务器配置
-  proxyUpdateConfig: (
-    config: Record<string, unknown>
-  ) => Promise<{ success: boolean; config?: unknown; error?: string }>
-  proxyAdminKeyStatus: () => Promise<{ configured: boolean; success?: boolean; error?: string }>
-  proxyAdminKeyRotate: () => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
-  proxyAdminKeySet: (
-    adminApiKey: string
-  ) => Promise<{ success: boolean; adminApiKey?: string; error?: string }>
-  proxyAdminKeyClear: () => Promise<{ success: boolean; error?: string }>
-
-  // ============ v1.8 反代安全 / 可观测 IPC ============
-  proxySelfSignedCertInfo: () => Promise<{
-    success: boolean
-    cert?: string
-    key?: string
-    fingerprint?: string
-    notBefore?: number
-    notAfter?: number
-    subject?: string
-    altNames?: string[]
-    error?: string
-  }>
-  proxySelfSignedCertRegenerate: () => Promise<{
-    success: boolean
-    cert?: string
-    key?: string
-    fingerprint?: string
-    notBefore?: number
-    notAfter?: number
-    subject?: string
-    altNames?: string[]
-    error?: string
-  }>
-  proxyNeedsRestart: () => Promise<{ needsRestart: boolean }>
-  proxyRestart: () => Promise<{ success: boolean; error?: string }>
-  proxyAuditLog: () => Promise<{
-    entries: Array<{ ts: number; type: string; data: Record<string, unknown> }>
-  }>
   notifyLocal: (
     kind: 'registration-risk-paused' | 'registration-batch-completed',
     input?: { batchId?: string }
   ) => Promise<void>
-  onLocalNotificationNavigate: (
-    callback: (page: 'accounts' | 'proxy' | 'register') => void
-  ) => () => void
-
-  // 添加账号到反代池
-  proxyAddAccount: (
-    account: {
-      id: string
-      email?: string
-      refreshToken?: string
-      profileArn?: string
-      expiresAt?: number
-      clientId?: string
-      clientSecret?: string
-      region?: string
-      authMethod?: string
-      provider?: string
-    } & UpstreamKiroCredentialInput
-  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
-
-  // 从反代池移除账号
-  proxyRemoveAccount: (
-    accountId: string
-  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
-
-  // 同步账号到反代池（批量更新）
-  proxySyncAccounts: (
-    accounts: Array<
-      {
-        id: string
-        email?: string
-        refreshToken?: string
-        profileArn?: string
-        expiresAt?: number
-        clientId?: string
-        clientSecret?: string
-        region?: string
-        authMethod?: string
-        provider?: string
-      } & UpstreamKiroCredentialInput
-    >
-  ) => Promise<{ success: boolean; accountCount?: number; error?: string }>
-
-  // 获取反代池账号列表
-  proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>
-
-  // 重置反代池状态
-  proxyResetPool: () => Promise<{ success: boolean; error?: string }>
-
-  // 手动解除账号封禁标记
-  proxyClearAccountSuspended: (accountId: string) => Promise<{ success: boolean; error?: string }>
-
-  // 刷新模型缓存
-  proxyRefreshModels: () => Promise<{ success: boolean; error?: string }>
-
-  // 获取可用模型列表
-  proxyGetModels: () => Promise<{
-    success: boolean
-    error?: string
-    models: Array<{
-      id: string
-      name: string
-      description: string
-      inputTypes?: string[]
-      maxInputTokens?: number | null
-      maxOutputTokens?: number | null
-      rateMultiplier?: number
-      rateUnit?: string
-    }>
-    fromCache?: boolean
-  }>
-
-  proxyConfigureClients: (input: {
-    clients: Array<'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'>
-    modelId: string
-    modelName?: string
-    models?: Array<{
-      id: string
-      name?: string
-      inputTypes?: string[]
-      maxInputTokens?: number | null
-      maxOutputTokens?: number | null
-    }>
-  }) => Promise<{
-    success: boolean
-    error?: string
-    proxyOrigin: string
-    openaiBaseUrl: string
-    results: Array<{
-      client: 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
-      success: boolean
-      paths: string[]
-      backupPaths: string[]
-      error?: string
-    }>
-  }>
+  onLocalNotificationNavigate: (callback: (page: 'accounts' | 'register') => void) => () => void
 
   // 获取账户可用模型列表
   accountGetModels: (
@@ -679,71 +507,6 @@ interface KiroApi {
   // 在新窗口打开订阅链接
   openSubscriptionWindow: (url: string) => Promise<{ success: boolean; error?: string }>
 
-  // 保存代理日志
-  proxySaveLogs: (
-    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
-  ) => Promise<{ success: boolean; error?: string }>
-
-  // 加载代理日志
-  proxyLoadLogs: () => Promise<{
-    success: boolean
-    logs: Array<{ time: string; path: string; status: number; tokens?: number }>
-  }>
-
-  // 监听反代请求事件
-  onProxyRequest: (
-    callback: (info: { path: string; method: string; accountId?: string }) => void
-  ) => () => void
-
-  // 监听反代响应事件
-  onProxyResponse: (
-    callback: (info: {
-      path: string
-      model?: string
-      status: number
-      tokens?: number
-      inputTokens?: number
-      outputTokens?: number
-      cacheReadTokens?: number
-      cacheWriteTokens?: number
-      reasoningTokens?: number
-      credits?: number
-      responseTime?: number
-      error?: string
-    }) => void
-  ) => () => void
-
-  // 监听反代错误事件
-  onProxyError: (callback: (error: string) => void) => () => void
-
-  // 监听反代状态变化事件
-  onProxyStatusChange: (
-    callback: (status: { running: boolean; port: number }) => void
-  ) => () => void
-
-  // 监听反代账号被封禁事件（TEMPORARILY_SUSPENDED / AccountSuspendedException）
-  onProxyAccountSuspended: (
-    callback: (info: {
-      id: string
-      email?: string
-      reason: string
-      message: string
-      suspendedAt: number
-    }) => void
-  ) => () => void
-
-  // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
-  onProxyAccountUpdate: (
-    callback: (info: {
-      id: string
-      accessToken?: string
-      refreshToken?: string
-      expiresAt?: number
-      credentialRevision?: string
-      profileArn?: string
-    }) => void
-  ) => () => void
-
   // ============ Usage API 类型设置 ============
 
   // 获取 Usage API 类型
@@ -751,96 +514,6 @@ interface KiroApi {
 
   // 设置 Usage API 类型
   setUsageApiType: (type: 'rest' | 'cbor') => Promise<{ success: boolean; type: string }>
-
-  // ============ API Key 管理 ============
-
-  // 获取所有 API Keys
-  proxyGetApiKeys: () => Promise<{
-    success: boolean
-    apiKeys: Array<{
-      id: string
-      name: string
-      key: string
-      enabled: boolean
-      createdAt: number
-      lastUsedAt?: number
-      usage: {
-        totalRequests: number
-        totalCredits: number
-        totalInputTokens: number
-        totalOutputTokens: number
-        daily: Record<
-          string,
-          { requests: number; credits: number; inputTokens: number; outputTokens: number }
-        >
-      }
-    }>
-    error?: string
-  }>
-
-  // 添加 API Key
-  proxyAddApiKey: (apiKey: {
-    name: string
-    key?: string
-    format?: 'sk' | 'simple' | 'token'
-    creditsLimit?: number
-  }) => Promise<{
-    success: boolean
-    apiKey?: {
-      id: string
-      name: string
-      key: string
-      format?: 'sk' | 'simple' | 'token'
-      enabled: boolean
-      createdAt: number
-      creditsLimit?: number
-      usage: {
-        totalRequests: number
-        totalCredits: number
-        totalInputTokens: number
-        totalOutputTokens: number
-        daily: Record<
-          string,
-          { requests: number; credits: number; inputTokens: number; outputTokens: number }
-        >
-      }
-    }
-    error?: string
-  }>
-
-  // 更新 API Key
-  proxyUpdateApiKey: (
-    id: string,
-    updates: { name?: string; key?: string; enabled?: boolean; creditsLimit?: number | null }
-  ) => Promise<{
-    success: boolean
-    apiKey?: {
-      id: string
-      name: string
-      key: string
-      format?: 'sk' | 'simple' | 'token'
-      enabled: boolean
-      createdAt: number
-      creditsLimit?: number
-      usage: {
-        totalRequests: number
-        totalCredits: number
-        totalInputTokens: number
-        totalOutputTokens: number
-        daily: Record<
-          string,
-          { requests: number; credits: number; inputTokens: number; outputTokens: number }
-        >
-      }
-    }
-    error?: string
-  }>
-
-  // 删除 API Key
-  proxyDeleteApiKey: (id: string) => Promise<{ success: boolean; error?: string }>
-
-  // 重置 API Key 用量统计
-  proxyResetApiKeyUsage: (id: string) => Promise<{ success: boolean; error?: string }>
 
   // ============ 自定义 titlebar API ============
   window: {
@@ -1025,19 +698,6 @@ interface KiroApi {
     error?: string
   }>
 
-  // 账号-代理绑定（反代分桶）
-  accountSetProxyBinding: (
-    accountId: string,
-    proxyUrl: string | undefined
-  ) => Promise<{ success: boolean }>
-  accountSetEndpointConfig: (
-    accountId: string,
-    config: {
-      preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-      endpointFallbackAfterFailures?: number
-    }
-  ) => Promise<{ success: boolean }>
-
   // 一键诊断
   diagnoseRun: (params: {
     proxyUrl?: string
@@ -1060,7 +720,7 @@ interface KiroApi {
     }>
   }>
 
-  // 账号测活：指定账号 + 模型走反代逻辑发测试消息
+  // 账号测活：给指定账号 + 模型发测试消息
   diagnoseAccountLiveness: (params: {
     account: {
       id?: string
@@ -1076,6 +736,11 @@ interface KiroApi {
       expiresAt?: number
       credentialRevision?: string
       proxyUrl?: string
+      credentialKind?: 'oauth' | 'kiro_api_key'
+      kiroApiKey?: string
+      preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+      endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
+      endpointFallbackAfterFailures?: number
     }
     model?: string
     message?: string
@@ -1229,33 +894,25 @@ interface KiroApi {
   /** 监听席位操作进度 */
   onIdcProgress: (callback: (event: IdcProgressEvent) => void) => () => void
 
-  // ============ 自动车凭证同步 ============
-
-  /** 读取同步状态（含脱敏快照与当前配置） */
-  convoyStatus: () => Promise<
-    IdcIpcResult<ConvoySyncStatus & { encryptionAvailable: boolean; config: ConvoySyncConfig }>
-  >
-
-  /** 保存配置与登录 Key。convoyKey 省略表示保留原值，空串表示清除 */
-  convoySaveConfig: (input: {
-    config: Partial<ConvoySyncConfig>
-    convoyKey?: string
-  }) => Promise<IdcIpcResult<{ config: ConvoySyncConfig; hasConvoyKey: boolean }>>
-
-  /** 清除配置与登录 Key */
-  convoyClearConfig: () => Promise<IdcIpcResult<{ cleared: boolean }>>
-
-  /** 立即触发一轮同步。注意可能产生真实计费 */
-  convoySyncNow: () => Promise<IdcIpcResult<{ synced: boolean }>>
-
-  /** 覆盖手填上游 Key 列表，主进程逐条探测区域后注入反代池 */
-  convoySetManualKeys: (keys: ManualConvoyKey[]) => Promise<IdcIpcResult<ManualConvoyKeyResult[]>>
-
-  /** 清空手填上游 Key */
-  convoyClearManualKeys: () => Promise<IdcIpcResult<{ cleared: boolean }>>
-
-  /** 监听同步状态变化 */
-  onConvoyStatus: (callback: (status: ConvoySyncStatus) => void) => () => void
+  kskAutomationList: () => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationCreate: (
+    input: KskAutomationTaskInput
+  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationUpdate: (
+    taskId: string,
+    input: KskAutomationTaskInput
+  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationSetEnabled: (
+    taskId: string,
+    enabled: boolean
+  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationDelete: (taskId: string) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationSyncNow: (taskId: string) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
+  kskAutomationSyncLocalAdminNow: (
+    taskId: string
+  ) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
+  onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void) => () => void
+  onKskAutomationAccountsChanged: (callback: () => void) => () => void
 }
 
 declare global {

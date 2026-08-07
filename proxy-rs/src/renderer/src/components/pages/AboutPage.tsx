@@ -54,12 +54,6 @@ const FEATURES: { titleEn: string; titleZh: string; descEn: string; descZh: stri
     descZh: '支持 SSO Token 和 OIDC 凭证批量导入'
   },
   {
-    titleEn: 'API Proxy',
-    titleZh: 'API 反代',
-    descEn: 'OpenAI, Anthropic and Gemini compatible endpoints',
-    descZh: '聚合 OpenAI、Anthropic 与 Gemini 兼容接口'
-  },
-  {
     titleEn: 'Proxy Pool',
     titleZh: '代理池',
     descEn: 'Account-bound outbound proxies with health checks',
@@ -107,8 +101,8 @@ export function AboutPage(): React.ReactNode {
         title={APP_NAME}
         description={
           isEn
-            ? 'Multi-account management and API reverse proxy, entirely on your own machine.'
-            : '多账号管理与 API 反代，全部运行在你自己的机器上。'
+            ? 'Multi-account management for Kiro, entirely on your own machine.'
+            : 'Kiro 多账号管理，全部运行在你自己的机器上。'
         }
         visual={
           <img
@@ -131,8 +125,8 @@ export function AboutPage(): React.ReactNode {
           {/* 首段用略大字号做引言，与后续正文分层 */}
           <p className="max-w-3xl text-base leading-relaxed text-foreground/80">
             {isEn
-              ? `${APP_NAME} is a local multi-account and API proxy tool. It covers account pools, automatic token refresh, group and tag management, registration and subscriptions, plus protocol-compatible endpoints.`
-              : `${APP_NAME} 是一款本地多账号与 API 反代工具，覆盖账号池、Token 自动刷新、分组标签、注册订阅以及多协议兼容接口。`}
+              ? `${APP_NAME} is a local multi-account tool for Kiro. It covers account pools, automatic token refresh, group and tag management, registration and subscriptions.`
+              : `${APP_NAME} 是一款本地 Kiro 多账号工具，覆盖账号池、Token 自动刷新、分组标签、注册订阅。`}
           </p>
           <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
             {isEn

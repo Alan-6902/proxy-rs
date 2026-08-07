@@ -4,7 +4,6 @@ import {
   callKiroMcpWebSearch,
   fetchKiroModels
 } from '../../src/main/proxy/kiroApi'
-import { buildProxyAccounts, type StoredProxyAccount } from '../../src/main/proxy/types'
 
 function eventStreamFrame(eventType: string, payload: unknown): Uint8Array {
   const encoder = new TextEncoder()
@@ -59,6 +58,40 @@ afterEach(async () => {
 })
 
 describe('callKiroApiStream 真实 EventStream 解析', () => {
+  it('欧洲区域 Kiro API key 使用对应区域的推理端点', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        fakeResponse([
+          eventStreamFrame('assistantResponseEvent', { assistantResponseEvent: { content: 'ok' } })
+        ])
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await callKiroApiStream(
+      {
+        id: 'eu-api-key',
+        credentialKind: 'kiro_api_key',
+        kiroApiKey: 'ksk_test_redacted',
+        region: 'eu-central-1'
+      },
+      payload,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      undefined,
+      'amazonq'
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      'https://q.eu-central-1.amazonaws.com/generateAssistantResponse'
+    )
+    const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer ksk_test_redacted')
+    expect(headers.tokentype).toBe('API_KEY')
+  })
+
   it('从二进制 contextUsageEvent 反推准确 inputTokens，并只完成一次', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       fakeResponse([
@@ -262,7 +295,6 @@ describe('callKiroApiStream 真实 EventStream 解析', () => {
     expect(errors).toHaveLength(1)
     expect(errors[0].message).toContain('Auth error 401')
   })
-
 
   it('HTTP 错误向调用方保留上游 reason 和 code', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
@@ -705,55 +737,36 @@ describe('Kiro MCP WebSearch', () => {
 })
 
 describe('Kiro API key account sync signature', () => {
-  it('ignores lastCheckedAt while detecting key rotation without exposing the raw key', async () => {
-    const { buildAccountsSyncSignature } = await import('../../src/renderer/src/types/account')
-    const base = {
-      id: 'key-only-account',
-      groupId: 'group-a',
-      status: 'active',
-      credentials: { credentialKind: 'kiro_api_key' as const, kiroApiKey: 'ksk_first_secret' }
-    }
-    const initial = buildAccountsSyncSignature([base])
-    const checkedLater = buildAccountsSyncSignature([{ ...base, lastCheckedAt: Date.now() }])
-    const rotated = buildAccountsSyncSignature([
+  it('账号测活请求保留 Kiro API key、区域和端点配置', async () => {
+    const { buildAccountLivenessRequestAccount } =
+      await import('../../src/renderer/src/types/account')
+    const requestAccount = buildAccountLivenessRequestAccount(
       {
-        ...base,
-        credentials: { credentialKind: 'kiro_api_key' as const, kiroApiKey: 'ksk_rotated_secret' }
-      }
-    ])
-    const endpointConfigured = buildAccountsSyncSignature([
-      {
-        ...base,
+        id: 'key-liveness',
+        email: 'key@example.test',
+        profileArn: 'arn:aws:codewhisperer:eu-central-1:profile/test',
         credentials: {
-          ...base.credentials,
-          preferredEndpoint: 'amazonq' as const,
+          credentialKind: 'kiro_api_key',
+          kiroApiKey: 'ksk_test_redacted',
+          region: 'eu-central-1',
+          preferredEndpoint: 'amazonq',
+          endpointFallbackOrder: ['codewhisperer'],
           endpointFallbackAfterFailures: 3
         }
-      }
-    ])
+      } as any,
+      'http://127.0.0.1:7890'
+    )
 
-    expect(checkedLater).toBe(initial)
-    expect(rotated).not.toBe(initial)
-    expect(endpointConfigured).not.toBe(initial)
-    expect(initial).not.toContain(base.credentials.kiroApiKey)
-  })
-
-  it('切换 proxyEnabled 会改变签名以触发重同步，缺省与显式 true 等价', async () => {
-    const { buildAccountsSyncSignature } = await import('../../src/renderer/src/types/account')
-    const base = {
-      id: 'acc',
-      status: 'active',
-      credentials: { accessToken: 'oauth-token' }
-    }
-
-    const legacy = buildAccountsSyncSignature([base])
-    const explicitlyEnabled = buildAccountsSyncSignature([{ ...base, proxyEnabled: true }])
-    const disabled = buildAccountsSyncSignature([{ ...base, proxyEnabled: false }])
-
-    // 老数据（无字段）与显式启用必须同签名，否则升级后会白同步一轮
-    expect(explicitlyEnabled).toBe(legacy)
-    // 禁用要改变签名，否则点了开关反代池不会重同步
-    expect(disabled).not.toBe(legacy)
+    expect(requestAccount).toMatchObject({
+      id: 'key-liveness',
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: 'ksk_test_redacted',
+      region: 'eu-central-1',
+      preferredEndpoint: 'amazonq',
+      endpointFallbackOrder: ['codewhisperer'],
+      endpointFallbackAfterFailures: 3,
+      proxyUrl: 'http://127.0.0.1:7890'
+    })
   })
 
   it('accepts key-only and OAuth credentials while rejecting missing credentials', async () => {
@@ -779,84 +792,6 @@ describe('Kiro API key account sync signature', () => {
     ).toBe(false)
     expect(canRefreshUpstreamCredential({})).toBe(false)
     expect(canRefreshUpstreamCredential({ refreshToken: 'refresh-token' })).toBe(true)
-  })
-})
-
-describe('主进程账号池同步', () => {
-  it('保留分组、接纳仅 API key 的账号，且不因 isActive 漏掉非当前账号', () => {
-    const mapped = buildProxyAccounts(
-      [
-        {
-          id: 'not-current',
-          status: 'active',
-          // isActive 是「当前使用的账号」标记（单选互斥），不是启用开关：
-          // 落盘数据里仍带这个字段，非当前账号必须照样入池。
-          isActive: false,
-          groupId: 'group-not-current',
-          credentials: { accessToken: 'not-current-token' }
-        } as StoredProxyAccount & { isActive: boolean },
-        {
-          id: 'expired',
-          status: 'expired',
-          groupId: 'group-expired',
-          credentials: { accessToken: 'expired-token' }
-        },
-        {
-          id: 'oauth-group',
-          status: 'active',
-          groupId: 'group-a',
-          credentials: {
-            accessToken: 'oauth-token',
-            preferredEndpoint: 'amazonq',
-            endpointFallbackOrder: ['codewhisperer'],
-            endpointFallbackAfterFailures: 3
-          }
-        },
-        {
-          id: 'key-only',
-          status: 'active',
-          groupId: 'group-b',
-          credentials: { credentialKind: 'kiro_api_key', kiroApiKey: 'ksk_test_redacted' }
-        }
-      ],
-      (accountId) => (accountId === 'oauth-group' ? 'http://127.0.0.1:7890' : undefined)
-    )
-
-    expect(mapped.map((account) => account.id)).toEqual(['not-current', 'oauth-group', 'key-only'])
-    expect(mapped.find((account) => account.id === 'oauth-group')).toMatchObject({
-      groupId: 'group-a',
-      proxyUrl: 'http://127.0.0.1:7890',
-      preferredEndpoint: 'amazonq',
-      endpointFallbackOrder: ['codewhisperer'],
-      endpointFallbackAfterFailures: 3
-    })
-    expect(mapped.find((account) => account.id === 'key-only')).toMatchObject({
-      credentialKind: 'kiro_api_key',
-      kiroApiKey: 'ksk_test_redacted',
-      groupId: 'group-b'
-    })
-  })
-
-  it('禁用的账号仍然入池（带 proxyEnabled=false），缺省视为参与轮询', () => {
-    const mapped = buildProxyAccounts([
-      {
-        id: 'disabled',
-        status: 'active',
-        proxyEnabled: false,
-        credentials: { accessToken: 'disabled-token' }
-      },
-      {
-        id: 'legacy',
-        status: 'active',
-        credentials: { accessToken: 'legacy-token' }
-      }
-    ])
-
-    // 禁用不影响入池资格：账号要留在池里，UI 才能看到它、开关才点得回来
-    expect(mapped.map((a) => a.id)).toEqual(['disabled', 'legacy'])
-    expect(mapped.find((a) => a.id === 'disabled')?.proxyEnabled).toBe(false)
-    // 老数据没有这个字段，必须回落为 true，否则历史账号会被全部禁用
-    expect(mapped.find((a) => a.id === 'legacy')?.proxyEnabled).toBe(true)
   })
 })
 
@@ -893,31 +828,6 @@ describe('后台刷新凭据计划', () => {
     })
   })
 
-  it('IPC 形状的封禁和无凭据账号不会进入账号池', async () => {
-    const { buildProxyAccounts } = await import('../../src/main/proxy/types')
-    const mapped = buildProxyAccounts([
-      { id: 'suspended', status: 'suspended', accessToken: 'token' },
-      { id: 'missing', status: 'active' },
-      {
-        id: 'key',
-        status: 'active',
-        groupId: 'group-key',
-        credentialKind: 'kiro_api_key',
-        kiroApiKey: 'ksk_test_redacted',
-        accessToken: 'stale-oauth-token'
-      }
-    ])
-
-    expect(mapped).toEqual([
-      expect.objectContaining({
-        id: 'key',
-        groupId: 'group-key',
-        credentialKind: 'kiro_api_key',
-        kiroApiKey: 'ksk_test_redacted',
-        accessToken: undefined
-      })
-    ])
-  })
 })
 
 describe('token-only 刷新生产者', () => {

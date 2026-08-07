@@ -93,19 +93,19 @@ function estimatePayloadTokens(payload: KiroPayload): number {
 /**
  * 获取网络代理 agent
  * 优先级（从高到低）：
- *   1. 账号自身绑定的 proxyUrl（实现"N 个号一个 IP"分桶反代）
+ *   1. 账号自身绑定的 proxyUrl（实现"N 个号一个 IP"分桶）
  *   3. 环境变量代理
  *   4. 系统代理
  *
  * 传入 account 让账号级代理覆盖全局；不传则走全局逻辑。
  */
 function getNetworkAgent(account?: ProxyAccount): Dispatcher | undefined {
-  // API 反代账号固定直连，不继承 App 的 HTTP_PROXY / HTTPS_PROXY 或系统代理。
+  // 指定 bypassAppProxy 的账号固定直连，不继承 App 的 HTTP_PROXY / HTTPS_PROXY 或系统代理。
   if (account?.bypassAppProxy) {
     return undefined
   }
 
-  // 1. 账号专属代理：实现"N 个账号共用 1 个 IP"的分桶反代
+  // 1. 账号专属代理：实现"N 个账号共用 1 个 IP"的分桶
   if (account?.proxyUrl) {
     const agent = safeCreateProxyAgent(account.proxyUrl)
     if (agent) {
@@ -287,7 +287,7 @@ export function getEnterpriseFallbackArn(region?: string): string {
 }
 
 /**
- * 反代调 Kiro API 时使用的 profileArn 决策。
+ * 调 Kiro API 时使用的 profileArn 决策。
  * 优先级：真实 ARN（自动获取） > 备用固定 ARN（按账号类型）
  * - 已有真实 ARN（非占位符） → 直接用
  * - Enterprise/IdC → 区域化备用 ARN（自动获取失败时兜底）
@@ -314,34 +314,6 @@ function resolveProfileArn(account: ProxyAccount): string | undefined {
   }
   return KIRO_BUILDER_ID_PLACEHOLDER_ARN
 }
-
-// Agentic 模式系统提示 - 防止大文件写入超时
-const AGENTIC_SYSTEM_PROMPT = `# CRITICAL: CHUNKED WRITE PROTOCOL (MANDATORY)
-
-You MUST follow these rules for ALL file operations. Violation causes server timeouts and task failure.
-
-## ABSOLUTE LIMITS
-- **MAXIMUM 350 LINES** per single write/edit operation - NO EXCEPTIONS
-- **RECOMMENDED 300 LINES** or less for optimal performance
-- **NEVER** write entire files in one operation if >300 lines
-
-## MANDATORY CHUNKED WRITE STRATEGY
-
-### For NEW FILES (>300 lines total):
-1. FIRST: Write initial chunk (first 250-300 lines) using write_to_file/fsWrite
-2. THEN: Append remaining content in 250-300 line chunks using file append operations
-3. REPEAT: Continue appending until complete
-
-### For EDITING EXISTING FILES:
-1. Use surgical edits (apply_diff/targeted edits) - change ONLY what's needed
-2. NEVER rewrite entire files - use incremental modifications
-3. Split large refactors into multiple small, focused edits
-
-REMEMBER: When in doubt, write LESS per operation. Multiple small operations > one large operation.`
-
-// Thinking 模式标签
-const THINKING_MODE_PROMPT = `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
 
 const CODEWHISPERER_DEFAULT_MODEL_ID = 'CLAUDE_SONNET_4_20250514_V1_0'
 const CODEWHISPERER_MODEL_CACHE_TTL = 5 * 60 * 1000
@@ -413,31 +385,6 @@ export function mapModelId(model: string): string {
   if (lower.startsWith('gpt-')) return modelId
   console.warn(`[Kiro API] Unknown model "${modelId}" → fallback to "${MODEL_ID_MAP.default}"`)
   return MODEL_ID_MAP.default
-}
-
-/** 响应头名：发生跨模型替换时告知客户端真实使用的模型 */
-export const MODEL_REMAP_HEADER = 'X-Proxy-Model-Remapped'
-
-/**
- * 判断 mapModelId 是否发生了「跨模型替换」——即客户端点的模型和实际请求的不是同一个东西。
- *
- * 只认真正换了模型的情况，不含以下等价变换（它们指向同一模型，报警只会造成噪音）：
- *   - 版本号短横归一化：claude-opus-4-6 → claude-opus-4.6
- *   - alias 指向自身：claude-sonnet-4-5 → claude-sonnet-4.5
- *   - 大小写差异
- *
- * 典型会命中的场景：claude-3-opus / gpt-4 / gpt-4o → claude-sonnet-4.5，
- * 以及未知模型兜底到 default。这类替换客户端完全无感知，需要显式暴露。
- */
-export function detectModelRemap(
-  requested: string,
-  mapped: string
-): { from: string; to: string } | null {
-  const from = requested.trim()
-  if (!from) return null
-  // 归一化后仍相同则视为等价变换（含大小写与短横/点号差异）
-  if (normalizeModelKey(normalizeClaudeVersion(from)) === normalizeModelKey(mapped)) return null
-  return { from, to: mapped }
 }
 
 function clonePayload(payload: KiroPayload): KiroPayload {
@@ -536,51 +483,6 @@ function applyPayloadOrigin(payload: KiroPayload, origin: string): void {
   for (const message of payload.conversationState.history ?? []) {
     if (message.userInputMessage) message.userInputMessage.origin = origin
   }
-}
-
-// 检测是否为 Agentic 模式请求
-export function isAgenticRequest(model: string, tools?: unknown[]): boolean {
-  const lower = model.toLowerCase()
-  // 模型名称包含 -agentic 或有工具调用
-  return (
-    lower.includes('-agentic') || lower.includes('agentic') || Boolean(tools && tools.length > 0)
-  )
-}
-
-// 检测是否启用 Thinking 模式
-export function isThinkingEnabled(headers?: Record<string, string>): boolean {
-  if (!headers) return false
-  // 检查 Anthropic-Beta 头是否包含 thinking
-  const betaHeader = headers['anthropic-beta'] || headers['Anthropic-Beta'] || ''
-  return betaHeader.toLowerCase().includes('thinking')
-}
-
-// 注入系统提示
-export function injectSystemPrompts(
-  content: string,
-  isAgentic: boolean,
-  thinkingEnabled: boolean
-): string {
-  let result = content
-
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  const timestampPrompt = `Current time: ${timestamp}`
-
-  // 注入 Thinking 模式（必须在最前面）
-  if (thinkingEnabled) {
-    result = THINKING_MODE_PROMPT + '\n\n' + result
-  }
-
-  // 注入 Agentic 模式提示
-  if (isAgentic) {
-    result = result + '\n\n' + AGENTIC_SYSTEM_PROMPT
-  }
-
-  // 注入时间戳
-  result = timestampPrompt + '\n\n' + result
-
-  return result
 }
 
 // ============= 消息清理逻辑（参考 Kiro 官方实现）=============
@@ -1640,10 +1542,6 @@ export function normalizeKiroUpstreamError(error: unknown): KiroUpstreamError {
   })
 }
 
-export function isMonthlyRequestQuotaError(error: unknown): boolean {
-  return normalizeKiroUpstreamError(error).retryCategory === UpstreamRetryCategory.MONTHLY_QUOTA
-}
-
 export async function callKiroApiStream(
   account: ProxyAccount,
   payload: KiroPayload,
@@ -1982,12 +1880,6 @@ interface ToolUseState {
   toolUseId: string
   name: string
   inputBuffer: string
-}
-
-// Token 估算（被 promptCacheTracker 等模块使用，用于 cache 块大小判定）
-// 优先使用 tiktoken cl100k_base 精确计算（±5%），失败时自动降级到字符系数（±15%）
-export function estimateTokens(text: string): number {
-  return countTokens(text)
 }
 
 // 解析 AWS Event Stream 二进制格式
@@ -3125,7 +3017,7 @@ function getCodeWhispererEndpoint(region?: string): string {
 /**
  * Enterprise 账号获取 profileArn（通过 CodeWhisperer Runtime 的 /ListAvailableProfiles）
  * 官方 IDE 在认证后通过此 API 获取可用 profiles，用户选择后存储 ARN。
- * 反代自动取第一个 profile。
+ * 自动取第一个 profile。
  */
 export async function fetchEnterpriseProfileArn(
   account: ProxyAccount

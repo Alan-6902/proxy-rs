@@ -95,8 +95,8 @@ export function LogsPage() {
     try {
       const fetchCount = displayLimit === 'all' ? undefined : parseInt(displayLimit) || undefined
       const [allLogs, count] = await Promise.all([
-        window.api.proxyGetLogs(fetchCount),
-        window.api.proxyGetLogsCount()
+        window.api.appLogsGet(fetchCount),
+        window.api.appLogsCount()
       ])
       const newLogs = allLogs as LogEntry[]
       setLogs(newLogs)
@@ -150,7 +150,7 @@ export function LogsPage() {
   }
 
   const handleClear = async () => {
-    await window.api.proxyClearLogs()
+    await window.api.appLogsClear()
     setLogs([])
     setTotalCount(0)
     setNewLogCount(0)

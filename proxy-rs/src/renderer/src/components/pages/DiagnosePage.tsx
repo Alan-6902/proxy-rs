@@ -32,7 +32,10 @@ import {
 import { cn } from '@/lib/utils'
 import { APP_NAME } from '../../../../shared/appIdentity'
 
-import type { AccountLivenessResult as LivenessResult } from '@/types/account'
+import {
+  buildAccountLivenessRequestAccount,
+  type AccountLivenessResult as LivenessResult
+} from '@/types/account'
 
 /** 脱敏代理 URL（隐藏密码） */
 function maskProxyUrl(url: string): string {
@@ -185,24 +188,9 @@ export function DiagnosePage(): React.ReactNode {
   /** 对单个账号执行测活（复用 IPC） */
   const testOneAccount = useCallback(
     async (account: (typeof accountList)[number]): Promise<LivenessResult> => {
-      const cred = account.credentials
       try {
         const result = await window.api.diagnoseAccountLiveness({
-          account: {
-            id: account.id,
-            email: account.email,
-            accessToken: cred.accessToken,
-            refreshToken: cred.refreshToken,
-            clientId: cred.clientId,
-            clientSecret: cred.clientSecret,
-            region: cred.region,
-            authMethod: cred.authMethod,
-            provider: cred.provider,
-            profileArn: account.profileArn,
-            expiresAt: cred.expiresAt,
-            credentialRevision: cred.credentialRevision,
-            proxyUrl: getAccountProxyUrl(account.id)
-          },
+          account: buildAccountLivenessRequestAccount(account, getAccountProxyUrl(account.id)),
           model: livenessModel.trim(),
           message: livenessMessage.trim() || undefined
         })
@@ -489,7 +477,7 @@ export function DiagnosePage(): React.ReactNode {
         </CardContent>
       </Card>
 
-      {/* 账号测活：指定账号走反代逻辑给指定模型发测试消息 */}
+      {/* 账号测活：给指定账号的指定模型发测试消息 */}
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm flex items-center gap-2">
@@ -500,8 +488,8 @@ export function DiagnosePage(): React.ReactNode {
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">
             {isEn
-              ? 'Send a real chat message to the selected model via the reverse-proxy call path (account-bound proxy applies). Verifies the account can actually get a response. For batch testing, use the Accounts page — results show inline on each account.'
-              : '走反代底层调用给指定模型发一条真实消息（自动应用账号绑定的代理），验证账号能否正常返回。批量测活请到「账号管理」页面，结果会直接显示在账号行上。'}
+              ? 'Send a real chat message to the selected model (account-bound proxy applies). Verifies the account can actually get a response. For batch testing, use the Accounts page — results show inline on each account.'
+              : '给指定模型发一条真实消息（自动应用账号绑定的代理），验证账号能否正常返回。批量测活请到「账号管理」页面，结果会直接显示在账号行上。'}
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

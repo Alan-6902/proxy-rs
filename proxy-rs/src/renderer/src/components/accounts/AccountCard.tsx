@@ -10,13 +10,11 @@ import {
   RefreshCw,
   Trash2,
   Edit,
-  Copy,
   AlertTriangle,
   Clock,
   Loader2,
   Info,
   FolderOpen,
-  Power,
   Calendar,
   AlertCircle,
   KeyRound,
@@ -177,7 +175,6 @@ export const AccountCard = memo(function AccountCard({
   onShowDetail
 }: AccountCardProps) {
   const {
-    setActiveAccount,
     removeAccount,
     checkAccountStatus,
     refreshAccountToken,
@@ -201,22 +198,14 @@ export const AccountCard = memo(function AccountCard({
   // 解除封禁标记中（loading 状态）
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
 
-  // 手动解除封禁标记：调用后端 IPC → 清反代池 suspended + 清前端 lastError
+  // 手动解除封禁标记：清前端 status 与 lastError
   const handleClearSuspended = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
     if (isClearingSuspended) return
     setIsClearingSuspended(true)
     try {
-      const result = await window.api.proxyClearAccountSuspended(account.id)
-      if (result.success) {
-        // 前端 store 同步：status → active, lastError → undefined
-        updateAccountStatus(account.id, 'active', undefined)
-        setShowBanDialog(false)
-      } else {
-        console.error('[AccountCard] Clear suspended failed:', result.error)
-      }
-    } catch (err) {
-      console.error('[AccountCard] Clear suspended error:', err)
+      updateAccountStatus(account.id, 'active', undefined)
+      setShowBanDialog(false)
     } finally {
       setIsClearingSuspended(false)
     }
@@ -231,10 +220,6 @@ export const AccountCard = memo(function AccountCard({
       return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })
     }
     return Math.floor(value).toLocaleString()
-  }
-
-  const handleSwitch = async (): Promise<void> => {
-    setActiveAccount(account.id)
   }
 
   const handleRefresh = async (): Promise<void> => {
@@ -268,20 +253,7 @@ export const AccountCard = memo(function AccountCard({
     if (confirmed) removeAccount(account.id)
   }
 
-  const [copied, setCopied] = useState(false)
   const [emailCopied, setEmailCopied] = useState(false)
-
-  const handleCopyCredentials = (): void => {
-    const credentials = {
-      accessToken: account.credentials.accessToken,
-      refreshToken: account.credentials.refreshToken,
-      clientId: account.credentials.clientId,
-      clientSecret: account.credentials.clientSecret
-    }
-    navigator.clipboard.writeText(JSON.stringify(credentials, null, 2))
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
 
   const accountTags = account.tags
     .map((id) => tags.get(id))
@@ -973,21 +945,6 @@ export const AccountCard = memo(function AccountCard({
 
           {/* Right: Actions */}
           <div className="flex items-center gap-0.5">
-            {!account.isActive && (
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-7 w-7 hover:bg-primary/10 hover:text-primary transition-colors"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleSwitch()
-                }}
-                title={isEn ? 'Switch to this account' : '切换到此账号'}
-              >
-                <Power className="h-3.5 w-3.5" />
-              </Button>
-            )}
-
             <Button
               size="icon"
               variant="ghost"
@@ -1015,22 +972,6 @@ export const AccountCard = memo(function AccountCard({
               title={isEn ? 'Refresh Token' : '刷新 Token（仅刷新访问令牌）'}
             >
               <KeyRound className={cn('h-3.5 w-3.5', isRefreshingToken && 'animate-pulse')} />
-            </Button>
-
-            <Button
-              size="icon"
-              variant="ghost"
-              className={cn(
-                'h-7 w-7 text-muted-foreground hover:text-foreground',
-                copied && 'text-success'
-              )}
-              onClick={(e) => {
-                e.stopPropagation()
-                handleCopyCredentials()
-              }}
-              title={isEn ? 'Copy credentials' : '复制凭证'}
-            >
-              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
 
             <Button
@@ -1154,8 +1095,8 @@ export const AccountCard = memo(function AccountCard({
                       disabled={isClearingSuspended}
                       title={
                         isEn
-                          ? 'Mark as recovered — proxy pool will use this account again'
-                          : '标记为已恢复 — 反代池会重新使用该账号'
+                          ? 'Mark as recovered — clears the error state'
+                          : '标记为已恢复 — 清除错误状态'
                       }
                     >
                       {isClearingSuspended ? (

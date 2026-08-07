@@ -201,11 +201,7 @@ export function HomePage() {
       <PageHeader
         eyebrow={isEn ? 'Dashboard' : '概览'}
         title={isEn ? `Welcome to ${APP_NAME}` : `欢迎使用 ${APP_NAME}`}
-        description={
-          isEn
-            ? 'Manage Kiro accounts and the API proxy service locally'
-            : '统一管理 Kiro 账号与 API 反代服务'
-        }
+        description={isEn ? 'Manage Kiro accounts locally' : '统一管理 Kiro 账号'}
         visual={
           <img
             src={proxyRsIcon}
@@ -821,10 +817,10 @@ export function HomePage() {
         {[
           {
             icon: Shield,
-            title: isEn ? 'API Proxy' : 'API 反代',
+            title: isEn ? 'Proxy Pool' : '代理池',
             desc: isEn
-              ? 'OpenAI and Anthropic compatible endpoints'
-              : '聚合 OpenAI 与 Anthropic 兼容接口'
+              ? 'Outbound IP rotation with auto-validation'
+              : '出口 IP 轮换，自动验活与定时刷新'
           },
           {
             icon: FolderPlus,

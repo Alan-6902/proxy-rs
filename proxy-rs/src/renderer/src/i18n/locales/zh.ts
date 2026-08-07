@@ -44,13 +44,12 @@ const zh = {
   nav: {
     home: '主页',
     accounts: '账户管理',
-    proxy: 'API 反代',
+    tasks: '任务管理',
     proxyPool: '代理池',
     diagnose: '一键诊断',
     configSync: '配置同步',
     register: '注册',
     seats: 'Kiro 席位',
-    convoy: '自动车凭证',
     logs: '系统日志',
     settings: '设置',
     about: '关于'
@@ -76,7 +75,7 @@ const zh = {
     checkStatus: '检查状态',
     welcome: {
       title: `欢迎使用 ${APP_NAME}`,
-      description: 'Kiro 多账号与 API 反代工具',
+      description: 'Kiro 多账号管理工具',
       features: {
         multiAccount: '管理多个 Kiro 账号',
         autoRefresh: 'Token 过期前自动刷新',
@@ -280,7 +279,7 @@ const zh = {
   about: {
     title: '关于',
     version: '版本 {version}',
-    description: 'Kiro 多账号与 API 反代工具',
+    description: 'Kiro 多账号管理工具',
     features: '功能特性',
     techStack: '技术栈',
     author: '作者',

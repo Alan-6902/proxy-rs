@@ -47,8 +47,6 @@ export interface ProxyPoolSchedulerDeps {
   }) => Promise<ProxyValidationResult>
   /** 验活结果落盘后通知渲染进程刷新 UI */
   notifyRenderer: (payload: { entries: ProxyEntry[] }) => void
-  /** 代理可用性变化后，同步绑定该代理的账号在反代账号池里的 proxyUrl */
-  syncBoundAccounts: (proxyId: string) => void
   log?: (message: string) => void
 }
 
@@ -191,8 +189,6 @@ export class ProxyPoolScheduler {
 
       if (updated.length > 0) {
         this.deps.notifyRenderer({ entries: updated })
-        // 状态变化（alive/slow/dead、enabled）会影响绑定账号能否走该代理
-        for (const entry of updated) this.deps.syncBoundAccounts(entry.id)
       }
       return updated.length
     } finally {

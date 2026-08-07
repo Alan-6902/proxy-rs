@@ -37,7 +37,6 @@ function makeHarness(options: {
     proxyPoolConfig: { ...DEFAULT_PROXY_POOL_CONFIG, ...options.config }
   }
   const notified: Array<{ entries: ProxyEntry[] }> = []
-  const syncedProxyIds: string[] = []
   const validatedUrls: string[] = []
   /** 记录并发峰值，用于验证 concurrency 生效 */
   let inFlight = 0
@@ -61,15 +60,13 @@ function makeHarness(options: {
         inFlight--
       }
     },
-    notifyRenderer: (payload) => notified.push(payload),
-    syncBoundAccounts: (id) => syncedProxyIds.push(id)
+    notifyRenderer: (payload) => notified.push(payload)
   })
 
   return {
     scheduler,
     data,
     notified,
-    syncedProxyIds,
     validatedUrls,
     get peakInFlight() {
       return peakInFlight
@@ -315,13 +312,12 @@ describe('代理池定时验活调度器', () => {
     })
   })
 
-  describe('结果通知与账号同步', () => {
-    it('落盘后推送渲染进程并同步绑定账号', async () => {
+  describe('结果通知', () => {
+    it('落盘后推送渲染进程', async () => {
       const h = makeHarness({ entries: [makeEntry('1'), makeEntry('2')] })
       await h.scheduler.runOnce()
       expect(h.notified).toHaveLength(1)
       expect(h.notified[0].entries.map((e) => e.id).sort()).toEqual(['1', '2'])
-      expect(h.syncedProxyIds.sort()).toEqual(['1', '2'])
     })
   })
 

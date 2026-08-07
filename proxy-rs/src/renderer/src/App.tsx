@@ -6,14 +6,13 @@ import {
   HomePage,
   AboutPage,
   SettingsPage,
-  ProxyPage,
   ProxyPoolPage,
   DiagnosePage,
   ConfigSyncPage,
   RegisterPage,
   SeatsPage,
-  ConvoyPage,
-  LogsPage
+  LogsPage,
+  TaskManagerPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { ConfirmDialogHost } from './components/ui'
@@ -50,9 +49,7 @@ function App(): React.JSX.Element {
     accounts,
     activeAccountId,
     setActiveAccount,
-    checkAndRefreshExpiringTokens,
-    updateAccountStatus,
-    updateAccount
+    checkAndRefreshExpiringTokens
   } = useAccountsStore()
 
   // 切换到下一个可用账户
@@ -120,6 +117,13 @@ function App(): React.JSX.Element {
       stopAutoTokenRefresh()
     }
   }, [loadFromStorage, stopAutoTokenRefresh])
+
+  // 主进程自动拉取 KSK 后刷新账号视图；事件不携带凭证明文。
+  useEffect(() => {
+    return window.api.onKskAutomationAccountsChanged(() => {
+      void loadFromStorage()
+    })
+  }, [loadFromStorage])
 
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
@@ -231,68 +235,20 @@ function App(): React.JSX.Element {
     }
   }, [applyBackgroundCheckResults])
 
-  // 监听反代账号被封禁事件（TEMPORARILY_SUSPENDED / AccountSuspendedException）
-  // 反代触发后，把封禁状态同步到 store 让 UI 显示
-  useEffect(() => {
-    const unsubscribe = window.api.onProxyAccountSuspended((info) => {
-      console.warn(`[App] Account suspended via proxy: ${info.email || info.id} (${info.reason})`)
-      updateAccountStatus(info.id, 'error', `[${info.reason}] ${info.message}`)
-    })
-    return () => {
-      unsubscribe()
-    }
-  }, [updateAccountStatus])
-
-  // 监听反代账号更新事件（Token 刷新 / Enterprise profileArn 自愈），持久化到 store + 磁盘
-  useEffect(() => {
-    const unsubscribe = window.api.onProxyAccountUpdate((info) => {
-      const account = useAccountsStore.getState().accounts.get(info.id)
-      if (!account) return
-      const credentialChanged =
-        (info.accessToken !== undefined && info.accessToken !== account.credentials.accessToken) ||
-        (info.refreshToken !== undefined &&
-          info.refreshToken !== account.credentials.refreshToken) ||
-        (info.expiresAt !== undefined && info.expiresAt !== account.credentials.expiresAt) ||
-        (info.credentialRevision !== undefined &&
-          info.credentialRevision !== account.credentials.credentialRevision) ||
-        (info.profileArn !== undefined && info.profileArn !== account.credentials.profileArn)
-      if (!credentialChanged) return
-      updateAccount(info.id, {
-        ...(info.profileArn ? { profileArn: info.profileArn } : {}),
-        credentials: {
-          ...account.credentials,
-          ...(info.accessToken !== undefined ? { accessToken: info.accessToken } : {}),
-          ...(info.refreshToken !== undefined ? { refreshToken: info.refreshToken } : {}),
-          ...(info.expiresAt !== undefined ? { expiresAt: info.expiresAt } : {}),
-          ...(info.credentialRevision !== undefined
-            ? { credentialRevision: info.credentialRevision }
-            : {}),
-          ...(info.profileArn !== undefined ? { profileArn: info.profileArn } : {})
-        }
-      })
-      console.log(`[App] Persisted proxy account credentials for ${info.id}`)
-    })
-    return () => {
-      unsubscribe()
-    }
-  }, [updateAccount])
-
   const renderPage = () => {
     switch (currentPage) {
       case 'home':
         return <HomePage />
       case 'accounts':
         return <AccountManager />
-      case 'proxy':
-        return <ProxyPage />
+      case 'tasks':
+        return <TaskManagerPage />
       case 'proxyPool':
         return <ProxyPoolPage />
       case 'register':
         return <RegisterPage />
       case 'seats':
         return <SeatsPage />
-      case 'convoy':
-        return <ConvoyPage />
       case 'diagnose':
         return <DiagnosePage />
       case 'configSync':

@@ -16,6 +16,7 @@ import type {
   IdpType,
   AccountLivenessResult
 } from '../types/account'
+import { buildAccountLivenessRequestAccount } from '../types/account'
 import type {
   ProxyEntry,
   ProxyPoolConfig,
@@ -183,7 +184,7 @@ interface AccountsState {
   proxyPoolConfig: ProxyPoolConfig
   /** 轮询调度光标（仅用于 round_robin 策略）；语义为"上次选中的代理 id" */
   proxyPoolCursor: string
-  /** 账号-代理绑定映射（accountId → proxyId）；用于"反代时 N 个账号共用 1 个 IP" */
+  /** 账号-代理绑定映射（accountId → proxyId）；用于"N 个账号共用 1 个出口 IP" */
   accountProxyBindings: Record<string, string>
 }
 
@@ -361,7 +362,7 @@ interface AccountsActions {
   /** 标记代理使用结果（供注册流程上报，用于失败计数与自动停用） */
   reportProxyResult: (id: string, success: boolean, boundEmail?: string, errorMsg?: string) => void
 
-  // ============ 账号-代理绑定（反代分桶）============
+  // ============ 账号-代理绑定（出口 IP 分桶）============
   /** 把账号绑定到指定代理 */
   bindAccountToProxy: (accountId: string, proxyId: string) => void
   /** 批量绑定（用于批量分配） */
@@ -966,25 +967,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         if (!id) break
         const account = get().accounts.get(id)
         if (!account) continue
-        const cred = account.credentials
         let result: AccountLivenessResult
         try {
           result = await window.api.diagnoseAccountLiveness({
-            account: {
-              id: account.id,
-              email: account.email,
-              accessToken: cred.accessToken,
-              refreshToken: cred.refreshToken,
-              clientId: cred.clientId,
-              clientSecret: cred.clientSecret,
-              region: cred.region,
-              authMethod: cred.authMethod,
-              provider: cred.provider,
-              profileArn: account.profileArn,
-              expiresAt: cred.expiresAt,
-              credentialRevision: cred.credentialRevision,
-              proxyUrl: get().getAccountProxyUrl(account.id)
-            },
+            account: buildAccountLivenessRequestAccount(
+              account,
+              get().getAccountProxyUrl(account.id)
+            ),
             model,
             message
           })
@@ -2766,8 +2755,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next, accountProxyBindings: bindings }
     })
     get().saveToStorage()
-    // 通知主进程：这些账号现在无代理绑定，回退全局
-    for (const aid of affectedAccountIds) syncAccountProxyToMain(aid)
   },
 
   removeProxies: (ids) => {
@@ -2784,7 +2771,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next, accountProxyBindings: bindings }
     })
     get().saveToStorage()
-    for (const aid of affectedAccountIds) syncAccountProxyToMain(aid)
   },
 
   toggleProxyEnabled: (id, enabled) => {
@@ -2797,8 +2783,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next }
     })
     get().saveToStorage()
-    // 通知所有绑定该代理的账号更新主进程内存（启用变化会影响是否可用）
-    syncAllAccountsBoundToProxy(id)
   },
 
   updateProxy: (id, updates) => {
@@ -2811,10 +2795,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next }
     })
     get().saveToStorage()
-    // url / 启用状态 / 状态变化都需要同步绑定账号
-    if ('url' in updates || 'enabled' in updates || 'status' in updates) {
-      syncAllAccountsBoundToProxy(id)
-    }
   },
 
   validateProxy: async (id) => {
@@ -2862,8 +2842,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next }
     })
     get().saveToStorage()
-    // 同步绑定账号：状态变化（alive/slow/dead）影响代理是否可用
-    syncAllAccountsBoundToProxy(id)
     return result
   },
 
@@ -2902,18 +2880,14 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     })
     // 不调用 saveToStorage：主进程调度器已在写锁内落盘，这里再写一次会把
     // 渲染进程内存整份覆盖回去，反而可能盖掉主进程刚写的其它字段。
-    // 主进程已同步反代账号池的 proxyUrl，此处无需再 syncAllAccountsBoundToProxy。
     if (changedIds.length > 0) {
       console.log(`[Store] Applied ${changedIds.length} background validation results`)
     }
   },
 
   clearProxyPool: () => {
-    const affectedAccountIds = Object.keys(get().accountProxyBindings)
     set({ proxyPool: new Map(), proxyPoolCursor: '', accountProxyBindings: {} })
     get().saveToStorage()
-    // 通知所有曾被绑定的账号回退全局
-    for (const aid of affectedAccountIds) syncAccountProxyToMain(aid)
   },
 
   setProxyPoolConfig: (config) => {
@@ -3000,7 +2974,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   reportProxyResult: (id, success, boundEmail, errorMsg) => {
-    let autoDisabled = false
     set((state) => {
       const next = new Map(state.proxyPool)
       const existing = next.get(id)
@@ -3018,7 +2991,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         state.proxyPoolConfig.autoDisableDead &&
         failCount >= state.proxyPoolConfig.failureThreshold &&
         enabledCount > 1
-      autoDisabled = autoDisable
       next.set(id, {
         ...existing,
         failCount,
@@ -3030,10 +3002,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { proxyPool: next }
     })
     get().saveToStorage()
-    // 仅在代理被自动停用时通知主进程（普通 used/failCount 计数变化无需同步）
-    if (autoDisabled) {
-      syncAllAccountsBoundToProxy(id)
-    }
   },
 
   // ==================== 账号-代理绑定 ====================
@@ -3043,8 +3011,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       accountProxyBindings: { ...state.accountProxyBindings, [accountId]: proxyId }
     }))
     get().saveToStorage()
-    // 同步到主进程的账号池
-    syncAccountProxyToMain(accountId)
   },
 
   bindAccountsToProxy: (accountIds, proxyId) => {
@@ -3055,7 +3021,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { accountProxyBindings: next }
     })
     get().saveToStorage()
-    for (const id of accountIds) syncAccountProxyToMain(id)
   },
 
   unbindAccountFromProxy: (accountId) => {
@@ -3065,14 +3030,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return { accountProxyBindings: next }
     })
     get().saveToStorage()
-    syncAccountProxyToMain(accountId)
   },
 
   clearAccountProxyBindings: () => {
-    const old = Object.keys(get().accountProxyBindings)
     set({ accountProxyBindings: {} })
     get().saveToStorage()
-    for (const id of old) syncAccountProxyToMain(id)
   },
 
   autoDistributeAccountsToProxies: ({ accountsPerProxy = 0, onlyUnbound = false, accountIds }) => {
@@ -3141,10 +3103,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     set({ accountProxyBindings: newBindings })
     get().saveToStorage()
-    // 同步到主进程
-    for (const id of targets.slice(0, distributed)) {
-      syncAccountProxyToMain(id.id)
-    }
     return { distributed, perProxy, skipped: targets.length - distributed }
   },
 
@@ -3157,37 +3115,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     return proxy.url
   }
 }))
-
-/**
- * 把单个账号的代理绑定信息同步到主进程账号池
- * （主进程账号池里的 ProxyAccount.proxyUrl 由此 IPC 设置）
- */
-function syncAccountProxyToMain(accountId: string): void {
-  try {
-    const url = useAccountsStore.getState().getAccountProxyUrl(accountId)
-    void window.api.accountSetProxyBinding?.(accountId, url)
-  } catch (err) {
-    console.warn('[Store] Failed to sync account proxy binding to main:', err)
-  }
-}
-
-/**
- * 当某个代理发生变化（URL/启用状态/有效性）时，
- * 同步所有绑定到该代理的账号到主进程，确保主进程内存里的 ProxyAccount.proxyUrl 与代理池实际情况一致
- */
-function syncAllAccountsBoundToProxy(proxyId: string): void {
-  try {
-    const state = useAccountsStore.getState()
-    const affectedAccountIds = Object.entries(state.accountProxyBindings)
-      .filter(([, pid]) => pid === proxyId)
-      .map(([aid]) => aid)
-    for (const aid of affectedAccountIds) {
-      syncAccountProxyToMain(aid)
-    }
-  } catch (err) {
-    console.warn('[Store] Failed to sync accounts bound to proxy:', err)
-  }
-}
 
 // ==================== 代理 URL 解析辅助 ====================
 

@@ -496,7 +496,7 @@ export function ProxyPoolPage(): React.ReactNode {
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
   const [isValidatingAll, setIsValidatingAll] = useState(false)
   const [testConcurrency, setTestConcurrency] = useState(10)
-  // 反代分桶：每代理承载账号数（0 = 均分）
+  // 账号-IP 分桶：每代理承载账号数（0 = 均分）
   const [accountsPerProxy, setAccountsPerProxy] = useState<number>(5)
   const [bindingPanelExpanded, setBindingPanelExpanded] = useState(false)
   // 代理链诊断状态
@@ -550,7 +550,7 @@ export function ProxyPoolPage(): React.ReactNode {
   const proxies = useMemo(() => Array.from(proxyPool.values()), [proxyPool])
   const poolHealth = useMemo(() => computePoolHealth(proxies), [proxies])
 
-  // 反代分桶：当前账号-代理绑定关系
+  // 账号-IP 分桶：当前账号-代理绑定关系
   const bindingStats = useMemo(() => {
     const allAccounts = Array.from(accounts.values())
     const totalActive = allAccounts.filter((a) => a.status === 'active').length
@@ -1386,12 +1386,12 @@ export function ProxyPoolPage(): React.ReactNode {
         </CardContent>
       </Card>
 
-      {/* 反代账号-代理 N:1 分桶 */}
+      {/* 账号-代理 N:1 分桶 */}
       <Card className="hover-lift">
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <Link2 className="h-4 w-4 text-primary" />
-            {isEn ? 'Reverse Proxy: Account-to-IP Bucketing' : '反代分桶（账号绑定代理 IP）'}
+            {isEn ? 'Account-to-IP Bucketing' : '账号-IP 分桶（账号绑定代理 IP）'}
             <span className="text-2xs font-normal text-muted-foreground">
               {isEn
                 ? '— Limit accounts per IP to avoid risk-control association'

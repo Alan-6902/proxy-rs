@@ -18,42 +18,24 @@ import {
 } from '../shared/appIdentity'
 import { AccountStoreCoordinator } from './accountStoreCoordinator'
 import { join } from 'path'
-import { randomBytes, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
 import {
+  Agent,
   fetch as undiciFetch,
   type RequestInit as UndiciRequestInit,
   type Dispatcher
 } from 'undici'
 import icon from '../../resources/icon.png?asset'
-import {
-  ADMIN_API_KEY_PREFIX,
-  ADMIN_KEY_UPDATE_ERROR,
-  assertDistinctAdminApiKey,
-  buildBackgroundRefreshPlan,
-  buildProxyAccounts,
-  ProxyServer,
-  configureProxyClients,
-  stripAdminApiKey,
-  switchAdminApiKey,
-  type ProxyAccount,
-  type ProxyConfig,
-  type ProxyClientTarget,
-  type ProxyClientModel
-} from './proxy'
+import { buildBackgroundRefreshPlan, type ProxyAccount } from './proxy/types'
 import {
   fetchKiroModels,
   fetchSubscriptionToken,
   fetchAvailableSubscriptions,
-  setLogStreamEvents,
-  setPayloadSizeLimitKB,
-  setTokenBufferReserve,
-  setEnableTokenBufferReserve,
   callKiroApi,
-  fetchEnterpriseProfileArn,
-  setProfileArnPersistCallback
+  fetchEnterpriseProfileArn
 } from './proxy/kiroApi'
 import { openaiToKiro } from './proxy/translator'
 import {
@@ -66,16 +48,22 @@ import {
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
 import { registerProxyPoolIpcHandlers, validateProxyEntry } from './ipc/proxyPool'
-import { ConvoySyncManager } from './convoy/syncManager'
-import { loadConvoyState } from './convoy/configStore'
-import { registerConvoyIpcHandlers, sendConvoyStatus } from './convoy/ipc-handlers'
+import { KskAutomationManager } from './kskAutomation/syncManager'
 import {
-  CONVOY_ACCOUNT_ID_PREFIX,
-  CONVOY_MANUAL_ACCOUNT_ID_PREFIX
-} from '../shared/convoyCredentials'
+  KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
+  isPermanentKskCredentialError,
+  mapWithConcurrency,
+  removeMatchingInvalidKskAccounts,
+  type KskCredentialCleanupResult
+} from './kskAutomation/credentialCleanup'
+import { loadKskAutomationStore, loadKskAutomationTask } from './kskAutomation/configStore'
+import {
+  registerKskAutomationIpcHandlers,
+  sendKskAutomationAccountsChanged,
+  sendKskAutomationStatus
+} from './kskAutomation/ipc-handlers'
+import type { ProviderKskCredential } from '../shared/kskAutomation'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
-import type { ProxyEntry } from '../shared/proxyPool'
-import type { ProxyAccountPoolView } from '../shared/proxyAccountPoolSnapshot'
 import {
   LocalNotificationService,
   LocalNoticeKind,
@@ -149,6 +137,9 @@ function getNetworkAgent(): Dispatcher | undefined {
   if (envAgent) return envAgent
   return safeCreateProxyAgent(getSystemProxy())
 }
+
+// 本机 Admin 会携带管理密钥与完整 KSK，必须强制直连，不能复用应用/系统代理。
+const localAdminDirectAgent = new Agent()
 
 /**
  * 通用 fetch 函数
@@ -260,304 +251,6 @@ function applyProxySettings(enabled: boolean, url: string): void {
   }
 }
 
-// ============ 防抖 store 写入（减少磁盘 I/O） ============
-const pendingStoreWrites: Map<string, unknown> = new Map()
-let storeFlushTimer: ReturnType<typeof setTimeout> | null = null
-const STORE_FLUSH_INTERVAL = 5000 // 5 秒批量写入一次
-
-function debouncedStoreSet(key: string, value: unknown): void {
-  pendingStoreWrites.set(key, value)
-  if (!storeFlushTimer) {
-    storeFlushTimer = setTimeout(flushStoreWrites, STORE_FLUSH_INTERVAL)
-  }
-}
-
-function flushStoreWrites(): void {
-  storeFlushTimer = null
-  if (!store || pendingStoreWrites.size === 0) return
-  for (const [key, value] of pendingStoreWrites) {
-    store.set(key, value)
-  }
-  pendingStoreWrites.clear()
-}
-
-let trayMenuTimer: ReturnType<typeof setTimeout> | null = null
-
-function debouncedUpdateTrayMenu(): void {
-  if (trayMenuTimer) return
-  trayMenuTimer = setTimeout(() => {
-    trayMenuTimer = null
-    updateTrayMenu()
-  }, 3000)
-}
-
-// ============ Kiro API 反代服务器 ============
-const UNEXPECTED_PROXY_RESTART_DELAY_MS = 3000
-let proxyServer: ProxyServer | null = null
-
-function initProxyServer(): ProxyServer {
-  if (proxyServer) return proxyServer
-
-  // 确保日志存储已初始化（app.whenReady 中已调用，此处兜底）
-  proxyLogStore.initialize(app.getPath('userData'))
-
-  // 从 store 加载保存的配置，如果没有则使用默认配置
-  const storedProxyConfig = store?.get('proxyConfig') as Partial<ProxyConfig> | undefined
-  const sanitizedStoredProxyConfig = storedProxyConfig
-    ? sanitizeProxyConfig(storedProxyConfig)
-    : undefined
-  const savedConfig = sanitizedStoredProxyConfig?.value
-  // 从 store 加载保存的 Usage API 类型
-  const savedUsageApiType = store?.get('usageApiType') as 'rest' | 'cbor' | undefined
-  if (savedUsageApiType) {
-    setUsageApiType(savedUsageApiType)
-  }
-  // 从 store 加载保存的累计 credits 和 tokens
-  const savedTotalCredits = (store?.get('proxyTotalCredits') as number) || 0
-  const savedInputTokens = (store?.get('proxyInputTokens') as number) || 0
-  const savedOutputTokens = (store?.get('proxyOutputTokens') as number) || 0
-  // 从 store 加载保存的请求统计
-  const savedTotalRequests = (store?.get('proxyTotalRequests') as number) || 0
-  const savedSuccessRequests = (store?.get('proxySuccessRequests') as number) || 0
-  const savedFailedRequests = (store?.get('proxyFailedRequests') as number) || 0
-  const defaultConfig: ProxyConfig = {
-    enabled: false,
-    port: 5580,
-    host: '127.0.0.1',
-    enableMultiAccount: true,
-    selectedAccountIds: [],
-    logRequests: true,
-    maxConcurrent: 10,
-    maxRetries: 3,
-    retryDelayMs: 1000,
-    tokenRefreshBeforeExpiry: 300, // 5分钟提前刷新
-    clientDrivenToolExecution: true,
-    enableTokenBufferReserve: false,
-    tokenBufferReserve: 20000
-  }
-
-  // 合并保存的配置和默认配置
-  const config: ProxyConfig = savedConfig ? { ...defaultConfig, ...savedConfig } : defaultConfig
-
-  // 恢复 payload 大小限制
-  if (config.payloadSizeLimitKB) {
-    setPayloadSizeLimitKB(config.payloadSizeLimitKB)
-  }
-  // 恢复 Token buffer reserve（开关 + 数值）
-  setEnableTokenBufferReserve(config.enableTokenBufferReserve === true)
-  if (config.tokenBufferReserve) {
-    setTokenBufferReserve(config.tokenBufferReserve)
-  }
-  proxyServer = new ProxyServer(config, {
-    onRequest: (info) => {
-      mainWindow?.webContents.send('proxy-request', info)
-    },
-    onResponse: (info) => {
-      mainWindow?.webContents.send('proxy-response', info)
-    },
-    onError: (error) => {
-      console.error('[ProxyServer] Error:', error)
-      mainWindow?.webContents.send('proxy-error', error.message)
-    },
-    onStatusChange: (running, port) => {
-      mainWindow?.webContents.send('proxy-status-change', { running, port })
-    },
-    onUnexpectedClose: async () => {
-      await new Promise((resolve) => setTimeout(resolve, UNEXPECTED_PROXY_RESTART_DELAY_MS))
-      const result = await startProxy()
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to restart proxy server')
-      }
-    },
-    // Token 刷新回调 - 复用已有的刷新逻辑，含账号绑定代理
-    onTokenRefresh: async (account) => {
-      if (account.credentialKind === 'kiro_api_key') {
-        return { success: false, error: 'Kiro API key accounts cannot refresh' }
-      }
-      return runCredentialRefreshOperation(
-        { success: false as const, error: CREDENTIAL_REFRESH_UNAVAILABLE },
-        async () => {
-          try {
-            console.log(
-              `[ProxyServer] Refreshing token for ${account.email || account.id}${account.proxyUrl ? ' [via bound proxy]' : ''}`
-            )
-            const refreshResult = await refreshStoredKiroCredentials({
-              accountId: account.id,
-              expectedRefreshToken: account.refreshToken || '',
-              expectedCredentialRevision: account.credentialRevision,
-              clientId: account.clientId,
-              clientSecret: account.clientSecret,
-              region: account.region,
-              authMethod: account.authMethod,
-              proxyUrl: account.proxyUrl
-            })
-
-            if (refreshResult.success && refreshResult.accessToken) {
-              const expiresAt =
-                refreshResult.expiresAt ?? Date.now() + (refreshResult.expiresIn || 3600) * 1000
-              return {
-                success: true as const,
-                accessToken: refreshResult.accessToken,
-                refreshToken: refreshResult.refreshToken,
-                expiresAt,
-                credentialRevision: refreshResult.credentialRevision
-              }
-            }
-            return { success: false as const, error: refreshResult.error || 'Token 刷新失败' }
-          } catch (error) {
-            return {
-              success: false as const,
-              error: error instanceof Error ? error.message : 'Unknown error'
-            }
-          }
-        }
-      )
-    },
-    // 账号更新回调 - 通知渲染进程更新账号数据
-    onAccountUpdate: (account) => {
-      mainWindow?.webContents.send('proxy-account-update', {
-        id: account.id,
-        accessToken: account.accessToken,
-        refreshToken: account.refreshToken,
-        expiresAt: account.expiresAt,
-        credentialRevision: account.credentialRevision
-      })
-    },
-    // 账号被 Kiro 后端长期封禁 - 通知渲染进程标记 lastError + 持久化到 store
-    // 不同于 token 失效，需要人工解封；账号池已自动跳过该账号
-    onAccountSuspended: (info) => {
-      console.warn(
-        `[ProxyServer] Account suspended: ${info.email || info.accountId} (${info.reason})`
-      )
-      // 推送 IPC 事件给前端 store
-      mainWindow?.webContents.send('proxy-account-suspended', {
-        id: info.accountId,
-        email: info.email,
-        reason: info.reason,
-        message: info.message,
-        suspendedAt: Date.now()
-      })
-      // 持久化封禁状态：依赖 renderer store 接收 IPC 后通过 saveToStorage 防抖落盘，
-      // 主进程仅在 lastSavedData 内存快照上做轻量更新，避免每次封禁都触发整库加解密 IO。
-      // 这能从根本上消除频繁封禁场景下的主进程阻塞（旧代码 store.get + store.set 各做一次 AES 全库加解密）
-      if (lastSavedData && typeof lastSavedData === 'object') {
-        try {
-          const data = lastSavedData as { accounts?: Record<string, Record<string, unknown>> }
-          if (data.accounts?.[info.accountId]) {
-            data.accounts[info.accountId] = {
-              ...data.accounts[info.accountId],
-              status: 'error',
-              lastError: `[${info.reason}] ${info.message}`,
-              lastCheckedAt: Date.now()
-            }
-          }
-        } catch (e) {
-          console.error('[ProxyServer] Failed to update suspended state in memory:', e)
-        }
-      }
-      localNotifications.notify(LocalNoticeKind.AccountSuspended, { accountId: info.accountId })
-    },
-    onAllAccountsExhausted: () => {
-      localNotifications.notify(LocalNoticeKind.ProxyAllAccountsExhausted)
-    },
-    onTokenRefreshFailed: (accountId) => {
-      localNotifications.notify(LocalNoticeKind.TokenRefreshFailed, { accountId })
-    },
-    // Credits 更新回调 - 使用防抖持久化
-    onCreditsUpdate: (totalCredits) => {
-      debouncedStoreSet('proxyTotalCredits', totalCredits)
-    },
-    // Tokens 更新回调 - 使用防抖持久化
-    onTokensUpdate: (inputTokens, outputTokens) => {
-      debouncedStoreSet('proxyInputTokens', inputTokens)
-      debouncedStoreSet('proxyOutputTokens', outputTokens)
-    },
-    // 请求统计更新回调 - 使用防抖持久化
-    onRequestStatsUpdate: (totalRequests, successRequests, failedRequests) => {
-      debouncedStoreSet('proxyTotalRequests', totalRequests)
-      debouncedStoreSet('proxySuccessRequests', successRequests)
-      debouncedStoreSet('proxyFailedRequests', failedRequests)
-      // 更新托盘菜单（也防抖，避免频繁重建菜单）
-      debouncedUpdateTrayMenu()
-    },
-    // 账号池为空时懒加载 - 从 store 读取账号数据同步到 pool
-    onPoolEmpty: async () => {
-      await initStore()
-      if (!store) return
-      const accountData = store.get('accountData') as
-        | {
-            accounts?: Record<string, any>
-            accountProxyBindings?: Record<string, string>
-            proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-          }
-        | undefined
-      if (!accountData?.accounts) return
-
-      // 构建 accountId → proxyUrl 映射（用于反代时 N:1 分桶）
-      const bindings = accountData.accountProxyBindings || {}
-      const proxyPool = accountData.proxyPool || {}
-      const buildProxyUrl = (accountId: string): string | undefined => {
-        const proxyId = bindings[accountId]
-        if (!proxyId) return undefined
-        const p = proxyPool[proxyId]
-        if (!p || !p.enabled || p.status === 'dead') return undefined
-        return p.url
-      }
-
-      const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
-      if (proxyAccounts.length > 0 && proxyServer) {
-        const pool = proxyServer.getAccountPool()
-        proxyAccounts.forEach((acc) => pool.addAccount(acc))
-        const boundCount = proxyAccounts.filter((a) => a.proxyUrl).length
-        console.log(
-          `[ProxyServer] Lazy-synced ${proxyAccounts.length} accounts from store (${boundCount} with bound proxy)`
-        )
-      }
-    }
-  })
-
-  // Enterprise profileArn 自愈持久化：运行时首次解析出真实 profileArn 时，
-  // 回写到账号池 + 内存快照 + 通知 renderer 落盘，避免每次请求重复获取。
-  setProfileArnPersistCallback((accountId, profileArn) => {
-    try {
-      proxyServer?.getAccountPool().updateAccount(accountId, { profileArn })
-      // 推送 IPC，让 renderer store 把 profileArn 写入账号数据
-      mainWindow?.webContents.send('proxy-account-update', { id: accountId, profileArn })
-      // 同步更新内存快照，确保下次整库落盘时带上 profileArn
-      if (lastSavedData && typeof lastSavedData === 'object') {
-        const data = lastSavedData as { accounts?: Record<string, Record<string, unknown>> }
-        if (data.accounts?.[accountId]) {
-          data.accounts[accountId] = { ...data.accounts[accountId], profileArn }
-        }
-      }
-      console.log(`[ProxyServer] Persisted Enterprise profileArn for ${accountId}: ${profileArn}`)
-    } catch (e) {
-      console.warn('[ProxyServer] Failed to persist profileArn:', e)
-    }
-  })
-
-  // 恢复保存的累计 credits
-  if (savedTotalCredits > 0) {
-    proxyServer.setTotalCredits(savedTotalCredits)
-  }
-
-  // 恢复保存的累计 tokens
-  if (savedInputTokens > 0 || savedOutputTokens > 0) {
-    proxyServer.setTotalTokens(savedInputTokens, savedOutputTokens)
-  }
-
-  // 恢复保存的请求统计
-  if (savedTotalRequests > 0 || savedSuccessRequests > 0 || savedFailedRequests > 0) {
-    proxyServer.setRequestStats(savedTotalRequests, savedSuccessRequests, savedFailedRequests)
-  }
-
-  // 同步器可能在反代初始化之前就已经拉到凭证（applyConvoyAccountsToPool 当时无池可注），
-  // 这里补注一次，避免那批凭证一直闲置到下一轮拉取
-  applyConvoyAccountsToPool()
-
-  return proxyServer
-}
-
 // ============ 内置无痕浏览器 ============
 let privateBrowserWindow: BrowserWindow | null = null
 let privateBrowserSessionSequence = 0
@@ -623,7 +316,8 @@ function openBrowserInPrivateMode(url: string): void {
 
     event.preventDefault()
     handleProtocolUrl(navigationUrl)
-    browserWindow.close()
+    // 不在此处关窗：协议回调只代表拿到 code，账号是否成功入库由渲染进程决定，
+    // 由渲染进程在流程终态调用 close-incognito-browser 关闭
   }
 
   browserWindow.webContents.on('will-navigate', handleProtocolNavigation)
@@ -1587,6 +1281,28 @@ async function readCanonicalKiroRefreshTransportCandidates(
   })
 }
 
+/**
+ * 读取账号绑定的出口代理 URL（代理池的「N 账号一个 IP」特性）。
+ * 代理被停用或判死时回退到全局出口（undefined）。
+ */
+function readAccountBoundProxyUrl(accountId: string): string | undefined {
+  if (!accountId || !store) return undefined
+  try {
+    const accountData = store.get('accountData', EMPTY_ACCOUNT_DATA) as {
+      accountProxyBindings?: Record<string, string>
+      proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
+    }
+    const proxyId = accountData.accountProxyBindings?.[accountId]
+    if (!proxyId) return undefined
+    const proxy = accountData.proxyPool?.[proxyId]
+    if (!proxy?.enabled || proxy.status === 'dead') return undefined
+    return proxy.url
+  } catch (err) {
+    console.warn('[Store] Failed to read account bound proxy:', err)
+    return undefined
+  }
+}
+
 function canonicalCredentialResult(
   credentials: CanonicalKiroCredentials
 ): CanonicalKiroCredentialRefreshResult {
@@ -1730,7 +1446,6 @@ function sendRendererEvent(channel: string, value: unknown): void {
   mainWindow?.webContents.send(channel, value)
 }
 
-const LEGACY_PROXY_CONFIG_KEYS = ['agentMode', 'workspacePath'] as const
 const LEGACY_ACCOUNT_DATA_KEYS = ['switchTarget'] as const
 const LEGACY_PROACTIVE_RENEWAL_KEY = 'proactiveRenewalEnabled'
 
@@ -1750,37 +1465,6 @@ function removeLegacyStorageKeys<T extends object>(
   }
 
   return { value: cleaned, changed }
-}
-
-function sanitizeProxyConfig(config: Partial<ProxyConfig>): {
-  value: Partial<ProxyConfig>
-  changed: boolean
-} {
-  return removeLegacyStorageKeys(config, LEGACY_PROXY_CONFIG_KEYS)
-}
-
-/** 先持久化再更新运行时，避免高权限密钥只存在于内存或磁盘。 */
-async function updateAdminApiKeyAtomically(
-  adminApiKey: string | undefined
-): Promise<{ success: boolean; error?: string }> {
-  return accountStoreCoordinator.runExclusive(async () => {
-    try {
-      const server = initProxyServer()
-      const currentStore = store
-      if (!currentStore) return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-
-      const previousConfig = server.getConfig()
-      assertDistinctAdminApiKey({ ...previousConfig, adminApiKey })
-      return switchAdminApiKey(
-        previousConfig,
-        adminApiKey,
-        { write: (config) => currentStore.set('proxyConfig', sanitizeProxyConfig(config).value) },
-        { update: (key) => server.updateConfig({ adminApiKey: key }) }
-      )
-    } catch {
-      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-    }
-  })
 }
 
 let initStorePromise: Promise<void> | null = null
@@ -1821,130 +1505,285 @@ const proxyPoolScheduler = new ProxyPoolScheduler({
   notifyRenderer: (payload) => {
     mainWindow?.webContents.send('proxy-pool-validated', payload)
   },
-  syncBoundAccounts: (proxyId) => {
-    // 代理可用性变化后，更新反代账号池里绑定该代理的账号出口
-    try {
-      if (!proxyServer || !store) return
-      const data = store.get('accountData', EMPTY_ACCOUNT_DATA) as {
-        accountProxyBindings?: Record<string, string>
-        proxyPool?: Record<string, ProxyEntry>
-      }
-      const bindings = data.accountProxyBindings || {}
-      const entry = data.proxyPool?.[proxyId]
-      // 代理被停用或判死则回退到全局出口（undefined），否则用其 URL
-      const usable = entry && entry.enabled && entry.status !== 'dead'
-      const proxyUrl = usable ? entry.url : undefined
-      const pool = proxyServer.getAccountPool()
-      for (const [accountId, boundProxyId] of Object.entries(bindings)) {
-        if (boundProxyId !== proxyId) continue
-        const acc = pool.getAccount(accountId)
-        if (acc) acc.proxyUrl = proxyUrl
-      }
-    } catch (err) {
-      console.warn('[ProxyPoolScheduler] Failed to sync bound accounts:', err)
-    }
-  },
   log: (message) => console.log(message)
 })
 
-// ============ 自动车凭证同步 ============
-/**
- * 自动车拉回来的凭证 + 手填的上游 Key，都以 ProxyAccount 形式注入反代账号池。
- *
- * 这些账号不落盘（用户明确要求）：只活在内存里，进程重启后由同步器重新拉取。
- * 因为不落盘，凡是会 pool.clear() 的路径（渲染进程 proxy-sync-accounts、
- * 自启动时的 syncAccountsToPool）之后都必须重新注入一次，否则会被抹掉。
- */
-let convoyPoolAccounts: ProxyAccount[] = []
-
-function applyConvoyAccountsToPool(): void {
-  if (!proxyServer) return
-  const pool = proxyServer.getAccountPool()
-  const desired = new Map(convoyPoolAccounts.map((account) => [account.id, account]))
-
-  // 摘掉已不在快照里的（凭证过期、下车、用户清除）
-  for (const account of pool.getAllAccounts()) {
-    const isConvoyAccount =
-      account.id.startsWith(CONVOY_ACCOUNT_ID_PREFIX) ||
-      account.id.startsWith(CONVOY_MANUAL_ACCOUNT_ID_PREFIX)
-    if (isConvoyAccount && !desired.has(account.id)) {
-      pool.removeAccount(account.id)
-    }
-  }
-
-  // 已在池里的只更新凭证字段：addAccount 会重置 errorCount/requestCount，
-  // 每轮重加等于每分钟清空断路器状态，失败账号将永远不被熔断
-  let added = 0
-  for (const [id, account] of desired) {
-    if (pool.getAccount(id)) {
-      pool.updateAccount(id, {
-        kiroApiKey: account.kiroApiKey,
-        accessToken: account.accessToken,
-        credentialKind: account.credentialKind,
-        region: account.region,
-        expiresAt: account.expiresAt,
-        email: account.email
-      })
-    } else {
-      pool.addAccount({ ...account })
-      added++
-    }
-  }
-  if (added > 0) {
-    console.log(`[ConvoySync] 新注入 ${added} 个上游凭证到反代账号池（共 ${desired.size} 个）`)
-  }
+interface KskAutomationAccountData {
+  accounts?: Record<string, KskAutomationStoredAccount>
+  groups?: Record<string, { id: string; name: string }>
+  activeAccountId?: string | null
+  accountProxyBindings?: Record<string, string>
+  [key: string]: unknown
 }
 
-const convoySyncManager = new ConvoySyncManager({
-  readConfig: async () => (await loadConvoyState()).config,
-  readConvoyKey: async () => (await loadConvoyState()).convoyKey,
-  fetchImpl: (url, init) =>
-    fetchWithAppProxy(url, { method: init.method, headers: init.headers, signal: init.signal }),
-  verifyKeyRegion: async ({ apiKey, region }) => {
+type KskAutomationSubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise' | 'Teams'
+
+interface KskAutomationStoredAccount {
+  id: string
+  email: string
+  userId?: string
+  nickname?: string
+  idp: 'BuilderId'
+  groupId?: string
+  tags: string[]
+  credentials: {
+    credentialKind: 'kiro_api_key'
+    kiroApiKey: string
+    region: string
+    provider: 'BuilderId'
+  }
+  subscription: Record<string, unknown> & { type: KskAutomationSubscriptionType }
+  usage: Record<string, unknown> & {
+    current: number
+    limit: number
+    percentUsed: number
+    lastUpdated: number
+  }
+  status: 'active'
+  isActive: boolean
+  createdAt: number
+  lastUsedAt: number
+  lastCheckedAt: number
+}
+
+function resolveKskSubscriptionType(title: string): KskAutomationSubscriptionType {
+  const normalized = title.toUpperCase()
+  if (normalized.includes('PRO+') || normalized.includes('PRO_PLUS')) return 'Pro_Plus'
+  if (normalized.includes('PRO')) return 'Pro'
+  if (normalized.includes('POWER') || normalized.includes('ENTERPRISE')) return 'Enterprise'
+  if (normalized.includes('TEAMS')) return 'Teams'
+  return 'Free'
+}
+
+function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boolean {
+  return Object.values(data.accounts ?? {}).some(
+    (account) =>
+      account.credentials?.credentialKind === 'kiro_api_key' &&
+      account.credentials.kiroApiKey === key
+  )
+}
+
+async function importProviderKskCredential(
+  input: ProviderKskCredential & { groupId?: string }
+): Promise<ProviderKskCredential & { added: boolean }> {
+  const duplicate = await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    return hasStoredKskAccount(data, input.key)
+  })
+  if (duplicate) return { ...input, added: false }
+
+  const usage = await getUsageAndLimits(
+    { credentialKind: 'kiro_api_key', kiroApiKey: input.key, idp: 'BuilderId' },
+    'BuilderId',
+    undefined,
+    input.region
+  )
+  const creditUsage = usage.usageBreakdownList?.find(
+    (item) => item.resourceType === 'CREDIT' || item.displayName === 'Credits'
+  )
+  const baseLimit = creditUsage?.usageLimitWithPrecision ?? creditUsage?.usageLimit ?? 0
+  const baseCurrent = creditUsage?.currentUsageWithPrecision ?? creditUsage?.currentUsage ?? 0
+  const freeTrialActive = creditUsage?.freeTrialInfo?.freeTrialStatus === 'ACTIVE'
+  const freeTrialLimit = freeTrialActive
+    ? (creditUsage?.freeTrialInfo?.usageLimitWithPrecision ??
+      creditUsage?.freeTrialInfo?.usageLimit ??
+      0)
+    : 0
+  const freeTrialCurrent = freeTrialActive
+    ? (creditUsage?.freeTrialInfo?.currentUsageWithPrecision ??
+      creditUsage?.freeTrialInfo?.currentUsage ??
+      0)
+    : 0
+  const bonuses = (creditUsage?.bonuses ?? [])
+    .filter((bonus) => bonus.status === 'ACTIVE')
+    .map((bonus) => ({
+      code: bonus.bonusCode || '',
+      name: bonus.displayName || '',
+      current: bonus.currentUsageWithPrecision ?? bonus.currentUsage ?? 0,
+      limit: bonus.usageLimitWithPrecision ?? bonus.usageLimit ?? 0,
+      expiresAt: bonus.expiresAt
+    }))
+  const totalLimit =
+    baseLimit + freeTrialLimit + bonuses.reduce((sum, bonus) => sum + bonus.limit, 0)
+  const totalCurrent =
+    baseCurrent + freeTrialCurrent + bonuses.reduce((sum, bonus) => sum + bonus.current, 0)
+  const subscriptionTitle = usage.subscriptionInfo?.subscriptionTitle || 'Free'
+  const expiresAt = usage.nextDateReset ? new Date(usage.nextDateReset).getTime() : undefined
+  const now = Date.now()
+  const displayName = usage.userInfo?.email || `Kiro API Key ••••${input.key.slice(-4)}`
+
+  return await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    if (hasStoredKskAccount(current, input.key)) return { ...input, added: false }
+    if (input.groupId && !current.groups?.[input.groupId]) {
+      throw new Error('自动拉取目标分组已不存在，请重新选择分组')
+    }
+
+    const account: KskAutomationStoredAccount = {
+      id: randomUUID(),
+      email: displayName,
+      userId: usage.userInfo?.userId || undefined,
+      nickname: displayName,
+      idp: 'BuilderId',
+      groupId: input.groupId,
+      tags: [],
+      credentials: {
+        credentialKind: 'kiro_api_key',
+        kiroApiKey: input.key,
+        region: input.region,
+        provider: 'BuilderId'
+      },
+      subscription: {
+        type: resolveKskSubscriptionType(subscriptionTitle),
+        title: subscriptionTitle,
+        rawType: usage.subscriptionInfo?.type,
+        expiresAt,
+        daysRemaining: expiresAt
+          ? Math.max(0, Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)))
+          : undefined,
+        managementTarget: usage.subscriptionInfo?.subscriptionManagementTarget,
+        upgradeCapability: usage.subscriptionInfo?.upgradeCapability,
+        overageCapability: usage.subscriptionInfo?.overageCapability
+      },
+      usage: {
+        current: totalCurrent,
+        limit: totalLimit,
+        percentUsed: totalLimit > 0 ? (totalCurrent / totalLimit) * 100 : 0,
+        lastUpdated: now,
+        baseLimit,
+        baseCurrent,
+        freeTrialLimit,
+        freeTrialCurrent,
+        freeTrialExpiry: creditUsage?.freeTrialInfo?.freeTrialExpiry,
+        bonuses,
+        nextResetDate: usage.nextDateReset
+      },
+      status: 'active',
+      isActive: false,
+      createdAt: now,
+      lastUsedAt: now,
+      lastCheckedAt: now
+    }
+    const next = {
+      ...current,
+      accounts: { ...(current.accounts ?? {}), [account.id]: account }
+    }
+    store!.set('accountData', next)
+    lastSavedData = next
+    await createBackup(next)
+    return { ...input, added: true }
+  })
+}
+
+async function cleanupInvalidStoredKskAccounts(
+  groupId?: string
+): Promise<KskCredentialCleanupResult> {
+  const candidates = await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    return Object.values(data.accounts ?? {}).filter(
+      (account) =>
+        account.groupId === groupId &&
+        account.credentials?.credentialKind === 'kiro_api_key' &&
+        Boolean(account.credentials.kiroApiKey && account.credentials.region)
+    )
+  })
+  const result: KskCredentialCleanupResult = {
+    checked: candidates.length,
+    removed: 0,
+    retainedTransient: 0,
+    errors: []
+  }
+  const permanentlyInvalid = new Map<string, { key: string; groupId?: string }>()
+
+  await mapWithConcurrency(candidates, KSK_CREDENTIAL_VALIDATION_CONCURRENCY, async (account) => {
     try {
-      const usage = await getUsageAndLimits(
-        { credentialKind: 'kiro_api_key', kiroApiKey: apiKey, idp: 'BuilderId' },
+      await getUsageAndLimits(
+        {
+          credentialKind: 'kiro_api_key',
+          kiroApiKey: account.credentials.kiroApiKey,
+          idp: 'BuilderId'
+        },
         'BuilderId',
         undefined,
-        region
+        account.credentials.region
       )
-      return { ok: true, email: usage.userInfo?.email }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    } catch (error) {
+      if (isPermanentKskCredentialError(error)) {
+        permanentlyInvalid.set(account.id, {
+          key: account.credentials.kiroApiKey,
+          groupId: account.groupId
+        })
+      } else {
+        result.retainedTransient++
+      }
     }
-  },
-  applyToAccountPool: ({ credentials, manualKeys }) => {
-    const accounts: ProxyAccount[] = []
-    for (const credential of credentials) {
-      // OAuth 凭证没有 refreshToken，过期只能靠下一轮重新拉取，不能标成可刷新
-      const isApiKey = Boolean(credential.apiKey)
-      accounts.push({
-        id: `${CONVOY_ACCOUNT_ID_PREFIX}${credential.id}`,
-        email: `convoy-${credential.id}`,
-        status: 'active',
-        credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
-        kiroApiKey: credential.apiKey,
-        accessToken: credential.accessToken,
-        region: credential.region || 'us-east-1',
-        provider: 'BuilderId',
-        expiresAt: credential.expiresAt
-      })
-    }
-    for (const manual of manualKeys) {
-      accounts.push({
-        id: `${CONVOY_MANUAL_ACCOUNT_ID_PREFIX}${manual.id}`,
-        email: manual.email || `manual-key-${manual.id}`,
-        status: 'active',
-        credentialKind: 'kiro_api_key',
-        kiroApiKey: manual.apiKey,
-        region: manual.region,
-        provider: 'BuilderId'
-      })
-    }
-    convoyPoolAccounts = accounts
-    applyConvoyAccountsToPool()
-  },
-  notifyStatus: (status) => sendConvoyStatus(() => mainWindow, status),
+    return undefined
+  })
+  if (permanentlyInvalid.size === 0) return result
+
+  const removedIds = await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    const { data: next, removedIds } = removeMatchingInvalidKskAccounts(current, permanentlyInvalid)
+    if (removedIds.length === 0) return removedIds
+    store!.set('accountData', next)
+    lastSavedData = next
+    await createBackup(next)
+    return removedIds
+  })
+
+  result.removed = removedIds.length
+  return result
+}
+
+async function readKskAccountsForLocalAdmin(
+  groupId: string
+): Promise<Array<{ kiroApiKey: string; region: string }>> {
+  return await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    return Object.values(data.accounts ?? {}).flatMap((account) => {
+      const key = account.credentials?.kiroApiKey?.trim()
+      const region = account.credentials?.region?.trim()
+      if (
+        account.groupId !== groupId ||
+        account.credentials?.credentialKind !== 'kiro_api_key' ||
+        !key ||
+        !region
+      ) {
+        return []
+      }
+      return [{ kiroApiKey: key, region }]
+    })
+  })
+}
+
+const kskAutomationManager = new KskAutomationManager({
+  readStore: loadKskAutomationStore,
+  readTask: loadKskAutomationTask,
+  fetchImpl: (url, init) =>
+    fetchWithAppProxy(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal
+    }),
+  localAdminFetchImpl: async (url, init) =>
+    (await undiciFetch(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal,
+      dispatcher: localAdminDirectAgent
+    })) as unknown as Response,
+  importCredential: importProviderKskCredential,
+  readLocalAdminAccounts: readKskAccountsForLocalAdmin,
+  cleanupProxyAccounts: cleanupInvalidStoredKskAccounts,
+  notifyStatus: (status) => sendKskAutomationStatus(() => mainWindow, status),
+  notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
   log: (message) => console.log(message)
 })
 
@@ -1987,16 +1826,6 @@ async function initStoreInternal(): Promise<void> {
       storeInstance.delete(LEGACY_PROACTIVE_RENEWAL_KEY)
     }
 
-    const savedProxyConfig = storeInstance.get('proxyConfig')
-    if (
-      savedProxyConfig &&
-      typeof savedProxyConfig === 'object' &&
-      !Array.isArray(savedProxyConfig)
-    ) {
-      const cleaned = removeLegacyStorageKeys(savedProxyConfig, LEGACY_PROXY_CONFIG_KEYS)
-      if (cleaned.changed) storeInstance.set('proxyConfig', cleaned.value)
-    }
-
     const accountData = storeInstance.get('accountData')
     if (accountData && typeof accountData === 'object' && !Array.isArray(accountData)) {
       const cleaned = removeLegacyStorageKeys(accountData, LEGACY_ACCOUNT_DATA_KEYS)
@@ -2011,71 +1840,12 @@ async function initStoreInternal(): Promise<void> {
   } catch (error) {
     console.error('[Store] Account data migration failed:', error)
   }
-}
 
-type ProxyLifecycleResult = { success: boolean; port?: number; error?: string }
-
-async function startProxy(config?: Partial<ProxyConfig>): Promise<ProxyLifecycleResult> {
-  await initStore()
-  return accountStoreCoordinator.runExclusive(() => startProxyUnlocked(config))
-}
-
-async function startProxyUnlocked(config?: Partial<ProxyConfig>): Promise<ProxyLifecycleResult> {
-  try {
-    const server = initProxyServer()
-    if (config) server.updateConfig(sanitizeProxyConfig(stripAdminApiKey(config)).value)
-    await server.start()
-    updateTrayMenu()
-    return { success: true, port: server.getConfig().port }
-  } catch (error) {
-    console.error('[ProxyServer] Start failed:', error)
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to start proxy server'
-    }
+  // 恢复保存的 Usage API 类型
+  const savedUsageApiType = storeInstance.get('usageApiType') as 'rest' | 'cbor' | undefined
+  if (savedUsageApiType) {
+    setUsageApiType(savedUsageApiType)
   }
-}
-
-async function restartProxy(): Promise<ProxyLifecycleResult> {
-  await initStore()
-  return accountStoreCoordinator.runExclusive(async () => {
-    if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
-    try {
-      await proxyServer.restartServer()
-      updateTrayMenu()
-      return { success: true }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to restart proxy server'
-      }
-    }
-  })
-}
-
-async function stopProxyWithLifecycleGate(): Promise<ProxyLifecycleResult> {
-  await initStore()
-  return accountStoreCoordinator.runExclusive(stopProxyUnlocked)
-}
-
-async function stopProxyUnlocked(): Promise<ProxyLifecycleResult> {
-  try {
-    await proxyServer?.stop()
-    updateTrayMenu()
-    return { success: true }
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to stop proxy server'
-    }
-  }
-}
-
-async function toggleProxy(): Promise<ProxyLifecycleResult> {
-  await initStore()
-  return accountStoreCoordinator.runExclusive(async () => {
-    return proxyServer?.isRunning() ? stopProxyUnlocked() : startProxyUnlocked()
-  })
 }
 
 /**
@@ -2489,121 +2259,11 @@ function initTray(): void {
     onSwitchAccount: async () => {
       mainWindow?.webContents.send('tray-switch-account')
     },
-    onToggleProxy: async () => {
-      await toggleProxy()
-    },
-    getProxyStatus: () => {
-      if (!proxyServer) return { running: false, port: 5580 }
-      return { running: proxyServer.isRunning(), port: proxyServer.getConfig().port }
-    },
     getCurrentAccount: () => currentProxyAccount,
-    getAccountList: () => allAccounts,
-    getProxyStats: () => {
-      if (!proxyServer) return { totalRequests: 0, successRequests: 0, failedRequests: 0 }
-      const stats = proxyServer.getStats()
-      return {
-        totalRequests: stats.totalRequests,
-        successRequests: stats.successRequests,
-        failedRequests: stats.failedRequests
-      }
-    },
-    getSessionStats: () =>
-      proxyServer?.getSessionStats() ?? {
-        totalRequests: 0,
-        successRequests: 0,
-        failedRequests: 0,
-        startTime: Date.now()
-      }
+    getAccountList: () => allAccounts
   })
 
   setTrayTooltip(`${APP_NAME} v${app.getVersion()}`)
-}
-
-let configuredProxyAutoStartAttempt: Promise<void> | null = null
-
-function attemptConfiguredProxyAutoStart(): Promise<void> {
-  if (configuredProxyAutoStartAttempt) return configuredProxyAutoStartAttempt
-  const attempt = accountStoreCoordinator.runExclusive(async () => {
-    try {
-      await initStore()
-      if (!store) return
-
-      const savedProxyConfig = store.get('proxyConfig') as ProxyConfig | undefined
-      if (!savedProxyConfig?.autoStart || proxyServer?.isRunning()) return
-
-      console.log('[ProxyServer] Auto-starting proxy server...')
-      const server = initProxyServer()
-      server.updateConfig(savedProxyConfig)
-
-      const syncAccountsToPool = (): number => {
-        const accountData = store!.get('accountData') as
-          | {
-              accounts?: Record<string, any>
-              accountProxyBindings?: Record<string, string>
-              proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-            }
-          | undefined
-        if (!accountData?.accounts) return 0
-
-        const bindings = accountData.accountProxyBindings || {}
-        const proxyPool = accountData.proxyPool || {}
-        const buildProxyUrl = (accountId: string): string | undefined => {
-          const proxyId = bindings[accountId]
-          if (!proxyId) return undefined
-          const proxy = proxyPool[proxyId]
-          if (!proxy || !proxy.enabled || proxy.status === 'dead') return undefined
-          return proxy.url
-        }
-
-        const proxyAccounts = buildProxyAccounts(Object.values(accountData.accounts), buildProxyUrl)
-        if (proxyAccounts.length > 0) {
-          const pool = server.getAccountPool()
-          pool.clear()
-          proxyAccounts.forEach((account) => pool.addAccount(account))
-          // clear 会抹掉内存里的自动车凭证，补回来
-          applyConvoyAccountsToPool()
-        }
-        return proxyAccounts.length
-      }
-
-      const syncedCount = syncAccountsToPool()
-      if (syncedCount > 0) {
-        console.log('[ProxyServer] Auto-synced', syncedCount, 'accounts')
-      } else {
-        console.log('[ProxyServer] No accounts found on initial sync, will retry...')
-        const retrySync = (attemptNumber: number): void => {
-          setTimeout(() => {
-            const count = syncAccountsToPool()
-            if (count > 0) {
-              console.log(`[ProxyServer] Retry #${attemptNumber}: synced ${count} accounts`)
-            } else if (attemptNumber < 5) {
-              retrySync(attemptNumber + 1)
-            } else {
-              console.log(
-                '[ProxyServer] All retry attempts exhausted, no accounts available. Accounts will sync when UI loads.'
-              )
-            }
-          }, attemptNumber * 2000)
-        }
-        retrySync(1)
-      }
-
-      const startResult = await startProxyUnlocked()
-      if (!startResult.success) {
-        console.error('[ProxyServer] Auto-start blocked:', startResult.error)
-        return
-      }
-      console.log('[ProxyServer] Auto-started successfully on port', savedProxyConfig.port || 5580)
-    } catch (error) {
-      console.error('[ProxyServer] Auto-start failed:', error)
-    }
-  })
-  configuredProxyAutoStartAttempt = attempt
-  const clearAttempt = (): void => {
-    if (configuredProxyAutoStartAttempt === attempt) configuredProxyAutoStartAttempt = null
-  }
-  void attempt.then(clearAttempt, clearAttempt)
-  return attempt
 }
 
 function createWindow(): void {
@@ -2652,11 +2312,6 @@ function createWindow(): void {
     // 设置带版本号的标题（HTML 加载后会覆盖初始标题）
     mainWindow?.setTitle(`${APP_NAME} v${app.getVersion()}`)
     mainWindow?.show()
-
-    // 首次尝试若生命周期协调尚未完成，后续仍会幂等触发。
-    setTimeout(() => {
-      void attemptConfiguredProxyAutoStart()
-    }, 1000)
   })
 
   mainWindow.on('close', (event) => {
@@ -2803,6 +2458,11 @@ app.whenReady().then(async () => {
     }
   })
 
+  // 登录流程走到终态（账号已入库 / 失败 / 取消）后，由渲染进程关闭无痕浏览器
+  ipcMain.on('close-incognito-browser', () => {
+    closePrivateBrowserWindow()
+  })
+
   // ============ 注册功能 IPC ============
   registerRegistrationHandlers(() => mainWindow)
 
@@ -2811,14 +2471,13 @@ app.whenReady().then(async () => {
     console.warn('[ProxyPoolScheduler] Failed to start:', err)
   })
 
-  // ============ 自动车凭证同步 IPC ============
-  registerConvoyIpcHandlers({
-    getManager: () => convoySyncManager,
+  // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
+  registerKskAutomationIpcHandlers({
+    getManager: () => kskAutomationManager,
     getMainWindow: () => mainWindow
   })
-  // 同步器读盘自启：enabled=false 或未配 Key 时只进 idle，不发请求
-  void convoySyncManager.start().catch((err) => {
-    console.warn('[ConvoySync] Failed to start:', err)
+  void kskAutomationManager.start().catch((err) => {
+    console.warn('[KskAutomation] Failed to start:', err)
   })
 
   // ============ 托盘相关 IPC ============
@@ -3042,68 +2701,6 @@ app.whenReady().then(async () => {
     }
   })
 
-  // ============ 账号-代理绑定（反代时 N 账号一个 IP）============
-  /**
-   * 设置账号在反代场景下使用的出口代理 URL
-   * 同时更新：反代账号池里现存的 ProxyAccount.proxyUrl + store 持久化的 accountProxyBindings
-   */
-  ipcMain.handle(
-    'account-set-proxy-binding',
-    async (_event, accountId: string, proxyUrl: string | undefined) => {
-      try {
-        if (!accountId) return { success: false }
-        // 更新反代账号池内存中的 proxyUrl
-        if (proxyServer) {
-          const pool = proxyServer.getAccountPool()
-          const acc = pool.getAccount(accountId)
-          if (acc) {
-            acc.proxyUrl = proxyUrl || undefined
-            console.log(
-              `[ProxyServer] Account ${acc.email || accountId.slice(0, 8)} proxy ${proxyUrl ? `bound to ${proxyUrl.replace(/:([^:@/]+)@/, ':***@')}` : 'unbound'}`
-            )
-          }
-        }
-        return { success: true }
-      } catch (err) {
-        console.error('[account-set-proxy-binding] error:', err)
-        return { success: false }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    'account-set-endpoint-config',
-    async (
-      _event,
-      accountId: string,
-      config: {
-        preferredEndpoint?: ProxyAccount['preferredEndpoint']
-        endpointFallbackAfterFailures?: number
-      }
-    ) => {
-      try {
-        if (!accountId) return { success: false }
-        const acc = proxyServer?.getAccountPool().getAccount(accountId)
-        if (acc) {
-          acc.preferredEndpoint = config.preferredEndpoint
-          acc.endpointFallbackOrder =
-            config.preferredEndpoint === 'codewhisperer'
-              ? ['amazonq']
-              : config.preferredEndpoint === 'amazonq'
-                ? ['codewhisperer']
-                : config.preferredEndpoint === 'amazonq-cli'
-                  ? ['amazonq', 'codewhisperer']
-                  : undefined
-          acc.endpointFallbackAfterFailures = config.endpointFallbackAfterFailures
-        }
-        return { success: true }
-      } catch (err) {
-        console.error('[account-set-endpoint-config] error:', err)
-        return { success: false }
-      }
-    }
-  )
-
   // ============ 通用 HTTP 诊断探测 ============
   /**
    * 使用应用代理设置发起一次 GET/HEAD 请求，返回延迟、状态码、错误信息。
@@ -3149,7 +2746,7 @@ app.whenReady().then(async () => {
     }
   )
 
-  // IPC: 账号测活 —— 指定账号走反代逻辑（callKiroApi，与反代服务器同一底层调用）
+  // IPC: 账号测活 —— 给指定账号的指定模型发一条真实消息（callKiroApi）
   // 给指定模型发一条测试消息，验证账号是否能正常返回，用于一键诊断"账号测活"功能
   ipcMain.handle(
     'diagnose:account-liveness',
@@ -3170,6 +2767,11 @@ app.whenReady().then(async () => {
           expiresAt?: number
           credentialRevision?: string
           proxyUrl?: string
+          credentialKind?: 'oauth' | 'kiro_api_key'
+          kiroApiKey?: string
+          preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
+          endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
+          endpointFallbackAfterFailures?: number
         }
         model?: string
         message?: string
@@ -3185,8 +2787,9 @@ app.whenReady().then(async () => {
           const timeoutMs = params?.timeoutMs ?? 45000
           const start = Date.now()
 
-          if (!acc || !acc.accessToken) {
-            return { success: false, error: '账号缺少 accessToken', latencyMs: 0 }
+          const isApiKeyAccount = acc?.credentialKind === 'kiro_api_key'
+          if (!acc || (isApiKeyAccount ? !acc.kiroApiKey : !acc.accessToken)) {
+            return { success: false, error: '账号缺少上游凭据', latencyMs: 0 }
           }
 
           const controller = new AbortController()
@@ -3203,7 +2806,7 @@ app.whenReady().then(async () => {
                 }
               | undefined
             const needsRefresh = acc.expiresAt ? acc.expiresAt - Date.now() < 60_000 : false
-            if (needsRefresh && acc.refreshToken) {
+            if (!isApiKeyAccount && needsRefresh && acc.refreshToken) {
               try {
                 const r = acc.id
                   ? await refreshStoredKiroCredentials({
@@ -3251,7 +2854,12 @@ app.whenReady().then(async () => {
               provider: acc.provider,
               profileArn: acc.profileArn,
               proxyUrl: acc.proxyUrl,
-              expiresAt: acc.expiresAt
+              expiresAt: acc.expiresAt,
+              credentialKind: acc.credentialKind,
+              kiroApiKey: acc.kiroApiKey,
+              preferredEndpoint: acc.preferredEndpoint,
+              endpointFallbackOrder: acc.endpointFallbackOrder,
+              endpointFallbackAfterFailures: acc.endpointFallbackAfterFailures
             }
 
             // 3) 构建最小 OpenAI chat 请求 → 转 Kiro payload
@@ -3265,7 +2873,7 @@ app.whenReady().then(async () => {
               proxyAccount.profileArn
             )
 
-            // 4) 调用（与反代服务器内部完全相同的底层调用）
+            // 4) 调用 Kiro API
             const result = await callKiroApi(proxyAccount, payload, controller.signal)
             const latencyMs = Date.now() - start
             const content = (result.content || '').trim()
@@ -3309,8 +2917,8 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 保存账号数据
-  ipcMain.handle('save-accounts', async (_event, data) =>
-    accountStoreCoordinator.runExclusive(async () => {
+  ipcMain.handle('save-accounts', async (_event, data) => {
+    await accountStoreCoordinator.runExclusive(async () => {
       try {
         await initStore()
         const current = store!.get('accountData', EMPTY_ACCOUNT_DATA)
@@ -3327,7 +2935,9 @@ app.whenReady().then(async () => {
         throw error
       }
     })
-  )
+    // 所有账号入口最终都会落到 save-accounts；在锁外合并触发，避免网络请求占住账号存储锁。
+    kskAutomationManager.queueLocalAdminSync()
+  })
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
   ipcMain.handle('refresh-account-token', async (_event, account) =>
@@ -3363,9 +2973,7 @@ app.whenReady().then(async () => {
           }
 
           // 查找账号绑定的代理 URL（账号池中已有 proxyUrl 字段）
-          const boundProxyUrl = proxyServer
-            ? proxyServer.getAccountPool().getAccount(account.id || '')?.proxyUrl
-            : undefined
+          const boundProxyUrl = readAccountBoundProxyUrl(account.id || '')
 
           console.log(
             `[IPC] Refreshing token (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`
@@ -3414,7 +3022,7 @@ app.whenReady().then(async () => {
                 console.warn('[Refresh] Failed to fetch Enterprise profileArn:', e)
               }
             }
-            // BuilderId/Social 不调 API，不需要返回 profileArn（反代自愈时用 resolveProfileArn 兜底）
+            // BuilderId/Social 不调 API，不需要返回 profileArn（用 resolveProfileArn 兜底）
           }
 
           return {
@@ -3889,9 +3497,7 @@ app.whenReady().then(async () => {
       const upstreamAuth = getUpstreamKiroAuth(upstreamCredential)
 
       // 查询账号绑定的代理（账号池）
-      const boundProxyUrl = proxyServer
-        ? proxyServer.getAccountPool().getAccount(account.id || '')?.proxyUrl
-        : undefined
+      const boundProxyUrl = readAccountBoundProxyUrl(account.id || '')
 
       // 确定正确的 idp：优先使用 credentials.provider，否则回退到 account.idp
       // 社交登录使用实际的 provider (Github/Google)，IdC 使用 BuilderId
@@ -4070,10 +3676,8 @@ app.whenReady().then(async () => {
               provider
             } = account.credentials
 
-            // 查询账号绑定的代理（从主进程账号池）
-            const boundProxyUrl = proxyServer
-              ? proxyServer.getAccountPool().getAccount(account.id)?.proxyUrl
-              : undefined
+            // 查询账号绑定的代理
+            const boundProxyUrl = readAccountBoundProxyUrl(account.id)
 
             // 确定正确的 idp
             let idp = 'BuilderId'
@@ -5476,7 +5080,6 @@ app.whenReady().then(async () => {
       if (tokenRes.status === 200) {
         const tokenData = await tokenRes.json()
         console.log('[Login] Authorization successful!')
-        closePrivateBrowserWindow()
 
         const result = {
           success: true,
@@ -5689,7 +5292,6 @@ app.whenReady().then(async () => {
                 } else {
                   const tokenData = await tokenRes.json()
                   console.log('[Login] IAM SSO Authorization successful!')
-                  closePrivateBrowserWindow()
                   iamSsoResult = {
                     completed: true,
                     success: true,
@@ -5995,610 +5597,6 @@ app.whenReady().then(async () => {
     }
   })
 
-  // ============ Kiro API 反代服务器 IPC ============
-
-  // IPC: 启动反代服务器
-  ipcMain.handle('proxy-start', async (_event, config?: Partial<ProxyConfig>) => startProxy(config))
-
-  // IPC: 停止反代服务器
-  ipcMain.handle('proxy-stop', async () => stopProxyWithLifecycleGate())
-
-  // IPC: 获取反代服务器状态
-  ipcMain.handle('proxy-get-status', () => {
-    if (!proxyServer) {
-      // 未初始化时从 store 读取保存的配置
-      const savedConfig = store?.get('proxyConfig') as ProxyConfig | undefined
-      const { adminApiKey: _adminApiKey, ...safeConfig } = savedConfig || {}
-      return {
-        running: false,
-        config: savedConfig ? safeConfig : null,
-        stats: null,
-        sessionStats: null
-      }
-    }
-    const { adminApiKey: _adminApiKey, ...safeConfig } = proxyServer.getConfig()
-    return {
-      running: proxyServer.isRunning(),
-      config: safeConfig,
-      stats: proxyServer.getStats(),
-      sessionStats: proxyServer.getSessionStats()
-    }
-  })
-
-  // IPC: 重置累计 credits
-  ipcMain.handle('proxy-reset-credits', () => {
-    if (proxyServer) {
-      proxyServer.resetTotalCredits()
-    }
-    if (store) {
-      store.set('proxyTotalCredits', 0)
-    }
-    return { success: true }
-  })
-
-  // IPC: 重置累计 tokens
-  ipcMain.handle('proxy-reset-tokens', () => {
-    if (proxyServer) {
-      proxyServer.resetTotalTokens()
-    }
-    if (store) {
-      store.set('proxyInputTokens', 0)
-      store.set('proxyOutputTokens', 0)
-    }
-    return { success: true }
-  })
-
-  // IPC: 重置请求统计
-  ipcMain.handle('proxy-reset-request-stats', () => {
-    if (proxyServer) {
-      proxyServer.resetRequestStats()
-    }
-    if (store) {
-      store.set('proxyTotalRequests', 0)
-      store.set('proxySuccessRequests', 0)
-      store.set('proxyFailedRequests', 0)
-    }
-    return { success: true }
-  })
-
-  // IPC: 获取反代日志
-  ipcMain.handle('proxy-get-logs', (_event, count?: number) => {
-    if (count) {
-      return proxyLogStore.getLast(count)
-    }
-    return proxyLogStore.getAll()
-  })
-
-  // IPC: 清除反代日志
-  ipcMain.handle('proxy-clear-logs', () => {
-    proxyLogStore.clear()
-    return { success: true }
-  })
-
-  // IPC: 获取反代日志数量
-  ipcMain.handle('proxy-get-logs-count', () => {
-    return proxyLogStore.count()
-  })
-
-  // IPC: 获取 Usage API 类型
-  ipcMain.handle('get-usage-api-type', () => {
-    return currentUsageApiType
-  })
-
-  // IPC: 设置 Usage API 类型
-  ipcMain.handle('set-usage-api-type', (_event, type: 'rest' | 'cbor') => {
-    setUsageApiType(type)
-    // 保存到 store
-    if (store) {
-      store.set('usageApiType', type)
-    }
-    return { success: true, type }
-  })
-
-  // IPC: 更新反代服务器配置
-  ipcMain.handle('proxy-update-config', async (_event, config: Partial<ProxyConfig>) =>
-    accountStoreCoordinator.runExclusive(async () => {
-      try {
-        // 管理员密钥只能经专用 IPC 变更，泛型设置绝不能覆盖或读回它。
-        const sanitizedConfig = sanitizeProxyConfig(stripAdminApiKey(config))
-        const server = initProxyServer()
-        server.updateConfig(sanitizedConfig.value)
-        const newConfig = server.getConfig()
-        // 同步流式日志开关
-        if (sanitizedConfig.value.logStreamEvents !== undefined) {
-          setLogStreamEvents(sanitizedConfig.value.logStreamEvents)
-        }
-        // 同步 payload 大小限制
-        if (sanitizedConfig.value.payloadSizeLimitKB !== undefined) {
-          setPayloadSizeLimitKB(sanitizedConfig.value.payloadSizeLimitKB)
-        }
-        // 同步 Token buffer reserve（开关 + 数值）
-        if (sanitizedConfig.value.enableTokenBufferReserve !== undefined) {
-          setEnableTokenBufferReserve(sanitizedConfig.value.enableTokenBufferReserve)
-        }
-        if (sanitizedConfig.value.tokenBufferReserve !== undefined) {
-          setTokenBufferReserve(sanitizedConfig.value.tokenBufferReserve)
-        }
-        // 保存配置到 store（用于自启动）
-        if (store) {
-          store.set('proxyConfig', sanitizeProxyConfig(newConfig).value)
-        }
-        const { adminApiKey: _adminApiKey, ...safeConfig } = newConfig
-        return { success: true, config: safeConfig }
-      } catch (error) {
-        console.error('[ProxyServer] Update config failed:', error)
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to update config'
-        }
-      }
-    })
-  )
-
-  // 管理员密钥始终在主进程生成、持久化和清除；原文只在本次 rotate/set 响应返回。
-  ipcMain.handle('proxy-admin-key-status', () => {
-    try {
-      const config =
-        proxyServer?.getConfig() ?? (store?.get('proxyConfig') as ProxyConfig | undefined)
-      return { configured: !!config?.adminApiKey }
-    } catch {
-      return { configured: false, success: false, error: ADMIN_KEY_UPDATE_ERROR }
-    }
-  })
-
-  ipcMain.handle('proxy-admin-key-rotate', async () => {
-    try {
-      const adminApiKey = `${ADMIN_API_KEY_PREFIX}${randomBytes(32).toString('base64url')}`
-      const result = await updateAdminApiKeyAtomically(adminApiKey)
-      return result.success ? { success: true, adminApiKey } : result
-    } catch {
-      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-    }
-  })
-
-  ipcMain.handle('proxy-admin-key-set', async (_event, value: unknown) => {
-    try {
-      if (typeof value !== 'string' || !value.trim())
-        return { success: false, error: 'Invalid admin API key' }
-      const adminApiKey = value.trim()
-      const result = await updateAdminApiKeyAtomically(adminApiKey)
-      return result.success ? { success: true, adminApiKey } : result
-    } catch {
-      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-    }
-  })
-
-  ipcMain.handle('proxy-admin-key-clear', async () => {
-    try {
-      return await updateAdminApiKeyAtomically(undefined)
-    } catch {
-      return { success: false, error: ADMIN_KEY_UPDATE_ERROR }
-    }
-  })
-
-  // ============ 反代安全 / 可观测 IPC（v1.8 新增） ============
-
-  // 获取自签证书信息（PEM、指纹、有效期、SAN）
-  ipcMain.handle('proxy-self-signed-cert-info', () => {
-    try {
-      if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
-      const info = proxyServer.getSelfSignedCertInfo()
-      if (!info) return { success: false, error: 'Failed to get self-signed cert info' }
-      return { success: true, ...info }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
-
-  // 重新生成自签证书（用户主动触发）
-  ipcMain.handle('proxy-self-signed-cert-regenerate', () => {
-    try {
-      if (!proxyServer) return { success: false, error: 'Proxy server not initialized' }
-      const info = proxyServer.regenerateSelfSignedCert()
-      if (!info) return { success: false, error: 'Failed to regenerate self-signed cert' }
-      return { success: true, ...info }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
-
-  // 检查反代配置是否需要重启
-  ipcMain.handle('proxy-needs-restart', () => {
-    try {
-      if (!proxyServer) return { needsRestart: false }
-      return { needsRestart: proxyServer.needsRestart() }
-    } catch {
-      return { needsRestart: false }
-    }
-  })
-
-  // 重启反代（用户在 UI 点"立即重启"时调用）
-  ipcMain.handle('proxy-restart', async () => restartProxy())
-
-  // 获取反代审计日志
-  ipcMain.handle('proxy-audit-log', () => {
-    try {
-      if (!proxyServer) return { entries: [] }
-      return { entries: proxyServer.getAuditLog().slice(-200) }
-    } catch {
-      return { entries: [] }
-    }
-  })
-
-  // ============ API Key 管理 IPC ============
-
-  // IPC: 获取所有 API Keys
-  ipcMain.handle('proxy-get-api-keys', () => {
-    try {
-      const config =
-        proxyServer?.getConfig() ?? (store?.get('proxyConfig') as ProxyConfig | undefined)
-      return { success: true, apiKeys: config?.apiKeys || [] }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to get API keys',
-        apiKeys: []
-      }
-    }
-  })
-
-  // IPC: 添加 API Key
-  ipcMain.handle(
-    'proxy-add-api-key',
-    async (
-      _event,
-      apiKey: {
-        name: string
-        key?: string
-        format?: 'sk' | 'simple' | 'token'
-        creditsLimit?: number
-      }
-    ) =>
-      accountStoreCoordinator.runExclusive(async () => {
-        try {
-          const crypto = await import('crypto')
-          const server = initProxyServer()
-          const config = server.getConfig()
-          const apiKeys = [...(config.apiKeys || [])]
-
-          // 根据格式生成随机 Key
-          const format = apiKey.format || 'sk'
-          let newKey = apiKey.key
-          if (!newKey) {
-            const randomHex = crypto.randomBytes(24).toString('hex')
-            switch (format) {
-              case 'sk':
-                newKey = `sk-${randomHex}`
-                break
-              case 'simple':
-                newKey = `PROXY_KEY_${randomHex.toUpperCase().substring(0, 32)}`
-                break
-              case 'token':
-                newKey = `KEY:${randomHex.substring(0, 16)}:TOKEN:${randomHex.substring(16, 32)}`
-                break
-              default:
-                newKey = `sk-${randomHex}`
-            }
-          }
-
-          const newApiKey: import('./proxy/types').ApiKey = {
-            id: crypto.randomUUID(),
-            name: apiKey.name || `API Key ${apiKeys.length + 1}`,
-            key: newKey,
-            format: format,
-            enabled: true,
-            createdAt: Date.now(),
-            creditsLimit: apiKey.creditsLimit,
-            usage: {
-              totalRequests: 0,
-              totalCredits: 0,
-              totalInputTokens: 0,
-              totalOutputTokens: 0,
-              daily: {}
-            }
-          }
-
-          const nextApiKeys = [...apiKeys, newApiKey]
-          server.updateConfig({ apiKeys: nextApiKeys })
-
-          if (store) {
-            store.set('proxyConfig', server.getConfig())
-          }
-
-          return { success: true, apiKey: newApiKey }
-        } catch (error) {
-          return {
-            success: false,
-            error: error instanceof Error ? error.message : 'Failed to add API key'
-          }
-        }
-      })
-  )
-
-  // IPC: 更新 API Key
-  ipcMain.handle(
-    'proxy-update-api-key',
-    (_event, id: string, updates: Partial<import('./proxy/types').ApiKey>) =>
-      accountStoreCoordinator.runExclusive(async () => {
-        try {
-          const server = initProxyServer()
-          const config = server.getConfig()
-          const apiKeys = config.apiKeys || []
-
-          const index = apiKeys.findIndex((k) => k.id === id)
-          if (index === -1) {
-            return { success: false, error: 'API key not found' }
-          }
-
-          // 更新字段（不允许更新 id、createdAt、usage）
-          const { id: _, createdAt: __, usage: ___, ...allowedUpdates } = updates
-          const updatedApiKey = { ...apiKeys[index], ...allowedUpdates }
-          const nextApiKeys = apiKeys.map((apiKey, currentIndex) =>
-            currentIndex === index ? updatedApiKey : apiKey
-          )
-
-          server.updateConfig({ apiKeys: nextApiKeys })
-
-          if (store) {
-            store.set('proxyConfig', server.getConfig())
-          }
-
-          return { success: true, apiKey: updatedApiKey }
-        } catch (error) {
-          return {
-            success: false,
-            error: error instanceof Error ? error.message : 'Failed to update API key'
-          }
-        }
-      })
-  )
-
-  // IPC: 删除 API Key
-  ipcMain.handle('proxy-delete-api-key', (_event, id: string) =>
-    accountStoreCoordinator.runExclusive(async () => {
-      try {
-        const server = initProxyServer()
-        const config = server.getConfig()
-        const apiKeys = config.apiKeys || []
-
-        const index = apiKeys.findIndex((k) => k.id === id)
-        if (index === -1) {
-          return { success: false, error: 'API key not found' }
-        }
-
-        const nextApiKeys = apiKeys.filter((apiKey) => apiKey.id !== id)
-        server.updateConfig({ apiKeys: nextApiKeys })
-
-        if (store) {
-          store.set('proxyConfig', server.getConfig())
-        }
-
-        return { success: true }
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to delete API key'
-        }
-      }
-    })
-  )
-
-  // IPC: 重置 API Key 用量统计
-  ipcMain.handle('proxy-reset-api-key-usage', (_event, id: string) =>
-    accountStoreCoordinator.runExclusive(async () => {
-      try {
-        const server = initProxyServer()
-        const config = server.getConfig()
-        const apiKeys = config.apiKeys || []
-
-        const apiKey = apiKeys.find((k) => k.id === id)
-        if (!apiKey) {
-          return { success: false, error: 'API key not found' }
-        }
-
-        const resetApiKey = {
-          ...apiKey,
-          usage: {
-            totalRequests: 0,
-            totalCredits: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            daily: {}
-          }
-        }
-        const nextApiKeys = apiKeys.map((currentApiKey) =>
-          currentApiKey.id === id ? resetApiKey : currentApiKey
-        )
-
-        server.updateConfig({ apiKeys: nextApiKeys })
-
-        if (store) {
-          store.set('proxyConfig', server.getConfig())
-        }
-
-        return { success: true }
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to reset usage'
-        }
-      }
-    })
-  )
-
-  // IPC: 添加账号到反代池
-  ipcMain.handle('proxy-add-account', (_event, account: ProxyAccount) => {
-    try {
-      const [normalizedAccount] = buildProxyAccounts([account])
-      if (!normalizedAccount) {
-        return { success: false, error: 'Account is inactive or missing upstream credentials' }
-      }
-      const server = initProxyServer()
-      server.getAccountPool().addAccount(normalizedAccount)
-      return { success: true, accountCount: server.getAccountPool().size }
-    } catch (error) {
-      console.error('[ProxyServer] Add account failed:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to add account'
-      }
-    }
-  })
-
-  // IPC: 从反代池移除账号
-  ipcMain.handle('proxy-remove-account', (_event, accountId: string) => {
-    try {
-      const server = initProxyServer()
-      server.getAccountPool().removeAccount(accountId)
-      return { success: true, accountCount: server.getAccountPool().size }
-    } catch (error) {
-      console.error('[ProxyServer] Remove account failed:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to remove account'
-      }
-    }
-  })
-
-  // IPC: 同步账号到反代池（批量更新）
-  ipcMain.handle('proxy-sync-accounts', (_event, accounts: ProxyAccount[]) => {
-    try {
-      const server = initProxyServer()
-      const pool = server.getAccountPool()
-      const normalizedAccounts = buildProxyAccounts(accounts)
-      pool.clear()
-      for (const account of normalizedAccounts) {
-        pool.addAccount(account)
-      }
-      // 自动车凭证不落盘、也不在渲染进程的账号列表里，clear 会把它们抹掉，必须补回
-      applyConvoyAccountsToPool()
-      return { success: true, accountCount: pool.size }
-    } catch (error) {
-      console.error('[ProxyServer] Sync accounts failed:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to sync accounts'
-      }
-    }
-  })
-
-  // IPC: 获取反代池账号列表
-  // 只回传 getPoolSnapshot 的白名单字段：池里的 ProxyAccount 带着 accessToken /
-  // kiroApiKey / refreshToken / clientSecret，整体回传会让凭据流进渲染进程。
-  ipcMain.handle('proxy-get-accounts', (): ProxyAccountPoolView => {
-    if (!proxyServer) {
-      return { accounts: [], availableCount: 0, nextCandidateId: null, strategy: 'round-robin' }
-    }
-    const pool = proxyServer.getAccountPool()
-    return {
-      accounts: pool.getPoolSnapshot(),
-      availableCount: pool.availableCount,
-      nextCandidateId: pool.getNextCandidateId(),
-      strategy: pool.getStrategy()
-    }
-  })
-
-  // IPC: 把轮询游标指到指定账号（让它成为下一个被试的候选）
-  // 只移动游标，不改可用性：目标若正冷却或已封禁，选号时仍会被跳过。
-  ipcMain.handle('proxy-set-next-account', (_event, accountId: string) => {
-    if (!proxyServer) {
-      return { success: false, error: 'Proxy server not initialized' }
-    }
-    const applied = proxyServer.getAccountPool().setNextCandidate(accountId)
-    return applied ? { success: true } : { success: false, error: 'Account not in pool' }
-  })
-
-  // IPC: 开关某账号是否参与轮询
-  // 账号仍留在池里，只是 isAccountAvailable 判定为不可用 —— 这样反代页还能看到它。
-  // 落盘由渲染进程的 store 负责（setAccountProxyEnabled）。
-  ipcMain.handle('proxy-set-account-enabled', (_event, accountId: string, enabled: boolean) => {
-    if (!proxyServer) {
-      return { success: false, error: 'Proxy server not initialized' }
-    }
-    const pool = proxyServer.getAccountPool()
-    if (!pool.getAccount(accountId)) {
-      return { success: false, error: 'Account not in pool' }
-    }
-    pool.setAccountEnabled(accountId, enabled)
-    return { success: true }
-  })
-
-  // IPC: 刷新模型缓存
-  ipcMain.handle('proxy-refresh-models', () => {
-    if (!proxyServer) {
-      return { success: false, error: 'Proxy server not initialized' }
-    }
-    proxyServer.clearModelCache()
-    return { success: true }
-  })
-
-  // IPC: 获取可用模型列表
-  ipcMain.handle('proxy-get-models', async () => {
-    if (!proxyServer) {
-      return { success: false, error: 'Proxy server not initialized', models: [] }
-    }
-    try {
-      const result = await proxyServer.getAvailableModels()
-      return { success: true, ...result }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to get models',
-        models: []
-      }
-    }
-  })
-
-  ipcMain.handle(
-    'proxy-configure-clients',
-    async (
-      _event,
-      input: {
-        clients: ProxyClientTarget[]
-        modelId: string
-        modelName?: string
-        models?: ProxyClientModel[]
-      }
-    ) => {
-      try {
-        const server = initProxyServer()
-        const config = server.getConfig()
-        const apiKey = (
-          config.apiKey ||
-          config.apiKeys?.find((key) => key.enabled)?.key ||
-          ''
-        ).trim()
-        if (!apiKey) {
-          return {
-            success: false,
-            proxyOrigin: '',
-            openaiBaseUrl: '',
-            results: [],
-            error: '请先在反代配置中设置或启用 API Key'
-          }
-        }
-        return await configureProxyClients({
-          clients: input.clients,
-          host: config.host,
-          port: config.port,
-          tlsEnabled: config.tls?.enabled,
-          apiKey,
-          modelId: input.modelId,
-          modelName: input.modelName,
-          models: input.models
-        })
-      } catch (error) {
-        return {
-          success: false,
-          proxyOrigin: '',
-          openaiBaseUrl: '',
-          results: [],
-          error: error instanceof Error ? error.message : 'Failed to configure clients'
-        }
-      }
-    }
-  )
-
   // IPC: 获取账户可用模型列表
   ipcMain.handle(
     'account-get-models',
@@ -6616,9 +5614,7 @@ app.whenReady().then(async () => {
           typeof credentialInput === 'string'
             ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
             : resolveUpstreamKiroCredential(credentialInput)
-        const boundProxyUrl = accountId
-          ? proxyServer?.getAccountPool().getAccount(accountId)?.proxyUrl
-          : undefined
+        const boundProxyUrl = accountId ? readAccountBoundProxyUrl(accountId) : undefined
         const models = await fetchKiroModels({
           id: accountId || 'model-list-request',
           ...credential,
@@ -6744,106 +5740,6 @@ app.whenReady().then(async () => {
     }
   })
 
-  // 代理日志持久化（请求日志，与详细日志分开存储）
-  const getProxyLogsPath = (): string => join(app.getPath('userData'), 'proxy-request-logs.json')
-  const MAX_LOGS = 100
-
-  // IPC: 保存代理日志
-  ipcMain.handle(
-    'proxy-save-logs',
-    async (
-      _event,
-      logs: Array<{
-        time: string
-        path: string
-        status: number
-        tokens?: number
-        messagePreview?: string
-      }>
-    ) => {
-      try {
-        const logsPath = getProxyLogsPath()
-        // 只保留最近 100 条
-        const trimmedLogs = logs.slice(0, MAX_LOGS)
-        await writeFile(logsPath, JSON.stringify(trimmedLogs, null, 2), 'utf-8')
-        return { success: true }
-      } catch (error) {
-        console.error('[ProxyLogs] Save failed:', error)
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to save logs'
-        }
-      }
-    }
-  )
-
-  // IPC: 加载代理日志
-  ipcMain.handle('proxy-load-logs', async () => {
-    try {
-      const logsPath = getProxyLogsPath()
-      const content = await readFile(logsPath, 'utf-8')
-      const logs = JSON.parse(content)
-      return { success: true, logs }
-    } catch (error) {
-      // 文件不存在是正常的
-      return { success: true, logs: [] }
-    }
-  })
-
-  // IPC: 重置反代池状态
-  ipcMain.handle('proxy-reset-pool', () => {
-    try {
-      if (proxyServer) {
-        proxyServer.getAccountPool().reset()
-      }
-      return { success: true }
-    } catch (error) {
-      console.error('[ProxyServer] Reset pool failed:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to reset pool'
-      }
-    }
-  })
-
-  // IPC: 手动解除账号封禁标记（用户确认账号已恢复后调用）
-  // 1) 清除反代池中的 suspended 状态
-  // 2) 同步清除 store.accountData[id].lastError，状态回到 active
-  ipcMain.handle('proxy-clear-account-suspended', (_event, accountId: string) =>
-    accountStoreCoordinator.runExclusive(async () => {
-      try {
-        if (proxyServer) {
-          proxyServer.getAccountPool().clearSuspended(accountId)
-        }
-        // 持久化清除 lastError
-        if (store) {
-          const accountData = store.get('accountData') as
-            | { accounts?: Record<string, Record<string, unknown>> }
-            | undefined
-          if (accountData?.accounts?.[accountId]) {
-            const acc = accountData.accounts[accountId]
-            accountData.accounts[accountId] = {
-              ...acc,
-              status: 'active',
-              lastError: undefined,
-              lastCheckedAt: Date.now()
-            }
-            store.set('accountData', accountData)
-            lastSavedData = accountData
-          }
-        }
-        console.log(`[ProxyServer] Cleared suspended flag for account ${accountId}`)
-        return { success: true }
-      } catch (error) {
-        console.error('[ProxyServer] Clear suspended failed:', error)
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to clear suspended'
-        }
-      }
-    })
-  )
-
   // 更新协议处理函数以支持 Social Auth 回调
   const originalHandleProtocolUrl = handleProtocolUrl
   // @ts-ignore - 重新定义协议处理
@@ -6950,8 +5846,9 @@ app.on('will-quit', async (event) => {
   stopMainPoolTokenRefresh()
   // 停止代理池定时验活调度器
   proxyPoolScheduler.stop()
-  // 停止自动车凭证同步轮询
-  convoySyncManager.stop()
+  // 停止 KSK Provider 轮询与后续调度
+  kskAutomationManager.stop()
+  void localAdminDirectAgent.close()
 
   // 防止应用立即退出，先保存数据
   if (lastSavedData && store) {
@@ -6968,8 +5865,6 @@ app.on('will-quit', async (event) => {
     try {
       await accountStoreCoordinator.runExclusive(async () => {
         console.log('[Exit] Saving data before quit...')
-        // 刷新待写入的防抖数据
-        flushStoreWrites()
         store!.set('accountData', lastSavedData)
         // 退出场景跳过节流，确保备份立即落盘
         await createBackup(lastSavedData)

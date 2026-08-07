@@ -64,7 +64,6 @@ function AccountListRowComponent({
   onShowDetail
 }: AccountListRowProps): React.ReactNode {
   const {
-    setActiveAccount,
     removeAccount,
     checkAccountStatus,
     refreshAccountToken,
@@ -153,14 +152,6 @@ function AccountListRowComponent({
   }, [account.isActive, isUnauthorized, tagColors])
 
   // === Handlers ===
-  const handleSwitch = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation()
-      setActiveAccount(account.id)
-    },
-    [account.id, setActiveAccount]
-  )
-
   const handleRefresh = useCallback(
     async (e: React.MouseEvent) => {
       e.stopPropagation()
@@ -200,10 +191,7 @@ function AccountListRowComponent({
       if (isClearingSuspended) return
       setIsClearingSuspended(true)
       try {
-        const result = await window.api.proxyClearAccountSuspended(account.id)
-        if (result.success) {
-          updateAccountStatus(account.id, 'active', undefined)
-        }
+        updateAccountStatus(account.id, 'active', undefined)
       } finally {
         setIsClearingSuspended(false)
       }
@@ -604,18 +592,6 @@ function AccountListRowComponent({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </>
-        )}
-
-        {!account.isActive && !isUnauthorized && (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 hover:bg-primary/10 hover:text-primary"
-            onClick={handleSwitch}
-            title={isEn ? 'Switch to this account' : '切换到该账号'}
-          >
-            <Power className="h-3.5 w-3.5" />
-          </Button>
         )}
 
         <Button

@@ -192,13 +192,13 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
               {cachedCount > 0 ? (isEn ? `${cachedCount} cached` : `${cachedCount} 缓存`) : ''}
             </button>
           </div>
-          <input
+          <Input
             list="account-liveness-models"
             value={model}
             onChange={(e) => setModel(e.target.value)}
             disabled={livenessRunning}
             placeholder="claude-sonnet-4.5"
-            className="h-8 w-full px-2 rounded-md border bg-background text-xs font-mono"
+            className="h-8 text-xs font-mono"
           />
           <datalist id="account-liveness-models">
             {modelOptions.map((m) => (

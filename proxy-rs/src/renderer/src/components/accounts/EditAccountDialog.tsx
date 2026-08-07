@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Loader2, RefreshCw, CheckCircle, Copy, Check } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
 import { useAccountsStore } from '@/store'
@@ -216,11 +217,6 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
       status: 'active'
     })
 
-    void window.api.accountSetEndpointConfig(account.id, {
-      preferredEndpoint: preferredEndpoint || undefined,
-      endpointFallbackAfterFailures
-    })
-
     onOpenChange(false)
   }
 
@@ -228,7 +224,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
   const isApiKey =
     account.credentials.credentialKind === 'kiro_api_key' || Boolean(account.credentials.kiroApiKey)
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={() => onOpenChange(false)} />
 
@@ -543,6 +539,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
           </Button>
         </div>
       </Card>
-    </div>
+    </div>,
+    document.body
   )
 }

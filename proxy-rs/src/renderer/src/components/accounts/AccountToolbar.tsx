@@ -618,8 +618,8 @@ export function AccountToolbar({
             title={
               selectedCount > 0
                 ? isEn
-                  ? `Liveness test ${selectedCount} selected accounts via reverse-proxy`
-                  : `走反代对选中 ${selectedCount} 个账号批量测活`
+                  ? `Liveness test ${selectedCount} selected accounts`
+                  : `对选中 ${selectedCount} 个账号批量测活`
                 : isEn
                   ? `Liveness test all ${livenessTargetIds.length} accounts in the current group`
                   : `对当前分组全部 ${livenessTargetIds.length} 个账号测活`

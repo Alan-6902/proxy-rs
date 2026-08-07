@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Account pools, automatic token refresh, API proxy, registration, subscriptions, groups and tags
+  Account pools, automatic token refresh, registration, subscriptions, groups and tags
 </p>
 
 <p align="center">
@@ -70,12 +70,11 @@
 ### 🌐 Proxy Support
 
 - Built-in proxy pool (http/https/socks5/socks4) with 4 dispatch strategies + auto-validate + scheduled refresh
-- Reverse proxy account-to-IP bucketing (mitigates risk control association)
-- Once an account is bound to a proxy, ALL its requests (token refresh, batch operations, etc.) route through it
+- Bind an account to a proxy and ALL its requests (token refresh, batch operations, etc.) route through it
 
 ### 🔔 Notifications & Ops
 
-- Local system notifications for critical account, proxy, and registration events
+- Local system notifications for critical account and registration events
 - Unified task center (global progress panel)
 - One-click diagnostics panel (Network/Kiro/AWS/Email/Proxy connectivity)
 - Config import/export (with optional AES-GCM encryption)
@@ -113,7 +112,13 @@ npm run typecheck
 
 ## 📋 Changelog
 
-### v1.7.0 (Current)
+### Unreleased
+
+#### 🗑️ Removed
+
+- **Built-in reverse proxy removed** — The OpenAI/Claude-compatible API proxy server, its account rotation pool, API key management, one-click client configuration, and the Auto Convoy credential sync (which only fed the proxy pool) are gone. Reverse proxying is now handled externally by kiro-rs. Account management, registration, seats, the proxy pool (outbound IP rotation), liveness checks, subscription queries and diagnostics are unaffected.
+
+### v1.7.0
 
 #### 🔥 Major Features (4 phases, 19 new features)
 

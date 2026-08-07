@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button, Card, CardContent, CardHeader, CardTitle, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -111,7 +112,7 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
 
   if (!isOpen) return null
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 
@@ -358,6 +359,7 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
           </div>
         </CardContent>
       </Card>
-    </div>
+    </div>,
+    document.body
   )
 }

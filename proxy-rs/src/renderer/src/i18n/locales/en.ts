@@ -44,13 +44,12 @@ const en = {
   nav: {
     home: 'Home',
     accounts: 'Accounts',
-    proxy: 'API Proxy',
+    tasks: 'Tasks',
     proxyPool: 'Proxy Pool',
     diagnose: 'Diagnostics',
     configSync: 'Config Sync',
     register: 'Register',
     seats: 'Kiro Seats',
-    convoy: 'Auto Convoy',
     logs: 'Logs',
     settings: 'Settings',
     about: 'About'
@@ -76,7 +75,7 @@ const en = {
     checkStatus: 'Check Status',
     welcome: {
       title: `Welcome to ${APP_NAME}`,
-      description: 'A Kiro multi-account and API proxy tool',
+      description: 'A Kiro multi-account management tool',
       features: {
         multiAccount: 'Manage multiple Kiro accounts',
         autoRefresh: 'Auto refresh tokens before expiration',
@@ -280,7 +279,7 @@ const en = {
   about: {
     title: 'About',
     version: 'Version {version}',
-    description: 'A Kiro multi-account and API proxy tool',
+    description: 'A Kiro multi-account management tool',
     features: 'Features',
     techStack: 'Tech Stack',
     author: 'Author',

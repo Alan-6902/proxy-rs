@@ -90,3 +90,21 @@ export function parseKiroApiKeyEntries(text: string): KiroApiKeyParseResult {
 
   return { entries, errors, duplicates }
 }
+
+/**
+ * ksk key 的区域探测顺序。
+ * 只列 us-east-1 / eu-central-1：Kiro REST 端点（q.{region}.amazonaws.com）
+ * 官方插件仅这两个区域可用，其余区域在主进程侧也会被映射到这两个之一，
+ * 多试没有意义还会白等超时。
+ */
+export const KIRO_API_KEY_REGION_PROBE_ORDER = ['us-east-1', 'eu-central-1'] as const
+
+/**
+ * 计算某个 key 的探测顺序：显式区域优先且只试它；
+ * 未指定时按 KIRO_API_KEY_REGION_PROBE_ORDER 全试一遍。
+ */
+export function resolveRegionProbeOrder(explicitRegion?: string): string[] {
+  const normalized = explicitRegion?.trim().toLowerCase()
+  if (normalized) return [normalized]
+  return [...KIRO_API_KEY_REGION_PROBE_ORDER]
+}

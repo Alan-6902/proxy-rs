@@ -5,7 +5,6 @@ import {
   Settings,
   Info,
   ChevronRight,
-  Server,
   UserPlus,
   ScrollText,
   Network,
@@ -13,7 +12,7 @@ import {
   Archive,
   GripVertical,
   BadgeCheck,
-  Truck
+  ListChecks
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -24,11 +23,10 @@ import { useTranslation } from '@/hooks/useTranslation'
 export type PageType =
   | 'home'
   | 'accounts'
-  | 'proxy'
+  | 'tasks'
   | 'proxyPool'
   | 'register'
   | 'seats'
-  | 'convoy'
   | 'diagnose'
   | 'configSync'
   | 'logs'
@@ -45,11 +43,10 @@ interface SidebarProps {
 const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType }[] = [
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
-  { id: 'proxy', labelKey: 'nav.proxy', icon: Server },
+  { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
   { id: 'register', labelKey: 'nav.register', icon: UserPlus },
   { id: 'seats', labelKey: 'nav.seats', icon: BadgeCheck },
-  { id: 'convoy', labelKey: 'nav.convoy', icon: Truck },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
@@ -69,7 +66,19 @@ function getInitialMenuItems(): typeof menuItemsConfig {
       .map((id) => itemsById.get(id as PageType))
       .filter((item): item is (typeof menuItemsConfig)[number] => Boolean(item))
     const orderedIds = new Set(orderedItems.map((item) => item.id))
-    return [...orderedItems, ...menuItemsConfig.filter((item) => !orderedIds.has(item.id))]
+    for (const [configIndex, item] of menuItemsConfig.entries()) {
+      if (orderedIds.has(item.id)) continue
+      const previousConfiguredItem = menuItemsConfig
+        .slice(0, configIndex)
+        .reverse()
+        .find((candidate) => orderedIds.has(candidate.id))
+      const previousIndex = previousConfiguredItem
+        ? orderedItems.findIndex((candidate) => candidate.id === previousConfiguredItem.id)
+        : -1
+      orderedItems.splice(previousIndex + 1, 0, item)
+      orderedIds.add(item.id)
+    }
+    return orderedItems
   } catch {
     return menuItemsConfig
   }

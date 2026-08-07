@@ -1,16 +1,18 @@
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { SubscriptionType } from '@/types/account'
-import { X, Loader2, Copy, Check, ExternalLink, Info } from 'lucide-react'
+import { X, Loader2, Copy, Check, ExternalLink, Info, KeyRound } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
-import { maskKiroApiKey, parseKiroApiKeyEntries } from '../../../../shared/kiroApiKey'
 import {
-  CONVOY_REGION_PROBE_ORDER,
+  KIRO_API_KEY_REGION_PROBE_ORDER,
+  maskKiroApiKey,
+  parseKiroApiKeyEntries,
   resolveRegionProbeOrder
-} from '../../../../shared/convoyCredentials'
+} from '../../../../shared/kiroApiKey'
 
 interface AddAccountDialogProps {
   isOpen: boolean
@@ -67,6 +69,57 @@ interface VerifiedData {
 
 type ImportMode = 'oidc' | 'sso' | 'login' | 'apikey'
 type LoginType = 'builderid' | 'google' | 'github' | 'iamsso'
+
+const AWS_REGION_GROUPS: ReadonlyArray<{
+  label: string
+  options: ReadonlyArray<readonly [value: string, label: string]>
+}> = [
+  {
+    label: 'US',
+    options: [
+      ['us-east-1', 'N. Virginia'],
+      ['us-east-2', 'Ohio'],
+      ['us-west-1', 'N. California'],
+      ['us-west-2', 'Oregon']
+    ]
+  },
+  {
+    label: 'Europe',
+    options: [
+      ['eu-west-1', 'Ireland'],
+      ['eu-west-2', 'London'],
+      ['eu-west-3', 'Paris'],
+      ['eu-central-1', 'Frankfurt'],
+      ['eu-north-1', 'Stockholm'],
+      ['eu-south-1', 'Milan']
+    ]
+  },
+  {
+    label: 'Asia Pacific',
+    options: [
+      ['ap-northeast-1', 'Tokyo'],
+      ['ap-northeast-2', 'Seoul'],
+      ['ap-northeast-3', 'Osaka'],
+      ['ap-southeast-1', 'Singapore'],
+      ['ap-southeast-2', 'Sydney'],
+      ['ap-south-1', 'Mumbai'],
+      ['ap-east-1', 'Hong Kong']
+    ]
+  },
+  {
+    label: 'Other',
+    options: [
+      ['ca-central-1', 'Canada'],
+      ['sa-east-1', 'S\u00e3o Paulo'],
+      ['me-south-1', 'Bahrain'],
+      ['af-south-1', 'Cape Town']
+    ]
+  }
+]
+
+const AWS_REGION_VALUES = new Set<string>(
+  AWS_REGION_GROUPS.flatMap((group) => group.options.map(([value]) => value))
+)
 
 export function AddAccountDialog({
   isOpen,
@@ -202,6 +255,7 @@ export function AddAccountDialog({
       if (data.error) {
         setError(`登录失败: ${data.error}`)
         setIsLoggingIn(false)
+        window.api.closeIncognitoBrowser()
         return
       }
 
@@ -217,9 +271,11 @@ export function AddAccountDialog({
             })
           } else {
             setError(result.error || 'Token 交换失败')
+            window.api.closeIncognitoBrowser()
           }
         } catch (e) {
           setError(e instanceof Error ? e.message : '登录失败')
+          window.api.closeIncognitoBrowser()
         } finally {
           setIsLoggingIn(false)
         }
@@ -323,6 +379,9 @@ export function AddAccountDialog({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '添加账号失败')
+    } finally {
+      // 走到这里说明流程已终结（账号入库成功 / 已存在 / 验证失败），此时才关无痕浏览器
+      window.api.closeIncognitoBrowser()
     }
   }
 
@@ -414,6 +473,7 @@ export function AddAccountDialog({
             clearInterval(pollIntervalRef.current)
             pollIntervalRef.current = null
           }
+          window.api.closeIncognitoBrowser()
           return
         }
 
@@ -462,6 +522,7 @@ export function AddAccountDialog({
             clearInterval(pollIntervalRef.current)
             pollIntervalRef.current = null
           }
+          window.api.closeIncognitoBrowser()
           return
         }
 
@@ -510,6 +571,7 @@ export function AddAccountDialog({
     setBuilderIdLoginData(null)
     setIamSsoLoginData(null)
     setError(null)
+    window.api.closeIncognitoBrowser()
   }
 
   // 启动 Social Auth 登录 (Google/GitHub)
@@ -1254,11 +1316,11 @@ export function AddAccountDialog({
   const pendingApiKeyCount =
     importMode === 'apikey' ? parseKiroApiKeyEntries(kiroApiKeyText).entries.length : 0
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 
-      <Card className="relative w-full max-w-lg max-h-[90vh] overflow-auto z-10">
+      <Card className="relative z-10 max-h-[90vh] w-full max-w-lg overflow-auto">
         <CardHeader className="pb-4 border-b">
           <div className="flex flex-row items-center justify-between">
             <CardTitle className="text-xl font-bold">{isEn ? 'Add Account' : '添加账号'}</CardTitle>
@@ -1297,10 +1359,10 @@ export function AddAccountDialog({
             </div>
           )}
           {/* 导入模式切换 */}
-          <div className="grid grid-cols-4 gap-1 p-1 bg-muted/50 rounded-xl border">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-muted/50 rounded-xl border">
             <button
               className={`py-2 px-3 text-sm rounded-lg transition-all duration-200 font-medium ${
-                importMode === 'login'
+                importMode === 'login' || importMode === 'apikey'
                   ? 'bg-background text-foreground shadow-sm ring-1 ring-black/5'
                   : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
               }`}
@@ -1339,20 +1401,6 @@ export function AddAccountDialog({
               disabled={!!verifiedData || isLoggingIn}
             >
               SSO Token
-            </button>
-            <button
-              className={`py-2 px-3 text-sm rounded-lg transition-all duration-200 font-medium ${
-                importMode === 'apikey'
-                  ? 'bg-background text-foreground shadow-sm ring-1 ring-black/5'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-              }`}
-              onClick={() => {
-                setImportMode('apikey')
-                setError(null)
-              }}
-              disabled={!!verifiedData || isLoggingIn}
-            >
-              API Key
             </button>
           </div>
 
@@ -1548,6 +1596,25 @@ export function AddAccountDialog({
                         <span className="text-sm font-semibold text-foreground">Enterprise</span>
                         <span className="text-xs text-muted-foreground">
                           IAM Identity Center SSO
+                        </span>
+                      </div>
+                    </button>
+
+                    {/* Kiro API Key */}
+                    <button
+                      className="group w-full h-14 flex items-center px-4 gap-4 bg-background hover:bg-muted border border-border rounded-xl transition-all duration-200 hover:shadow-md hover:border-primary/30"
+                      onClick={() => {
+                        setImportMode('apikey')
+                        setError(null)
+                      }}
+                    >
+                      <div className="w-8 h-8 flex items-center justify-center bg-white dark:bg-slate-800 rounded-full shadow-sm border dark:border-slate-600 p-1.5 group-hover:scale-110 transition-transform">
+                        <KeyRound className="w-full h-full text-[#232f3e] dark:text-white" />
+                      </div>
+                      <div className="flex flex-col items-start">
+                        <span className="text-sm font-semibold text-foreground">API Key</span>
+                        <span className="text-xs text-muted-foreground">
+                          {isEn ? 'Import a Kiro API Key' : '导入 Kiro API Key'}
                         </span>
                       </div>
                     </button>
@@ -1927,34 +1994,65 @@ export function AddAccountDialog({
                 </p>
                 <p className="text-primary/80">
                   {isEn
-                    ? `Blank lines and # comments are ignored. Append ----region to a key to override the default region. Leave the region blank to probe ${CONVOY_REGION_PROBE_ORDER.join(' / ')} and keep whichever returns 200.`
-                    : `空行与 # 注释忽略；单个 key 可写成 ksk_xxx----region 覆盖默认区域。区域留空时会依次探测 ${CONVOY_REGION_PROBE_ORDER.join(' / ')}，哪个返回 200 就用哪个。`}
+                    ? `Blank lines and # comments are ignored. Append ----region to a key to override the default region. Leave the region blank to probe ${KIRO_API_KEY_REGION_PROBE_ORDER.join(' / ')} and keep whichever returns 200.`
+                    : `空行与 # 注释忽略；单个 key 可写成 ksk_xxx----region 覆盖默认区域。区域留空时会依次探测 ${KIRO_API_KEY_REGION_PROBE_ORDER.join(' / ')}，哪个返回 200 就用哪个。`}
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <Label className="text-sm whitespace-nowrap">
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">
                   {isEn ? 'Default region' : '默认区域'}
                   <span className="ml-1 text-muted-foreground">
                     ({isEn ? 'optional' : '非必填'})
                   </span>
                 </Label>
-                <input
-                  type="text"
-                  value={apiKeyRegion}
-                  onChange={(event) => setApiKeyRegion(event.target.value.trim())}
-                  placeholder={isEn ? 'leave blank to auto-detect' : '留空自动探测'}
-                  className="flex-1 h-10 px-3 text-sm rounded-xl border border-input bg-background/50 font-mono"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-10 rounded-xl"
-                  onClick={handleKiroApiKeyFile}
-                  disabled={isVerifying}
-                >
-                  {isEn ? 'From file' : '从文件导入'}
-                </Button>
+                <div className="flex gap-2">
+                  <select
+                    value={
+                      AWS_REGION_VALUES.has(apiKeyRegion)
+                        ? apiKeyRegion
+                        : apiKeyRegion
+                          ? 'custom'
+                          : ''
+                    }
+                    onChange={(event) => {
+                      if (event.target.value !== 'custom') setApiKeyRegion(event.target.value)
+                    }}
+                    className="flex-1 h-10 px-3 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                  >
+                    <option value="">{isEn ? 'Auto detect' : '自动探测'}</option>
+                    {AWS_REGION_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {value} ({label})
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                    <optgroup label={isEn ? 'Custom' : '自定义'}>
+                      <option value="custom">
+                        {isEn ? '-- Custom Input --' : '-- 自定义输入 --'}
+                      </option>
+                    </optgroup>
+                  </select>
+                  <input
+                    type="text"
+                    value={apiKeyRegion}
+                    onChange={(event) => setApiKeyRegion(event.target.value.trim())}
+                    placeholder={isEn ? 'e.g., cn-north-1' : '例如: cn-north-1'}
+                    className="w-32 h-10 px-3 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-mono"
+                  />
+                </div>
               </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full h-10 rounded-xl"
+                onClick={handleKiroApiKeyFile}
+                disabled={isVerifying}
+              >
+                {isEn ? 'From file' : '从文件导入'}
+              </Button>
               <textarea
                 className="w-full min-h-[150px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 resize-none font-mono"
                 placeholder={'ksk_...\nksk_...----eu-central-1\n# 注释行会被忽略'}
@@ -2449,6 +2547,7 @@ email----password----refreshToken----clientId----clientSecret`
           )}
         </CardContent>
       </Card>
-    </div>
+    </div>,
+    document.body
   )
 }

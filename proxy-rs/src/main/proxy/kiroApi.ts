@@ -100,6 +100,11 @@ function estimatePayloadTokens(payload: KiroPayload): number {
  * 传入 account 让账号级代理覆盖全局；不传则走全局逻辑。
  */
 function getNetworkAgent(account?: ProxyAccount): Dispatcher | undefined {
+  // API 反代账号固定直连，不继承 App 的 HTTP_PROXY / HTTPS_PROXY 或系统代理。
+  if (account?.bypassAppProxy) {
+    return undefined
+  }
+
   // 1. 账号专属代理：实现"N 个账号共用 1 个 IP"的分桶反代
   if (account?.proxyUrl) {
     const agent = safeCreateProxyAgent(account.proxyUrl)
@@ -1492,6 +1497,14 @@ function getSortedEndpoints(
   return [...ordered, ...remaining]
 }
 
+function getRegionalEndpointUrl(endpoint: KiroEndpoint, region?: string): string {
+  const baseUrl =
+    endpoint.name === 'CodeWhisperer'
+      ? getCodeWhispererEndpoint(region)
+      : getQServiceEndpoint(region)
+  return `${baseUrl}${new URL(endpoint.url).pathname}`
+}
+
 function getAbortError(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason
   if (signal?.reason) return new Error(String(signal.reason))
@@ -1549,13 +1562,16 @@ export class KiroUpstreamError extends Error {
   readonly retryCategory: UpstreamRetryCategory
 
   constructor(details: KiroUpstreamErrorDetails = {}) {
-    super(
+    const baseMessage =
       details.statusCode === 401 || details.statusCode === 403
         ? `Auth error ${details.statusCode}`
         : details.statusCode
           ? `Upstream Kiro API request failed (HTTP ${details.statusCode})`
           : 'Upstream Kiro API request failed'
+    const detailParts = [details.code, details.reason].filter(
+      (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index
     )
+    super(detailParts.length > 0 ? `${baseMessage}: ${detailParts.join(' · ')}` : baseMessage)
     this.name = 'KiroUpstreamError'
     this.statusCode = details.statusCode
     this.reason = details.reason
@@ -1707,6 +1723,7 @@ export async function callKiroApiStream(
 
       const payloadStr = JSON.stringify(requestPayload)
       const headers = getAuthHeaders(account, endpoint)
+      const endpointUrl = getRegionalEndpointUrl(endpoint, account.region)
       const currentUserInput = requestPayload.conversationState.currentMessage.userInputMessage
       const historyMessages = requestPayload.conversationState.history ?? []
       const historyToolUseCount = historyMessages.reduce(
@@ -1738,14 +1755,14 @@ export async function callKiroApiStream(
       const agent = getNetworkAgent(account)
       if (agent) proxyLogger.debug('KiroAPI', `Stream request via proxy to ${endpoint.name}`)
       const response = agent
-        ? ((await undiciFetch(endpoint.url, {
+        ? ((await undiciFetch(endpointUrl, {
             method: 'POST',
             headers,
             body: payloadStr,
             signal,
             dispatcher: agent
           } as UndiciRequestInit)) as unknown as Response)
-        : await fetch(endpoint.url, { method: 'POST', headers, body: payloadStr, signal })
+        : await fetch(endpointUrl, { method: 'POST', headers, body: payloadStr, signal })
 
       if (response.status === 429) {
         const retryAfterMs = getRetryAfterMs(response.headers.get('retry-after'))
@@ -1866,16 +1883,17 @@ export async function callKiroApiStream(
           applyPayloadOrigin(retryPayload, endpoint.origin)
           const retryStr = JSON.stringify(retryPayload)
           const retryHeaders = getAuthHeaders(account, endpoint)
+          const retryEndpointUrl = getRegionalEndpointUrl(endpoint, account.region)
           const retryAgent = getNetworkAgent(account)
           const retryResponse = retryAgent
-            ? ((await undiciFetch(endpoint.url, {
+            ? ((await undiciFetch(retryEndpointUrl, {
                 method: 'POST',
                 headers: retryHeaders,
                 body: retryStr,
                 signal,
                 dispatcher: retryAgent
               } as UndiciRequestInit)) as unknown as Response)
-            : await fetch(endpoint.url, {
+            : await fetch(retryEndpointUrl, {
                 method: 'POST',
                 headers: retryHeaders,
                 body: retryStr,

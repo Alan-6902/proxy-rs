@@ -1,0 +1,7 @@
+[mcp_servers.serena]
+command = "/Users/ma/.local/bin/serena-guard"
+args = ["serve", "--client=codex"]
+cwd = "/Users/ma/cache/AI/kiro-rs"
+env = { NO_PROXY = "127.0.0.1,localhost,::1" }
+startup_timeout_sec = 240.0
+enabled = true

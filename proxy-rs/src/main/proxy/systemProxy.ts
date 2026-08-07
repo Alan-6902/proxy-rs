@@ -8,6 +8,83 @@ let _cachedSystemProxy: string | null = null
 let _systemProxyCacheTime = 0
 const SYSTEM_PROXY_CACHE_TTL = 30_000 // 30秒缓存
 
+export interface ElectronProxyCredentials {
+  host: string
+  port: number
+  username: string
+  password: string
+}
+
+export interface ElectronProxySettings {
+  proxyRules: string
+  credentials?: ElectronProxyCredentials
+}
+
+const DEFAULT_PROXY_PORT: Readonly<Record<string, number>> = {
+  'http:': 80,
+  'https:': 443,
+  'socks4:': 1080,
+  'socks4a:': 1080,
+  'socks5:': 1080,
+  'socks5h:': 1080
+}
+
+function decodeProxyCredential(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/** 隐藏代理 URL 中的密码，避免日志泄露代理凭据。 */
+export function redactProxyUrl(proxyUrl: string): string {
+  try {
+    const parsed = new URL(proxyUrl)
+    if (!parsed.username && !parsed.password) return proxyUrl
+    if (parsed.username) parsed.username = decodeProxyCredential(parsed.username)
+    parsed.password = parsed.password ? '***' : ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return '[invalid proxy URL]'
+  }
+}
+
+/**
+ * Chromium 的 proxyRules 不接受 user:password@host；认证凭据必须通过 login 事件提供。
+ * 因此这里把代理路由与认证信息拆开。
+ */
+export function getElectronProxySettings(
+  proxyUrl: string | null | undefined
+): ElectronProxySettings | undefined {
+  if (!proxyUrl) return undefined
+
+  try {
+    const parsed = new URL(proxyUrl)
+    const defaultPort = DEFAULT_PROXY_PORT[parsed.protocol]
+    if (!defaultPort) return undefined
+
+    const port = Number(parsed.port) || defaultPort
+    const proxyRules = `${parsed.protocol}//${parsed.host}`
+    const username = decodeProxyCredential(parsed.username)
+    const password = decodeProxyCredential(parsed.password)
+
+    return {
+      proxyRules,
+      credentials: username
+        ? {
+            host: parsed.hostname,
+            port,
+            username,
+            password
+          }
+        : undefined
+    }
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 检查 URL 是否为 undici ProxyAgent 支持的协议（http / https）
  */
@@ -141,7 +218,7 @@ export function safeCreateProxyAgent(proxyUrl: string | null | undefined): Dispa
   try {
     u = new URL(proxyUrl)
   } catch {
-    console.warn(`[Proxy] 代理 URL 无效: ${proxyUrl}`)
+    console.warn(`[Proxy] 代理 URL 无效: ${redactProxyUrl(proxyUrl)}`)
     return undefined
   }
 
@@ -152,7 +229,7 @@ export function safeCreateProxyAgent(proxyUrl: string | null | undefined): Dispa
     try {
       return new ProxyAgent({ uri: proxyUrl, requestTls: { rejectUnauthorized: false } })
     } catch (err) {
-      console.warn(`[Proxy] 创建 HTTP ProxyAgent 失败，回退直连: ${proxyUrl}`, err)
+      console.warn(`[Proxy] 创建 HTTP ProxyAgent 失败，回退直连: ${redactProxyUrl(proxyUrl)}`, err)
       return undefined
     }
   }
@@ -167,12 +244,14 @@ export function safeCreateProxyAgent(proxyUrl: string | null | undefined): Dispa
     try {
       return createSocksDispatcher(u)
     } catch (err) {
-      console.warn(`[Proxy] 创建 SOCKS Agent 失败，回退直连: ${proxyUrl}`, err)
+      console.warn(`[Proxy] 创建 SOCKS Agent 失败，回退直连: ${redactProxyUrl(proxyUrl)}`, err)
       return undefined
     }
   }
 
-  console.warn(`[Proxy] 忽略不支持的代理协议 (仅支持 http/https/socks5/socks4): ${proxyUrl}`)
+  console.warn(
+    `[Proxy] 忽略不支持的代理协议 (仅支持 http/https/socks5/socks4): ${redactProxyUrl(proxyUrl)}`
+  )
   return undefined
 }
 

@@ -22,11 +22,16 @@ import {
   type KskAutomationFetch
 } from '../../src/main/kskAutomation/localAdminClient'
 import {
+  KSK_CLEANUP_FALLBACK_MODEL,
+  KSK_PROBE_VERDICT,
+  classifyKskProbeError,
   isPermanentKskCredentialError,
   KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
   mapWithConcurrency,
+  pickCheapestModelId,
   removeMatchingInvalidKskAccounts
 } from '../../src/main/kskAutomation/credentialCleanup'
+import { KiroUpstreamError, type KiroModel } from '../../src/main/proxy/kiroApi'
 import { KskAutomationManager } from '../../src/main/kskAutomation/syncManager'
 import {
   normalizeKskAutomationStorePayload,
@@ -249,6 +254,57 @@ describe('本机 Admin 地址与同步验活', () => {
         requireExplicitCredentialSignal: true
       })
     ).toBe(false)
+  })
+
+  it.each([
+    [401, undefined, KSK_PROBE_VERDICT.PERMANENTLY_INVALID],
+    [403, undefined, KSK_PROBE_VERDICT.PERMANENTLY_INVALID],
+    [403, 'TEMPORARILY_SUSPENDED', KSK_PROBE_VERDICT.PERMANENTLY_INVALID],
+    [402, 'MONTHLY_REQUEST_COUNT', KSK_PROBE_VERDICT.PERMANENTLY_INVALID],
+    // 402 缺 MONTHLY_REQUEST_COUNT 时归 NONE，仍是不可重试的 4xx，按失效处理
+    [402, undefined, KSK_PROBE_VERDICT.PERMANENTLY_INVALID],
+    // 400 是我们的 payload 有问题（模型 ID 不存在），与账号有效性无关
+    [400, 'INVALID_MODEL_ID', KSK_PROBE_VERDICT.TRANSIENT],
+    [429, undefined, KSK_PROBE_VERDICT.TRANSIENT],
+    [500, undefined, KSK_PROBE_VERDICT.TRANSIENT],
+    [503, undefined, KSK_PROBE_VERDICT.TRANSIENT]
+  ])('发消息验活分类 HTTP %s / %s => %s', (statusCode, reason, expected) => {
+    expect(classifyKskProbeError(new KiroUpstreamError({ statusCode, reason, code: reason }))).toBe(
+      expected
+    )
+  })
+
+  it('无 statusCode 的网络错误按 transient 保留账号', () => {
+    expect(classifyKskProbeError(new TypeError('fetch failed'))).toBe(KSK_PROBE_VERDICT.TRANSIENT)
+  })
+
+  it('按 rateMultiplier 选最便宜的模型，倍率缺失的排最后', () => {
+    const models = [
+      { modelId: 'claude-opus-4.5', rateMultiplier: 5 },
+      { modelId: 'claude-haiku-4.5', rateMultiplier: 0.3 },
+      { modelId: 'claude-sonnet-4.5', rateMultiplier: 1 },
+      { modelId: 'mystery-model' }
+    ] as KiroModel[]
+
+    expect(pickCheapestModelId(models)).toBe('claude-haiku-4.5')
+  })
+
+  it('同倍率时按 modelId 稳定选择，跳过废弃模型与空列表', () => {
+    const tied = [
+      { modelId: 'model-b', rateMultiplier: 1 },
+      { modelId: 'model-a', rateMultiplier: 1 }
+    ] as KiroModel[]
+    expect(pickCheapestModelId(tied)).toBe('model-a')
+
+    const deprecated = [
+      { modelId: 'cheap-but-dead', rateMultiplier: 0.1, status: 'DEPRECATED' },
+      { modelId: 'alive', rateMultiplier: 2 }
+    ] as KiroModel[]
+    expect(pickCheapestModelId(deprecated)).toBe('alive')
+
+    expect(pickCheapestModelId([])).toBeUndefined()
+    expect(pickCheapestModelId([{ status: 'DEPRECATED' }] as KiroModel[])).toBeUndefined()
+    expect(KSK_CLEANUP_FALLBACK_MODEL).toBe('claude-haiku-4.5')
   })
 
   it('上游验活使用固定并发上限并保持结果顺序', async () => {

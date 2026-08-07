@@ -50,11 +50,18 @@ import { registerIPCHandlers as registerRegistrationHandlers } from './registrat
 import { registerProxyPoolIpcHandlers, validateProxyEntry } from './ipc/proxyPool'
 import { KskAutomationManager } from './kskAutomation/syncManager'
 import {
+  KSK_CLEANUP_FALLBACK_MODEL,
+  KSK_CLEANUP_MAX_OUTPUT_TOKENS,
+  KSK_CLEANUP_PROBE_MESSAGE,
+  KSK_CLEANUP_PROBE_TIMEOUT_MS,
   KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
-  isPermanentKskCredentialError,
+  KSK_PROBE_VERDICT,
+  classifyKskProbeError,
   mapWithConcurrency,
+  pickCheapestModelId,
   removeMatchingInvalidKskAccounts,
-  type KskCredentialCleanupResult
+  type KskCredentialCleanupResult,
+  type KskProbeVerdict
 } from './kskAutomation/credentialCleanup'
 import { loadKskAutomationStore, loadKskAutomationTask } from './kskAutomation/configStore'
 import {
@@ -1677,6 +1684,52 @@ async function importProviderKskCredential(
   })
 }
 
+/**
+ * 挑一个尽量便宜的验活模型。
+ *
+ * 查 usage 不能反映账号能否真正出活（超额账号的 usage API 照样通），所以清理必须发一条真实消息。
+ * 代价是每个账号烧一点 credits，因此按 rateMultiplier 取最便宜的模型，并把输出限到几个 token。
+ * 模型列表拉不到（网络问题 / 这个账号本身就废了）就退回 Haiku。
+ */
+async function resolveKskCleanupModelId(probeAccount: ProxyAccount): Promise<string> {
+  try {
+    const models = await fetchKiroModels(probeAccount)
+    return pickCheapestModelId(models) ?? KSK_CLEANUP_FALLBACK_MODEL
+  } catch (error) {
+    console.warn(
+      '[KSK] Failed to list models for cleanup probe, falling back to',
+      KSK_CLEANUP_FALLBACK_MODEL,
+      error
+    )
+    return KSK_CLEANUP_FALLBACK_MODEL
+  }
+}
+
+/** 给单个 KSK 发一条验活消息，返回它是否永久失效。 */
+async function probeKskAccountLiveness(
+  account: ProxyAccount,
+  model: string
+): Promise<KskProbeVerdict> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), KSK_CLEANUP_PROBE_TIMEOUT_MS)
+  try {
+    const payload = openaiToKiro({
+      model,
+      messages: [{ role: 'user', content: KSK_CLEANUP_PROBE_MESSAGE }],
+      stream: false,
+      max_tokens: KSK_CLEANUP_MAX_OUTPUT_TOKENS
+    })
+    await callKiroApi(account, payload, controller.signal)
+    return KSK_PROBE_VERDICT.ALIVE
+  } catch (error) {
+    // 超时是我们自己掐断的，不能算账号失效
+    if (controller.signal.aborted) return KSK_PROBE_VERDICT.TRANSIENT
+    return classifyKskProbeError(error)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function cleanupInvalidStoredKskAccounts(
   groupId?: string
 ): Promise<KskCredentialCleanupResult> {
@@ -1696,29 +1749,31 @@ async function cleanupInvalidStoredKskAccounts(
     retainedTransient: 0,
     errors: []
   }
+  if (candidates.length === 0) return result
+
+  const toProxyAccount = (account: (typeof candidates)[number]): ProxyAccount => ({
+    id: account.id,
+    email: account.email,
+    credentialKind: 'kiro_api_key',
+    kiroApiKey: account.credentials.kiroApiKey,
+    region: account.credentials.region,
+    provider: 'BuilderId',
+    proxyUrl: readAccountBoundProxyUrl(account.id)
+  })
+
+  // 模型列表与账号无关（同一批 KSK 走同一上游），拉一次复用，别每个账号都问一遍
+  const model = await resolveKskCleanupModelId(toProxyAccount(candidates[0]))
   const permanentlyInvalid = new Map<string, { key: string; groupId?: string }>()
 
   await mapWithConcurrency(candidates, KSK_CREDENTIAL_VALIDATION_CONCURRENCY, async (account) => {
-    try {
-      await getUsageAndLimits(
-        {
-          credentialKind: 'kiro_api_key',
-          kiroApiKey: account.credentials.kiroApiKey,
-          idp: 'BuilderId'
-        },
-        'BuilderId',
-        undefined,
-        account.credentials.region
-      )
-    } catch (error) {
-      if (isPermanentKskCredentialError(error)) {
-        permanentlyInvalid.set(account.id, {
-          key: account.credentials.kiroApiKey,
-          groupId: account.groupId
-        })
-      } else {
-        result.retainedTransient++
-      }
+    const verdict = await probeKskAccountLiveness(toProxyAccount(account), model)
+    if (verdict === KSK_PROBE_VERDICT.PERMANENTLY_INVALID) {
+      permanentlyInvalid.set(account.id, {
+        key: account.credentials.kiroApiKey,
+        groupId: account.groupId
+      })
+    } else if (verdict === KSK_PROBE_VERDICT.TRANSIENT) {
+      result.retainedTransient++
     }
     return undefined
   })

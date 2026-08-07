@@ -208,7 +208,7 @@ export function KskTaskEditorDialog({
               checked={config.cleanupInvalidOnAdd}
               onChange={(cleanupInvalidOnAdd) => setConfig({ ...config, cleanupInvalidOnAdd })}
               title="新增 KSK 后清理不可用账号"
-              hint="重新验活 Proxy RS 目标分组和本机 Admin；仅删除明确永久失效的 KSK，超时、限流和服务异常会保留。"
+              hint="对目标分组全量发一条测试消息验活（自动选最便宜的模型，少量耗 credits）；认证失败、封禁和配额耗尽会删除，超时、限流和服务异常会保留。"
             />
           </section>
 

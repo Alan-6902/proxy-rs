@@ -192,6 +192,14 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
               {cachedCount > 0 ? (isEn ? `${cachedCount} cached` : `${cachedCount} 缓存`) : ''}
             </button>
           </div>
+          {/* datalist 必须放在 Input 之前：space-y-1 的实现是给 :not(:last-child) 加
+              margin-bottom，隐藏的 datalist 若排在末尾会让 Input 多吃 4px，
+              items-end 下整列比相邻列高 4px */}
+          <datalist id="account-liveness-models">
+            {modelOptions.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
           <Input
             list="account-liveness-models"
             value={model}
@@ -200,11 +208,6 @@ export function LivenessPanel({ onClose }: LivenessPanelProps): React.ReactNode 
             placeholder="claude-sonnet-4.5"
             className="h-8 text-xs font-mono"
           />
-          <datalist id="account-liveness-models">
-            {modelOptions.map((m) => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
         </div>
 
         <div className="space-y-1 flex-1 min-w-[200px]">

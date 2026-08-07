@@ -42,12 +42,20 @@ export interface AccountCredentials {
   endpointFallbackAfterFailures?: number
 }
 
+/**
+ * 参与反代轮询的账号集合签名。
+ * 入池资格只看 status + 上游凭据：`Account.isActive` 表示「当前使用的账号」（单选互斥），
+ * 不是启用开关，拿它过滤会导致除当前账号外全部不入池。
+ *
+ * proxyEnabled 进签名但**不进 filter**：被禁用的账号仍要入池（在池里标为不可用，
+ * 这样反代页能看到它、开关也还能点回来），所以切换开关必须让签名变化以触发重同步。
+ */
 export function buildAccountsSyncSignature<
   T extends {
     id: string
     groupId?: string
-    isActive?: boolean
     status: string
+    proxyEnabled?: boolean
     credentials?: {
       accessToken?: string
       kiroApiKey?: string
@@ -57,17 +65,14 @@ export function buildAccountsSyncSignature<
   }
 >(accounts: Iterable<T>): string {
   return Array.from(accounts)
-    .filter(
-      (a) =>
-        a.status === 'active' && a.isActive !== false && hasUpstreamKiroCredential(a.credentials)
-    )
+    .filter((a) => a.status === 'active' && hasUpstreamKiroCredential(a.credentials))
     .map((a) => {
       const keyFingerprint = a.credentials?.kiroApiKey
         ? Array.from(a.credentials.kiroApiKey)
             .reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 0)
             .toString(16)
         : ''
-      return `${a.id}:${a.groupId || ''}:${a.isActive === false ? 1 : 0}:${keyFingerprint}:${a.credentials?.preferredEndpoint || ''}:${a.credentials?.endpointFallbackAfterFailures || ''}`
+      return `${a.id}:${a.groupId || ''}:${isProxyRotationEnabled(a) ? 1 : 0}:${keyFingerprint}:${a.credentials?.preferredEndpoint || ''}:${a.credentials?.endpointFallbackAfterFailures || ''}`
     })
     .sort()
     .join('|')
@@ -77,6 +82,15 @@ export function hasUpstreamKiroCredential(
   credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
 ): boolean {
   return Boolean(credentials?.accessToken || credentials?.kiroApiKey)
+}
+
+/**
+ * 账号是否参与反代轮询。缺省视为参与 —— 老数据没有 proxyEnabled 字段，
+ * 用 `=== true` 判定会让所有历史账号一夜之间全被禁用。
+ * 这个默认值只在这里定义一次，主进程侧的同名逻辑必须与它保持一致。
+ */
+export function isProxyRotationEnabled(account?: { proxyEnabled?: boolean }): boolean {
+  return account?.proxyEnabled !== false
 }
 
 export function canRefreshUpstreamCredential(
@@ -199,6 +213,11 @@ export interface Account {
   status: AccountStatus
   lastError?: string
   isActive: boolean // 是否为当前激活账号
+  /**
+   * 是否参与 API 反代轮询。缺省（undefined）视为参与 —— 老数据没有这个字段，
+   * 不能把它们当成已禁用。这与 isActive 无关：isActive 是「当前使用的账号」单选标记。
+   */
+  proxyEnabled?: boolean
 
   // 时间戳
   createdAt: number

@@ -429,9 +429,14 @@ export interface KiroUsage {
 export interface ProxyAccount {
   id: string
   email?: string
-  /** IPC 同步资格；旧渲染进程传入禁用/封禁账号时主进程必须拒绝入池。 */
+  /** IPC 同步资格；旧渲染进程传入封禁账号时主进程必须拒绝入池。 */
   status?: string
-  isActive?: boolean
+  /**
+   * 是否参与轮询。缺省视为参与（老数据没这个字段）。
+   * 被禁用的账号**仍然入池**，只是 isAccountAvailable 判定为不可用 ——
+   * 这样反代页的池列表还能看到它、开关也点得回来。
+   */
+  proxyEnabled?: boolean
   accessToken?: string
   /** 上游 Kiro API Key；仅 credentialKind='kiro_api_key' 时使用。 */
   kiroApiKey?: string
@@ -447,6 +452,8 @@ export interface ProxyAccount {
   expiresAt?: number
   /** 账号绑定的出口代理 URL（http/https）；为空则使用全局代理逻辑 */
   proxyUrl?: string
+  /** API 反代专用：强制直连，禁止继承 App 全局代理或系统代理。 */
+  bypassAppProxy?: boolean
   /** 账号级首选 Kiro 上游端点；优先级高于全局 preferredEndpoint。 */
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
   /** 账号级端点回退顺序；未配置时沿用内置顺序。 */
@@ -646,7 +653,7 @@ export interface StoredProxyAccount {
   id: string
   email?: string
   status?: string
-  isActive?: boolean
+  proxyEnabled?: boolean
   groupId?: string
   idp?: string
   profileArn?: string
@@ -700,7 +707,8 @@ export function buildProxyAccounts(
 ): ProxyAccount[] {
   return Array.from(accounts)
     .filter((account) => {
-      if ('isActive' in account && account.isActive === false) return false
+      // 入池资格只看 status + 上游凭据。渲染层的 `isActive` 是「当前使用的账号」标记
+      // （单选互斥，新建/导入的账号一律 false），不是启用开关，不能拿来过滤。
       if ('status' in account && account.status !== undefined && account.status !== 'active')
         return false
 
@@ -715,6 +723,8 @@ export function buildProxyAccounts(
       return {
         id: account.id,
         email: account.email,
+        // 缺省视为参与轮询：老数据没有这个字段，`=== true` 会把历史账号全禁掉
+        proxyEnabled: account.proxyEnabled !== false,
         accessToken: plan.accessToken,
         kiroApiKey: plan.kiroApiKey,
         credentialKind: plan.credentialKind,

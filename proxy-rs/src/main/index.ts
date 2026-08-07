@@ -56,7 +56,13 @@ import {
   setProfileArnPersistCallback
 } from './proxy/kiroApi'
 import { openaiToKiro } from './proxy/translator'
-import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
+import {
+  getElectronProxySettings,
+  getSystemProxy,
+  redactProxyUrl,
+  safeCreateProxyAgent,
+  type ElectronProxyCredentials
+} from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
 import { registerProxyPoolIpcHandlers, validateProxyEntry } from './ipc/proxyPool'
@@ -69,6 +75,7 @@ import {
 } from '../shared/convoyCredentials'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import type { ProxyEntry } from '../shared/proxyPool'
+import type { ProxyAccountPoolView } from '../shared/proxyAccountPoolSnapshot'
 import {
   LocalNotificationService,
   LocalNoticeKind,
@@ -190,6 +197,23 @@ const KIRO_AUTH_ENDPOINT = 'https://prod.us-east-1.auth.desktop.kiro.dev'
 
 // ============ 代理设置 ============
 
+let activeElectronProxyCredentials: ElectronProxyCredentials | undefined
+
+app.on('login', (event, _webContents, _details, authInfo, callback) => {
+  const credentials = activeElectronProxyCredentials
+  if (
+    !credentials ||
+    !authInfo.isProxy ||
+    authInfo.host !== credentials.host ||
+    authInfo.port !== credentials.port
+  ) {
+    return
+  }
+
+  event.preventDefault()
+  callback(credentials.username, credentials.password)
+})
+
 /**
  * 规范化代理 URL，确保 protocol://host:port 格式。
  * 容错处理用户常见的格式错误：
@@ -214,16 +238,20 @@ export function normalizeProxyUrl(url: string): string {
 function applyProxySettings(enabled: boolean, url: string): void {
   if (enabled && url) {
     const normalized = normalizeProxyUrl(url)
+    const electronProxy = getElectronProxySettings(normalized)
+    activeElectronProxyCredentials = electronProxy?.credentials
     process.env.HTTP_PROXY = normalized
     process.env.HTTPS_PROXY = normalized
     process.env.http_proxy = normalized
     process.env.https_proxy = normalized
+    const redactedNormalized = redactProxyUrl(normalized)
     if (normalized !== url) {
-      console.log(`[Proxy] Enabled: ${normalized} (规范化自: ${url})`)
+      console.log(`[Proxy] Enabled: ${redactedNormalized} (代理地址已规范化)`)
     } else {
-      console.log(`[Proxy] Enabled: ${normalized}`)
+      console.log(`[Proxy] Enabled: ${redactedNormalized}`)
     }
   } else {
+    activeElectronProxyCredentials = undefined
     delete process.env.HTTP_PROXY
     delete process.env.HTTPS_PROXY
     delete process.env.http_proxy
@@ -535,15 +563,19 @@ let privateBrowserWindow: BrowserWindow | null = null
 let privateBrowserSessionSequence = 0
 
 // 使用隐私模式打开浏览器
+function closePrivateBrowserWindow(): void {
+  if (privateBrowserWindow && !privateBrowserWindow.isDestroyed()) {
+    privateBrowserWindow.close()
+  }
+}
+
 function openBrowserInPrivateMode(url: string): void {
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     console.error('[Browser] Refused to open non-HTTP URL in the built-in browser')
     return
   }
 
-  if (privateBrowserWindow && !privateBrowserWindow.isDestroyed()) {
-    privateBrowserWindow.close()
-  }
+  closePrivateBrowserWindow()
 
   const partition = `incognito-browser-${process.pid}-${privateBrowserSessionSequence++}`
   const browserWindow = new BrowserWindow({
@@ -569,6 +601,13 @@ function openBrowserInPrivateMode(url: string): void {
     .getUserAgent()
     .replace(/\sElectron\/[^\s]+/g, '')
   browserWindow.webContents.setUserAgent(chromeUserAgent)
+
+  const appProxyUrl =
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy
+  const electronProxy = getElectronProxySettings(appProxyUrl)
 
   browserWindow.on('closed', () => {
     if (privateBrowserWindow === browserWindow) {
@@ -596,7 +635,15 @@ function openBrowserInPrivateMode(url: string): void {
     )
   })
 
-  void browserWindow.loadURL(url).catch((error) => {
+  void (async () => {
+    if (electronProxy) {
+      await browserWindow.webContents.session.setProxy({ proxyRules: electronProxy.proxyRules })
+      console.log(
+        `[Browser] Built-in incognito browser using proxy: ${redactProxyUrl(appProxyUrl!)}`
+      )
+    }
+    await browserWindow.loadURL(url)
+  })().catch((error) => {
     console.error('[Browser] Failed to open URL in built-in incognito browser:', error)
   })
 }
@@ -1875,7 +1922,6 @@ const convoySyncManager = new ConvoySyncManager({
         id: `${CONVOY_ACCOUNT_ID_PREFIX}${credential.id}`,
         email: `convoy-${credential.id}`,
         status: 'active',
-        isActive: true,
         credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
         kiroApiKey: credential.apiKey,
         accessToken: credential.accessToken,
@@ -1889,7 +1935,6 @@ const convoySyncManager = new ConvoySyncManager({
         id: `${CONVOY_MANUAL_ACCOUNT_ID_PREFIX}${manual.id}`,
         email: manual.email || `manual-key-${manual.id}`,
         status: 'active',
-        isActive: true,
         credentialKind: 'kiro_api_key',
         kiroApiKey: manual.apiKey,
         region: manual.region,
@@ -5431,6 +5476,7 @@ app.whenReady().then(async () => {
       if (tokenRes.status === 200) {
         const tokenData = await tokenRes.json()
         console.log('[Login] Authorization successful!')
+        closePrivateBrowserWindow()
 
         const result = {
           success: true,
@@ -5643,6 +5689,7 @@ app.whenReady().then(async () => {
                 } else {
                   const tokenData = await tokenRes.json()
                   console.log('[Login] IAM SSO Authorization successful!')
+                  closePrivateBrowserWindow()
                   iamSsoResult = {
                     completed: true,
                     success: true,
@@ -5869,8 +5916,9 @@ app.whenReady().then(async () => {
   // IPC: 设置代理
   ipcMain.handle('set-proxy', async (_event, enabled: boolean, url: string) => {
     const normalizedUrl = enabled && url ? normalizeProxyUrl(url) : url
+    const electronProxy = getElectronProxySettings(normalizedUrl)
     console.log(
-      `[IPC] set-proxy called: enabled=${enabled}, url=${normalizedUrl}${normalizedUrl !== url ? ` (原始: ${url})` : ''}`
+      `[IPC] set-proxy called: enabled=${enabled}, url=${normalizedUrl ? redactProxyUrl(normalizedUrl) : ''}${normalizedUrl !== url ? ' (代理地址已规范化)' : ''}`
     )
     try {
       applyProxySettings(enabled, url)
@@ -5878,8 +5926,8 @@ app.whenReady().then(async () => {
       // 同时设置 Electron 的 session 代理
       if (mainWindow) {
         const session = mainWindow.webContents.session
-        if (enabled && normalizedUrl) {
-          await session.setProxy({ proxyRules: normalizedUrl })
+        if (enabled && electronProxy) {
+          await session.setProxy({ proxyRules: electronProxy.proxyRules })
         } else {
           await session.setProxy({ proxyRules: '' })
         }
@@ -6435,15 +6483,44 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 获取反代池账号列表
-  ipcMain.handle('proxy-get-accounts', () => {
+  // 只回传 getPoolSnapshot 的白名单字段：池里的 ProxyAccount 带着 accessToken /
+  // kiroApiKey / refreshToken / clientSecret，整体回传会让凭据流进渲染进程。
+  ipcMain.handle('proxy-get-accounts', (): ProxyAccountPoolView => {
     if (!proxyServer) {
-      return { accounts: [], availableCount: 0 }
+      return { accounts: [], availableCount: 0, nextCandidateId: null, strategy: 'round-robin' }
     }
     const pool = proxyServer.getAccountPool()
     return {
-      accounts: pool.getAllAccounts(),
-      availableCount: pool.availableCount
+      accounts: pool.getPoolSnapshot(),
+      availableCount: pool.availableCount,
+      nextCandidateId: pool.getNextCandidateId(),
+      strategy: pool.getStrategy()
     }
+  })
+
+  // IPC: 把轮询游标指到指定账号（让它成为下一个被试的候选）
+  // 只移动游标，不改可用性：目标若正冷却或已封禁，选号时仍会被跳过。
+  ipcMain.handle('proxy-set-next-account', (_event, accountId: string) => {
+    if (!proxyServer) {
+      return { success: false, error: 'Proxy server not initialized' }
+    }
+    const applied = proxyServer.getAccountPool().setNextCandidate(accountId)
+    return applied ? { success: true } : { success: false, error: 'Account not in pool' }
+  })
+
+  // IPC: 开关某账号是否参与轮询
+  // 账号仍留在池里，只是 isAccountAvailable 判定为不可用 —— 这样反代页还能看到它。
+  // 落盘由渲染进程的 store 负责（setAccountProxyEnabled）。
+  ipcMain.handle('proxy-set-account-enabled', (_event, accountId: string, enabled: boolean) => {
+    if (!proxyServer) {
+      return { success: false, error: 'Proxy server not initialized' }
+    }
+    const pool = proxyServer.getAccountPool()
+    if (!pool.getAccount(accountId)) {
+      return { success: false, error: 'Account not in pool' }
+    }
+    pool.setAccountEnabled(accountId, enabled)
+    return { success: true }
   })
 
   // IPC: 刷新模型缓存
@@ -6676,7 +6753,13 @@ app.whenReady().then(async () => {
     'proxy-save-logs',
     async (
       _event,
-      logs: Array<{ time: string; path: string; status: number; tokens?: number }>
+      logs: Array<{
+        time: string
+        path: string
+        status: number
+        tokens?: number
+        messagePreview?: string
+      }>
     ) => {
       try {
         const logsPath = getProxyLogsPath()

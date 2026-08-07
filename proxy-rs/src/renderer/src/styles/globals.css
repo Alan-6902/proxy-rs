@@ -1,18 +1,5 @@
 @import 'tailwindcss';
 
-/* ==================== 展示字体（本地打包，CSP default-src 'self' 下唯一可行方案） ====================
- * Bricolage Grotesque Variable / OFL-1.1 / latin 子集
- * 只承担标题与数据强调，中文与正文由系统字体栈承接，避免 fallback 时布局跳动。
- * 授权与轴信息见 assets/fonts/LICENSE-BricolageGrotesque.txt */
-@font-face {
-  font-family: 'Bricolage Grotesque';
-  font-style: normal;
-  font-weight: 200 800;
-  font-stretch: 75% 100%;
-  font-display: swap;
-  src: url('../assets/fonts/BricolageGrotesque-Variable-latin.woff2') format('woff2');
-}
-
 @theme {
   /* ==================== 浅色模式 - F1 清新冰白蓝 ==================== */
   --color-background: #eef2f8;
@@ -40,11 +27,11 @@
   --color-accent-violet: #8b5cf6;
 
   /* ==================== 排版层级（编辑感：展示字与正文字分工明确） ====================
-   * display : 页面标题 / 大数字 —— 方形骨架 + 收紧字距，撑出版面重量
+   * display : 页面标题 / 大数字 —— 与正文同一套系统字体栈，只靠字重与字距做层级
    * sans    : 正文 / 控件 —— 系统栈，中英混排最稳
    * mono    : ID / Token / 时间戳 —— 等宽 + tabular */
   --font-display:
-    'Bricolage Grotesque', ui-sans-serif, system-ui, -apple-system, 'PingFang SC',
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-sans:
     ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
@@ -1062,7 +1049,6 @@ body {
   font-family: var(--font-display);
   font-weight: 700;
   letter-spacing: var(--tracking-display);
-  font-stretch: 96%;
   line-height: 1.08;
 }
 

@@ -4,7 +4,7 @@ import {
   callKiroMcpWebSearch,
   fetchKiroModels
 } from '../../src/main/proxy/kiroApi'
-import { buildProxyAccounts } from '../../src/main/proxy/types'
+import { buildProxyAccounts, type StoredProxyAccount } from '../../src/main/proxy/types'
 
 function eventStreamFrame(eventType: string, payload: unknown): Uint8Array {
   const encoder = new TextEncoder()
@@ -261,6 +261,43 @@ describe('callKiroApiStream 真实 EventStream 解析', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(errors).toHaveLength(1)
     expect(errors[0].message).toContain('Auth error 401')
+  })
+
+
+  it('HTTP 错误向调用方保留上游 reason 和 code', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            reason: 'INVALID_MODEL_ID',
+            code: 'VALIDATION_ERROR'
+          }
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      )
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const errors: Error[] = []
+
+    await expect(
+      callKiroApiStream(
+        account,
+        payload,
+        () => undefined,
+        () => undefined,
+        (error) => {
+          errors.push(error)
+        },
+        undefined,
+        'amazonq'
+      )
+    ).resolves.toBeUndefined()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(errors).toHaveLength(1)
+    expect(errors[0].message).toBe(
+      'Upstream Kiro API request failed (HTTP 400): VALIDATION_ERROR · INVALID_MODEL_ID'
+    )
   })
 
   it('OAuth 失败后切至无 ARN API key 时不携带旧 profileArn', async () => {
@@ -674,7 +711,6 @@ describe('Kiro API key account sync signature', () => {
       id: 'key-only-account',
       groupId: 'group-a',
       status: 'active',
-      isActive: true,
       credentials: { credentialKind: 'kiro_api_key' as const, kiroApiKey: 'ksk_first_secret' }
     }
     const initial = buildAccountsSyncSignature([base])
@@ -700,6 +736,24 @@ describe('Kiro API key account sync signature', () => {
     expect(rotated).not.toBe(initial)
     expect(endpointConfigured).not.toBe(initial)
     expect(initial).not.toContain(base.credentials.kiroApiKey)
+  })
+
+  it('切换 proxyEnabled 会改变签名以触发重同步，缺省与显式 true 等价', async () => {
+    const { buildAccountsSyncSignature } = await import('../../src/renderer/src/types/account')
+    const base = {
+      id: 'acc',
+      status: 'active',
+      credentials: { accessToken: 'oauth-token' }
+    }
+
+    const legacy = buildAccountsSyncSignature([base])
+    const explicitlyEnabled = buildAccountsSyncSignature([{ ...base, proxyEnabled: true }])
+    const disabled = buildAccountsSyncSignature([{ ...base, proxyEnabled: false }])
+
+    // 老数据（无字段）与显式启用必须同签名，否则升级后会白同步一轮
+    expect(explicitlyEnabled).toBe(legacy)
+    // 禁用要改变签名，否则点了开关反代池不会重同步
+    expect(disabled).not.toBe(legacy)
   })
 
   it('accepts key-only and OAuth credentials while rejecting missing credentials', async () => {
@@ -729,15 +783,23 @@ describe('Kiro API key account sync signature', () => {
 })
 
 describe('主进程账号池同步', () => {
-  it('跳过禁用账号，保留分组，并接纳仅 API key 的账号', () => {
+  it('保留分组、接纳仅 API key 的账号，且不因 isActive 漏掉非当前账号', () => {
     const mapped = buildProxyAccounts(
       [
         {
-          id: 'disabled',
+          id: 'not-current',
           status: 'active',
+          // isActive 是「当前使用的账号」标记（单选互斥），不是启用开关：
+          // 落盘数据里仍带这个字段，非当前账号必须照样入池。
           isActive: false,
-          groupId: 'group-disabled',
-          credentials: { accessToken: 'disabled-token' }
+          groupId: 'group-not-current',
+          credentials: { accessToken: 'not-current-token' }
+        } as StoredProxyAccount & { isActive: boolean },
+        {
+          id: 'expired',
+          status: 'expired',
+          groupId: 'group-expired',
+          credentials: { accessToken: 'expired-token' }
         },
         {
           id: 'oauth-group',
@@ -760,7 +822,7 @@ describe('主进程账号池同步', () => {
       (accountId) => (accountId === 'oauth-group' ? 'http://127.0.0.1:7890' : undefined)
     )
 
-    expect(mapped.map((account) => account.id)).toEqual(['oauth-group', 'key-only'])
+    expect(mapped.map((account) => account.id)).toEqual(['not-current', 'oauth-group', 'key-only'])
     expect(mapped.find((account) => account.id === 'oauth-group')).toMatchObject({
       groupId: 'group-a',
       proxyUrl: 'http://127.0.0.1:7890',
@@ -773,6 +835,28 @@ describe('主进程账号池同步', () => {
       kiroApiKey: 'ksk_test_redacted',
       groupId: 'group-b'
     })
+  })
+
+  it('禁用的账号仍然入池（带 proxyEnabled=false），缺省视为参与轮询', () => {
+    const mapped = buildProxyAccounts([
+      {
+        id: 'disabled',
+        status: 'active',
+        proxyEnabled: false,
+        credentials: { accessToken: 'disabled-token' }
+      },
+      {
+        id: 'legacy',
+        status: 'active',
+        credentials: { accessToken: 'legacy-token' }
+      }
+    ])
+
+    // 禁用不影响入池资格：账号要留在池里，UI 才能看到它、开关才点得回来
+    expect(mapped.map((a) => a.id)).toEqual(['disabled', 'legacy'])
+    expect(mapped.find((a) => a.id === 'disabled')?.proxyEnabled).toBe(false)
+    // 老数据没有这个字段，必须回落为 true，否则历史账号会被全部禁用
+    expect(mapped.find((a) => a.id === 'legacy')?.proxyEnabled).toBe(true)
   })
 })
 
@@ -809,10 +893,9 @@ describe('后台刷新凭据计划', () => {
     })
   })
 
-  it('IPC 形状的禁用、封禁和无凭据账号不会进入账号池', async () => {
+  it('IPC 形状的封禁和无凭据账号不会进入账号池', async () => {
     const { buildProxyAccounts } = await import('../../src/main/proxy/types')
     const mapped = buildProxyAccounts([
-      { id: 'disabled', isActive: false, accessToken: 'token' },
       { id: 'suspended', status: 'suspended', accessToken: 'token' },
       { id: 'missing', status: 'active' },
       {

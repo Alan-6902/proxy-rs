@@ -12,7 +12,9 @@ import {
   RegisterPage,
   SeatsPage,
   LogsPage,
-  TaskManagerPage
+  TaskManagerPage,
+  HunterPage,
+  ProxyStatsPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { ConfirmDialogHost } from './components/ui'
@@ -243,6 +245,10 @@ function App(): React.JSX.Element {
         return <AccountManager />
       case 'tasks':
         return <TaskManagerPage />
+      case 'hunter':
+        return <HunterPage />
+      case 'proxyStats':
+        return <ProxyStatsPage />
       case 'proxyPool':
         return <ProxyPoolPage />
       case 'register':

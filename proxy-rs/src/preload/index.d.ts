@@ -15,6 +15,18 @@ import type {
   KskAutomationTaskInput,
   KskAutomationTaskView
 } from '../shared/kskAutomation'
+import type {
+  KskHunterConfig,
+  KskHunterLinkInput,
+  KskHunterSecretInput,
+  KskHunterSnapshot,
+  KskHunterStatusEvent
+} from '../shared/kskHunter'
+import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
+import type {
+  LocalAdminStatsSnapshot,
+  LocalAdminUsageRefreshSummary
+} from '../shared/localAdminStats'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -443,7 +455,9 @@ interface KiroApi {
     kind: 'registration-risk-paused' | 'registration-batch-completed',
     input?: { batchId?: string }
   ) => Promise<void>
-  onLocalNotificationNavigate: (callback: (page: 'accounts' | 'register') => void) => () => void
+  onLocalNotificationNavigate: (
+    callback: (page: 'accounts' | 'register' | 'hunter') => void
+  ) => () => void
 
   // 获取账户可用模型列表
   accountGetModels: (
@@ -911,8 +925,35 @@ interface KiroApi {
   kskAutomationSyncLocalAdminNow: (
     taskId: string
   ) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
+  kskAutomationPushAccountToLocalAdmin: (
+    candidate: LocalAdminPushCandidate
+  ) => Promise<IdcIpcResult<LocalAdminPushResult>>
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void) => () => void
   onKskAutomationAccountsChanged: (callback: () => void) => () => void
+  kskHunterSnapshot: () => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterUpdateConfig: (
+    config: Partial<KskHunterConfig>,
+    secrets?: KskHunterSecretInput
+  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterCreateLink: (input: KskHunterLinkInput) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterUpdateLink: (
+    linkId: string,
+    input: KskHunterLinkInput
+  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterSetLinkEnabled: (
+    linkId: string,
+    enabled: boolean
+  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterDeleteLink: (linkId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterRunNow: () => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterRetryDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterDeleteDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void) => () => void
+  localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
+  localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
+  localAdminStatsRefreshUsage: () => Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>>
+  localAdminStatsClearSamples: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
+  onLocalAdminStatsChanged: (callback: (snapshot: LocalAdminStatsSnapshot) => void) => () => void
 }
 
 declare global {

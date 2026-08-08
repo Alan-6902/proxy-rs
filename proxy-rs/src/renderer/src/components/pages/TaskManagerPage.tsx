@@ -12,6 +12,7 @@ import {
   Plus,
   RefreshCw,
   ServerCog,
+  ShieldOff,
   Trash2,
   TriangleAlert
 } from 'lucide-react'
@@ -377,10 +378,16 @@ export function TaskManagerPage(): React.ReactNode {
                           <ServerCog className="h-3.5 w-3.5" /> 本机 Admin 同步已开启
                         </div>
                       )}
+                      {task.status.lastRejectedCount > 0 && (
+                        <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
+                          <ShieldOff className="h-3.5 w-3.5" />
+                          上轮 {task.status.lastRejectedCount} 个新号验活未通过，未入库
+                        </div>
+                      )}
                       {task.config.cleanupInvalidOnAdd && (
                         <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
                           <Trash2 className="h-3.5 w-3.5" />
-                          新增后自动清理 · 上轮检查 {
+                          新增后全量验活 · 上轮检查 {
                             task.status.lastCleanupCheckedCount
                           } 个，删除 {task.status.lastCleanupRemovedCount} 个
                           {task.status.lastCleanupRetainedCount > 0

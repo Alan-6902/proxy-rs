@@ -12,7 +12,9 @@ import {
   Archive,
   GripVertical,
   BadgeCheck,
-  ListChecks
+  ListChecks,
+  Crosshair,
+  ChartLine
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -24,6 +26,8 @@ export type PageType =
   | 'home'
   | 'accounts'
   | 'tasks'
+  | 'hunter'
+  | 'proxyStats'
   | 'proxyPool'
   | 'register'
   | 'seats'
@@ -44,6 +48,8 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
+  { id: 'hunter', labelKey: 'nav.hunter', icon: Crosshair },
+  { id: 'proxyStats', labelKey: 'nav.proxyStats', icon: ChartLine },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
   { id: 'register', labelKey: 'nav.register', icon: UserPlus },
   { id: 'seats', labelKey: 'nav.seats', icon: BadgeCheck },

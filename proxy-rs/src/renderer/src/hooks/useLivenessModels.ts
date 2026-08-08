@@ -18,6 +18,18 @@ export const LIVENESS_MODELS = [
 const MODEL_STORAGE_KEY = 'kiro-liveness-model'
 const MODELS_CACHE_KEY = 'kiro-liveness-models-cache'
 
+/**
+ * 读取上次选定的验活模型。
+ * 给单账号验活入口用：它只要一个模型 ID，不需要 hook 的候选列表与网络刷新。
+ */
+export function readPersistedLivenessModel(): string {
+  try {
+    return localStorage.getItem(MODEL_STORAGE_KEY) || LIVENESS_MODELS[0]
+  } catch {
+    return LIVENESS_MODELS[0]
+  }
+}
+
 interface UseLivenessModels {
   /** 当前选中的模型 ID（写入即持久化） */
   model: string
@@ -31,13 +43,7 @@ interface UseLivenessModels {
 }
 
 export function useLivenessModels(): UseLivenessModels {
-  const [model, setModel] = useState<string>(() => {
-    try {
-      return localStorage.getItem(MODEL_STORAGE_KEY) || LIVENESS_MODELS[0]
-    } catch {
-      return LIVENESS_MODELS[0]
-    }
-  })
+  const [model, setModel] = useState<string>(readPersistedLivenessModel)
   const [cachedModels, setCachedModels] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(MODELS_CACHE_KEY)

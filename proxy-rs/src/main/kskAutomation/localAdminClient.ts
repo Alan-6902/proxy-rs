@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 import { isValidKiroApiKey, isValidKiroRegion } from '../../shared/kiroApiKey'
-import { isPermanentKskCredentialError, type KskCredentialCleanupResult } from './credentialCleanup'
+import {
+  LOCAL_ADMIN_AUTH_METHOD,
+  resolveLocalAdminCredentialPayload,
+  type LocalAdminPushCandidate,
+  type LocalAdminPushResult
+} from '../../shared/localAdminPush'
+import type { KskCredentialCleanupResult } from './credentialCleanup'
 
 export interface LocalAdminAccount {
   kiroApiKey: string
@@ -20,10 +26,29 @@ export type KskAutomationFetch = (
   init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }
 ) => Promise<Response>
 
-interface RemoteCredential {
+/**
+ * `GET /api/admin/credentials` 单条凭据。Admin 只回哈希与脱敏 Key，不回明文。
+ * 字段按 kiro-rs 实测响应列全，统计页要读计数与状态，同步链路只用哈希判重。
+ */
+export interface RemoteCredential {
   id?: string | number
-  apiKeyHash?: string
+  apiKeyHash?: string | null
+  refreshTokenHash?: string | null
   authMethod?: string
+  maskedApiKey?: string
+  endpoint?: string
+  email?: string | null
+  subscriptionTitle?: string | null
+  priority?: number
+  disabled?: boolean
+  isCurrent?: boolean
+  successCount?: number
+  failureCount?: number
+  refreshFailureCount?: number
+  lastUsedAt?: string | number | null
+  expiresAt?: string | number | null
+  hasProfileArn?: boolean
+  hasProxy?: boolean
 }
 
 function redactAdminErrorDetail(value: string): string {
@@ -54,11 +79,12 @@ export function resolveLocalAdminApiBase(value: string): string {
   return parsed.toString().replace(/\/$/, '')
 }
 
-function apiKeyHash(value: string): string {
+function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-function readRemoteCredentials(payload: unknown): RemoteCredential[] {
+/** 从 Admin 响应里取出 credentials 数组，非法结构一律当空。 */
+export function readRemoteCredentials(payload: unknown): RemoteCredential[] {
   if (typeof payload !== 'object' || payload === null) return []
   const credentials = (payload as { credentials?: unknown }).credentials
   if (!Array.isArray(credentials)) return []
@@ -67,7 +93,8 @@ function readRemoteCredentials(payload: unknown): RemoteCredential[] {
   )
 }
 
-async function requestJson(
+/** 统一的 Admin 请求：注入 x-api-key、超时中断，并在报错时脱敏响应体。 */
+export async function requestJson(
   fetchImpl: KskAutomationFetch,
   url: string,
   apiKey: string,
@@ -98,21 +125,43 @@ async function requestJson(
   }
 }
 
-function remoteCredentialId(credential: RemoteCredential): string | undefined {
+/** 取出 Admin 侧凭据 id，统一成字符串（Admin 用数字，本地按字符串传）。 */
+export function remoteCredentialId(credential: RemoteCredential): string | undefined {
   const value = credential.id
   return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined
 }
 
-export async function cleanupInvalidLocalAdminCredentials(input: {
+/**
+ * 按本地验活结论删除本机 Admin（kiro-rs 反代）上的对应凭据。
+ *
+ * 判定权全部在本地：这里只负责「本地已经判死的这些 key，在 Admin 上也删掉」。
+ * 不再去打 Admin 的 balance 接口自行判活——那条路口径与本地发消息验活不一致
+ * （超额号 balance 照样通），而且 Admin 侧错误经过序列化后拿不到结构化 statusCode，
+ * 只能靠正则猜，容易把 Admin Key 自身的问题当成账号失效。
+ *
+ * Admin 只回 apiKeyHash 不回明文，所以本地按同样的 sha256(key) 算一遍来匹配。
+ */
+export async function deleteLocalAdminCredentialsByKey(input: {
+  keys: readonly string[]
   baseUrl: string
   adminApiKey: string
   timeoutSeconds: number
   fetchImpl: KskAutomationFetch
 }): Promise<KskCredentialCleanupResult> {
+  const result: KskCredentialCleanupResult = {
+    checked: 0,
+    removed: 0,
+    retainedTransient: 0,
+    errors: []
+  }
+  const targetHashes = new Map(input.keys.map((key) => [sha256Hex(key), key]))
+  if (targetHashes.size === 0) return result
+
   const baseUrl = resolveLocalAdminApiBase(input.baseUrl)
   const adminApiKey = input.adminApiKey.trim()
   if (!adminApiKey) throw new Error('未配置本机 Admin API Key')
   const timeoutMs = Math.max(3, input.timeoutSeconds) * 1000
+
   const payload = await requestJson(
     input.fetchImpl,
     `${baseUrl}/credentials`,
@@ -120,45 +169,29 @@ export async function cleanupInvalidLocalAdminCredentials(input: {
     timeoutMs,
     { method: 'GET' }
   )
-  const credentials = readRemoteCredentials(payload).filter(
-    (credential) => credential.authMethod === 'api_key' && remoteCredentialId(credential)
+  const doomed = readRemoteCredentials(payload).filter(
+    (credential) =>
+      credential.authMethod === 'api_key' &&
+      credential.apiKeyHash &&
+      targetHashes.has(credential.apiKeyHash) &&
+      remoteCredentialId(credential)
   )
-  const result: KskCredentialCleanupResult = {
-    checked: 0,
-    removed: 0,
-    retainedTransient: 0,
-    errors: []
-  }
+  result.checked = doomed.length
 
-  for (const credential of credentials) {
+  for (const credential of doomed) {
     const credentialId = remoteCredentialId(credential)
     if (!credentialId) continue
-    result.checked++
     try {
       await requestJson(
         input.fetchImpl,
-        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance`,
+        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}`,
         adminApiKey,
         timeoutMs,
-        { method: 'GET' }
+        { method: 'DELETE' }
       )
+      result.removed++
     } catch (error) {
-      if (!isPermanentKskCredentialError(error, { requireExplicitCredentialSignal: true })) {
-        result.retainedTransient++
-        continue
-      }
-      try {
-        await requestJson(
-          input.fetchImpl,
-          `${baseUrl}/credentials/${encodeURIComponent(credentialId)}`,
-          adminApiKey,
-          timeoutMs,
-          { method: 'DELETE' }
-        )
-        result.removed++
-      } catch (deleteError) {
-        result.errors.push(deleteError instanceof Error ? deleteError.message : String(deleteError))
-      }
+      result.errors.push(error instanceof Error ? error.message : String(error))
     }
   }
   return result
@@ -214,7 +247,7 @@ export async function syncKskAccountsToLocalAdmin(input: {
   }
 
   for (const account of uniqueAccounts.values()) {
-    const hash = apiKeyHash(account.kiroApiKey)
+    const hash = sha256Hex(account.kiroApiKey)
     if (existingHashes.has(hash)) {
       result.skippedExisting++
       continue
@@ -253,4 +286,70 @@ export async function syncKskAccountsToLocalAdmin(input: {
     }
   }
   return result
+}
+
+/**
+ * 把单个账号推送到本机 Admin。与批量同步的差别：
+ * 不限 credentialKind（social / idc / api_key 都收），并且 Admin 已有同一凭据时
+ * 返回 existing 而不是静默跳过——手动点按钮的人需要知道"没新增"这个结果。
+ */
+export async function pushAccountToLocalAdmin(input: {
+  candidate: LocalAdminPushCandidate
+  baseUrl: string
+  adminApiKey: string
+  timeoutSeconds: number
+  fetchImpl: KskAutomationFetch
+}): Promise<LocalAdminPushResult> {
+  const resolved = resolveLocalAdminCredentialPayload(input.candidate)
+  if (!resolved.ok) throw new Error(resolved.reason)
+
+  const baseUrl = resolveLocalAdminApiBase(input.baseUrl)
+  const adminApiKey = input.adminApiKey.trim()
+  if (!adminApiKey) throw new Error('未配置本机 Admin API Key')
+  const timeoutMs = Math.max(3, input.timeoutSeconds) * 1000
+
+  const payload = resolved.payload
+  const isApiKey = payload.authMethod === LOCAL_ADMIN_AUTH_METHOD.API_KEY
+  // Admin 只回哈希，不回明文，所以本地按同样的 sha256 算一遍来判重
+  const hash = sha256Hex(isApiKey ? payload.kiroApiKey! : payload.refreshToken!)
+  const existing = readRemoteCredentials(
+    await requestJson(input.fetchImpl, `${baseUrl}/credentials`, adminApiKey, timeoutMs, {
+      method: 'GET'
+    })
+  ).find((credential) => (isApiKey ? credential.apiKeyHash : credential.refreshTokenHash) === hash)
+  if (existing) {
+    return {
+      status: 'existing',
+      credentialId: remoteCredentialId(existing),
+      verified: false,
+      authMethod: payload.authMethod
+    }
+  }
+
+  const created = await requestJson(
+    input.fetchImpl,
+    `${baseUrl}/credentials`,
+    adminApiKey,
+    timeoutMs,
+    { method: 'POST', body: payload }
+  )
+  const credentialId = readCredentialId(created)
+  if (!credentialId) throw new Error('本机 Admin 未返回 credentialId')
+
+  // 验活失败不算推送失败：凭据已经进 Admin，余额接口的问题让 Admin 侧自己暴露
+  let verified = false
+  try {
+    await requestJson(
+      input.fetchImpl,
+      `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance`,
+      adminApiKey,
+      timeoutMs,
+      { method: 'GET' }
+    )
+    verified = true
+  } catch {
+    verified = false
+  }
+
+  return { status: 'created', credentialId, verified, authMethod: payload.authMethod }
 }

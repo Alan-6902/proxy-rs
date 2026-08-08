@@ -5,6 +5,7 @@ import type {
   KskAutomationTaskInput,
   KskAutomationTaskView
 } from '../../shared/kskAutomation'
+import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../../shared/localAdminPush'
 import {
   createKskAutomationTask,
   deleteKskAutomationTask,
@@ -19,7 +20,11 @@ import {
   type PersistedKskAutomationTask
 } from './configStore'
 import { parseKskEmailRecipients } from './emailNotifier'
-import { resolveLocalAdminApiBase } from './localAdminClient'
+import {
+  pushAccountToLocalAdmin,
+  resolveLocalAdminApiBase,
+  type KskAutomationFetch
+} from './localAdminClient'
 import type { KskAutomationManager } from './syncManager'
 
 export const KSK_AUTOMATION_CHANNEL = {
@@ -30,6 +35,7 @@ export const KSK_AUTOMATION_CHANNEL = {
   delete: 'ksk-automation-delete',
   syncNow: 'ksk-automation-sync-now',
   syncLocalAdminNow: 'ksk-automation-sync-local-admin-now',
+  pushAccountToLocalAdmin: 'ksk-automation-push-account-to-local-admin',
   statusEvent: 'ksk-automation-status-changed',
   accountsChangedEvent: 'ksk-automation-accounts-changed'
 } as const
@@ -43,6 +49,8 @@ interface IpcResult<T> {
 export interface KskAutomationIpcDeps {
   getManager: () => KskAutomationManager
   getMainWindow: () => BrowserWindow | null
+  /** 直连本机 Admin 的 fetch（不走应用代理），与自动同步链路共用同一实现。 */
+  localAdminFetchImpl: KskAutomationFetch
 }
 
 function sendEvent(
@@ -111,6 +119,34 @@ async function listTaskViews(manager: KskAutomationManager): Promise<KskAutomati
 
 function toError(error: unknown): IpcResult<never> {
   return { success: false, error: error instanceof Error ? error.message : String(error) }
+}
+
+export interface LocalAdminTarget {
+  baseUrl: string
+  adminApiKey: string
+  timeoutSeconds: number
+}
+
+/**
+ * 从已有任务里取本机 Admin 连接信息，供单账号手动推送与反代统计复用。
+ * 启用中的任务优先；仅暂停的任务配置仍然可用（暂停停的是轮询，不是这份地址）。
+ */
+export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
+  const store = await loadKskAutomationStore()
+  const candidates = store.tasks.filter(
+    (task) => task.config.localAdminEnabled && task.secrets.localAdminApiKey
+  )
+  const task = candidates.find((item) => item.enabled) ?? candidates[0]
+  if (!task) {
+    throw new Error(
+      '未找到可用的本机 Admin 配置，请先在任务管理里开启「同步到本机 Admin」并填写 Admin API Key'
+    )
+  }
+  return {
+    baseUrl: task.config.localAdminBaseUrl,
+    adminApiKey: task.secrets.localAdminApiKey,
+    timeoutSeconds: task.config.requestTimeoutSeconds
+  }
 }
 
 export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): void {
@@ -235,6 +271,30 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
         return {
           success: true,
           data: { taskId, status: await deps.getManager().syncLocalAdminNow(taskId) }
+        }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    KSK_AUTOMATION_CHANNEL.pushAccountToLocalAdmin,
+    async (
+      _event,
+      candidate: LocalAdminPushCandidate
+    ): Promise<IpcResult<LocalAdminPushResult>> => {
+      try {
+        const target = await resolveLocalAdminTarget()
+        return {
+          success: true,
+          data: await pushAccountToLocalAdmin({
+            candidate,
+            baseUrl: target.baseUrl,
+            adminApiKey: target.adminApiKey,
+            timeoutSeconds: target.timeoutSeconds,
+            fetchImpl: deps.localAdminFetchImpl
+          })
         }
       } catch (error) {
         return toError(error)

@@ -56,6 +56,7 @@ const EMPTY_STATUS: KskAutomationStatus = {
   lastFetchedCount: 0,
   lastAddedCount: 0,
   totalAddedCount: 0,
+  lastRejectedCount: 0,
   lastEmailedCount: 0,
   lastLocalAdminSyncedCount: 0,
   lastLocalAdminVerifiedCount: 0,
@@ -109,6 +110,8 @@ export function normalizeKskAutomationConfig(
       120
     ),
     cleanupInvalidOnAdd: source.cleanupInvalidOnAdd !== false,
+    livenessModel: normalizeString(source.livenessModel),
+    livenessMessage: normalizeString(source.livenessMessage),
     emailEnabled: source.emailEnabled === true,
     smtpHost: normalizeString(source.smtpHost),
     smtpPort: positiveInt(source.smtpPort, DEFAULT_KSK_AUTOMATION_CONFIG.smtpPort, 1, 65535),

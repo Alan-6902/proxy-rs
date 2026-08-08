@@ -10,6 +10,8 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  # 下游接口参考实现只在开发/联调时用，不进安装包
+  - '!downstream-example/**'
 asarUnpack:
   - resources/**
   - node_modules/koffi/**

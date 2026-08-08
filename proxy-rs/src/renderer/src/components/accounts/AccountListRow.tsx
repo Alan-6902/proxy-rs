@@ -1,6 +1,7 @@
 import { memo, useState, useMemo, useCallback } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
+import { useAccountActions } from '@/hooks/useAccountActions'
 import { Badge, Button, askConfirm } from '../ui'
 import type { Account, AccountTag, AccountGroup, AccountLivenessResult } from '@/types/account'
 import {
@@ -20,6 +21,8 @@ import {
   Copy,
   Download,
   Zap,
+  CloudUpload,
+  CloudCheck,
   XCircle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -51,6 +54,7 @@ interface AccountListRowProps {
 // 紧凑列表行 — 视觉对齐 AccountCard
 // 高度 ~72px，圆角 + 流光边框 + 标签光晕 + 封禁红色背景
 import { canRefreshUpstreamCredential } from '../../types/account'
+import { hasUpstreamKiroCredential } from '../../types/account'
 import { ExportDialog } from './ExportDialog'
 
 function AccountListRowComponent({
@@ -87,6 +91,10 @@ function AccountListRowComponent({
 
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+
+  // 单账号验活 / 推送到本机 Admin（与卡片视图共用同一份逻辑）
+  const { runLiveness, livenessPending, pushToAdmin, pushState, pushError, canPush, pushTitle } =
+    useAccountActions(account, isEn)
 
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
@@ -607,6 +615,60 @@ function AccountListRowComponent({
           title={isEn ? 'Check account info' : '检查账户信息'}
         >
           <RefreshCw className={cn('h-3.5 w-3.5', isRefreshing && 'animate-spin')} />
+        </Button>
+
+        <Button
+          size="icon"
+          variant="ghost"
+          className={cn(
+            'h-7 w-7',
+            livenessPending
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400'
+          )}
+          onClick={(e) => {
+            e.stopPropagation()
+            runLiveness()
+          }}
+          disabled={livenessPending || !hasUpstreamKiroCredential(account.credentials)}
+          title={
+            isEn
+              ? 'Liveness test (send a real message to the model)'
+              : '验活（给模型发一条真实消息）'
+          }
+        >
+          {livenessPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Zap className="h-3.5 w-3.5" />
+          )}
+        </Button>
+
+        <Button
+          size="icon"
+          variant="ghost"
+          className={cn(
+            'h-7 w-7',
+            pushState === 'created' || pushState === 'existing'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : pushState === 'error'
+                ? 'text-destructive'
+                : 'text-muted-foreground hover:text-foreground'
+          )}
+          onClick={(e) => {
+            e.stopPropagation()
+            pushToAdmin()
+          }}
+          disabled={!canPush || pushState === 'pushing'}
+          title={pushError ? `${pushTitle} · ${pushError}` : pushTitle}
+        >
+          {pushState === 'pushing' ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : pushState === 'created' || pushState === 'existing' ? (
+            <CloudCheck className="h-3.5 w-3.5" />
+          ) : (
+            <CloudUpload className="h-3.5 w-3.5" />
+          )}
         </Button>
 
         <Button

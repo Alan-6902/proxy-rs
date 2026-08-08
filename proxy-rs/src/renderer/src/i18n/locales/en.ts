@@ -45,6 +45,8 @@ const en = {
     home: 'Home',
     accounts: 'Accounts',
     tasks: 'Tasks',
+    hunter: 'KSK Hunter',
+    proxyStats: 'Proxy Stats',
     proxyPool: 'Proxy Pool',
     diagnose: 'Diagnostics',
     configSync: 'Config Sync',

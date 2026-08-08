@@ -16,6 +16,18 @@ import type {
   KskAutomationTaskInput,
   KskAutomationTaskView
 } from '../shared/kskAutomation'
+import type {
+  KskHunterConfig,
+  KskHunterLinkInput,
+  KskHunterSecretInput,
+  KskHunterSnapshot,
+  KskHunterStatusEvent
+} from '../shared/kskHunter'
+import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
+import type {
+  LocalAdminStatsSnapshot,
+  LocalAdminUsageRefreshSummary
+} from '../shared/localAdminStats'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -451,10 +463,12 @@ const api = {
   },
 
   onLocalNotificationNavigate: (
-    callback: (page: 'accounts' | 'register') => void
+    callback: (page: 'accounts' | 'register' | 'hunter') => void
   ): (() => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, page: 'accounts' | 'register'): void =>
-      callback(page)
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      page: 'accounts' | 'register' | 'hunter'
+    ): void => callback(page)
     ipcRenderer.on('local-notification-navigate', handler)
     return () => ipcRenderer.off('local-notification-navigate', handler)
   },
@@ -1145,6 +1159,12 @@ const api = {
   ): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
     ipcRenderer.invoke('ksk-automation-sync-local-admin-now', taskId),
 
+  /** 把单个账号的凭据推送到本机 Admin（复用任务里已保存的 Admin URL / API Key）。 */
+  kskAutomationPushAccountToLocalAdmin: (
+    candidate: LocalAdminPushCandidate
+  ): Promise<IdcIpcResult<LocalAdminPushResult>> =>
+    ipcRenderer.invoke('ksk-automation-push-account-to-local-admin', candidate),
+
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: KskAutomationStatusEvent): void => {
       callback(data)
@@ -1157,6 +1177,72 @@ const api = {
     const handler = (): void => callback()
     ipcRenderer.on('ksk-automation-accounts-changed', handler)
     return () => ipcRenderer.removeListener('ksk-automation-accounts-changed', handler)
+  },
+
+  kskHunterSnapshot: (): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-snapshot'),
+
+  kskHunterUpdateConfig: (
+    config: Partial<KskHunterConfig>,
+    secrets?: KskHunterSecretInput
+  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-update-config', config, secrets),
+
+  kskHunterCreateLink: (input: KskHunterLinkInput): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-create-link', input),
+
+  kskHunterUpdateLink: (
+    linkId: string,
+    input: KskHunterLinkInput
+  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-update-link', linkId, input),
+
+  kskHunterSetLinkEnabled: (
+    linkId: string,
+    enabled: boolean
+  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-set-link-enabled', linkId, enabled),
+
+  kskHunterDeleteLink: (linkId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-delete-link', linkId),
+
+  kskHunterRunNow: (): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-run-now'),
+
+  kskHunterRetryDelivery: (deliveryId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-retry-delivery', deliveryId),
+
+  kskHunterDeleteDelivery: (deliveryId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
+    ipcRenderer.invoke('ksk-hunter-delete-delivery', deliveryId),
+
+  onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: KskHunterStatusEvent): void => {
+      callback(data)
+    }
+    ipcRenderer.on('ksk-hunter-status-changed', handler)
+    return () => ipcRenderer.removeListener('ksk-hunter-status-changed', handler)
+  },
+
+  localAdminStatsSnapshot: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
+    ipcRenderer.invoke('local-admin-stats-snapshot'),
+
+  localAdminStatsRefreshNow: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
+    ipcRenderer.invoke('local-admin-stats-refresh-now'),
+
+  localAdminStatsRefreshUsage: (): Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>> =>
+    ipcRenderer.invoke('local-admin-stats-refresh-usage'),
+
+  localAdminStatsClearSamples: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
+    ipcRenderer.invoke('local-admin-stats-clear-samples'),
+
+  onLocalAdminStatsChanged: (
+    callback: (snapshot: LocalAdminStatsSnapshot) => void
+  ): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: LocalAdminStatsSnapshot): void => {
+      callback(data)
+    }
+    ipcRenderer.on('local-admin-stats-changed', handler)
+    return () => ipcRenderer.removeListener('local-admin-stats-changed', handler)
   }
 }
 

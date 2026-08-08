@@ -6,6 +6,14 @@ export const DEFAULT_LOCAL_ADMIN_URL = 'http://127.0.0.1:12888/admin'
 export const KSK_AUTOMATION_STORE_VERSION = 2
 export const KSK_AUTOMATION_TASK_TYPE = 'ksk_pull' as const
 
+/**
+ * 验活提示词：让模型只回一个短 token，尽量少耗 credits。
+ *
+ * 放在 shared 而不是 main：账号页的手动批量验活面板与 KSK 任务的自动验活必须是同一句话，
+ * 否则两边的「验活」结果不可比较。
+ */
+export const KSK_LIVENESS_PROBE_MESSAGE = 'Hi, reply with "pong" only.'
+
 export const KSK_AUTOMATION_STATE = {
   IDLE: 'idle',
   RUNNING: 'running',
@@ -21,6 +29,10 @@ export interface KskAutomationConfig {
   providerGroupId?: string
   requestTimeoutSeconds: number
   cleanupInvalidOnAdd: boolean
+  /** 验活模型 ID；留空表示自动挑最便宜的可用模型。 */
+  livenessModel: string
+  /** 验活测试消息；留空表示用 KSK_LIVENESS_PROBE_MESSAGE。 */
+  livenessMessage: string
   emailEnabled: boolean
   smtpHost: string
   smtpPort: number
@@ -61,6 +73,8 @@ export interface KskAutomationStatus {
   lastFetchedCount: number
   lastAddedCount: number
   totalAddedCount: number
+  /** 上一轮在入库验活阶段被判失效、直接拒收的 KSK 数量。 */
+  lastRejectedCount: number
   lastEmailedCount: number
   lastLocalAdminSyncedCount: number
   lastLocalAdminVerifiedCount: number
@@ -98,6 +112,15 @@ export interface ProviderKskCredential {
   claimId?: string
 }
 
+/**
+ * 发消息验活的参数。两处都用它：入库前的逐个验活、入库后的全量验活。
+ * 字段留空即用默认（模型自动挑最便宜的，消息用 KSK_LIVENESS_PROBE_MESSAGE）。
+ */
+export interface KskLivenessOptions {
+  model?: string
+  message?: string
+}
+
 export interface ProviderKskParseResult {
   message?: string
   credentials: ProviderKskCredential[]
@@ -109,6 +132,8 @@ export const DEFAULT_KSK_AUTOMATION_CONFIG: KskAutomationConfig = {
   providerGroupId: undefined,
   requestTimeoutSeconds: KSK_AUTOMATION_REQUEST_TIMEOUT_SECONDS,
   cleanupInvalidOnAdd: true,
+  livenessModel: '',
+  livenessMessage: '',
   emailEnabled: false,
   smtpHost: '',
   smtpPort: 465,

@@ -240,6 +240,8 @@ interface AccountsActions {
     /** true = 只重置本次 ids 的结果，保留其它账号已有结果（用于「重测失败」） */
     keepExisting?: boolean
   }) => Promise<void>
+  /** 单账号验活：结果写进同一份 livenessResults，复用卡片/行上的验活徽标。 */
+  runAccountLiveness: (id: string, params?: { model?: string; message?: string }) => Promise<void>
   stopLivenessBatch: () => void
   clearLivenessResults: () => void
 
@@ -407,6 +409,45 @@ import { hasUpstreamKiroCredential } from '../types/account'
 
 import { canRefreshUpstreamCredential } from '../types/account'
 import { resolveBackgroundRefreshPlan } from '../../../shared/upstreamKiroCredentials'
+import { readPersistedLivenessModel } from '../hooks/useLivenessModels'
+
+/**
+ * 给单个账号发一条测试消息并落盘轮换后的凭据。
+ * 批量与单账号验活共用，返回 undefined 表示账号已不存在（调用方不该写入结果）。
+ */
+async function probeAccountLiveness(
+  get: () => AccountsStore,
+  id: string,
+  model: string,
+  message?: string
+): Promise<AccountLivenessResult | undefined> {
+  const account = get().accounts.get(id)
+  if (!account) return undefined
+  let result: AccountLivenessResult
+  try {
+    result = await window.api.diagnoseAccountLiveness({
+      account: buildAccountLivenessRequestAccount(account, get().getAccountProxyUrl(account.id)),
+      model,
+      message
+    })
+  } catch (err) {
+    result = {
+      success: false,
+      latencyMs: 0,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  }
+  // 验活途中上游可能轮换凭据，落盘避免下次请求用到旧 token
+  if (result.credentials) {
+    const latest = get().accounts.get(account.id)
+    if (latest) {
+      get().updateAccount(account.id, {
+        credentials: { ...latest.credentials, ...result.credentials }
+      })
+    }
+  }
+  return result
+}
 
 export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // 初始状态
@@ -965,35 +1006,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         if (livenessAbort) break
         const id = queue.shift()
         if (!id) break
-        const account = get().accounts.get(id)
-        if (!account) continue
-        let result: AccountLivenessResult
-        try {
-          result = await window.api.diagnoseAccountLiveness({
-            account: buildAccountLivenessRequestAccount(
-              account,
-              get().getAccountProxyUrl(account.id)
-            ),
-            model,
-            message
-          })
-        } catch (err) {
-          result = {
-            success: false,
-            latencyMs: 0,
-            error: err instanceof Error ? err.message : String(err)
-          }
-        }
-        // 验活途中上游可能轮换凭据，落盘避免下次请求用到旧 token
-        if (result.credentials) {
-          const latest = get().accounts.get(account.id)
-          if (latest) {
-            get().updateAccount(account.id, {
-              credentials: { ...latest.credentials, ...result.credentials }
-            })
-          }
-        }
-        if (livenessAbort) break
+        const result = await probeAccountLiveness(get, id, model, message)
+        if (!result || livenessAbort) continue
         set((state) => ({ livenessResults: new Map(state.livenessResults).set(id, result) }))
       }
     }
@@ -1003,6 +1017,27 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     )
     await Promise.all(workers)
     set({ livenessRunning: false })
+  },
+
+  runAccountLiveness: async (id, params) => {
+    // 不看也不改 livenessRunning：单账号验活与批量验活互不阻塞，
+    // 只往 livenessResults 里写自己这一条，避免抹掉批量的进度。
+    if (get().livenessResults.get(id) === null) return
+    set((state) => ({ livenessResults: new Map(state.livenessResults).set(id, null) }))
+    const result = await probeAccountLiveness(
+      get,
+      id,
+      params?.model?.trim() || readPersistedLivenessModel(),
+      params?.message
+    )
+    set((state) => {
+      // 期间被清空结果（清除结果 / 新一轮批量）就不要再插回来
+      if (!state.livenessResults.has(id)) return {}
+      const next = new Map(state.livenessResults)
+      if (result) next.set(id, result)
+      else next.delete(id)
+      return { livenessResults: next }
+    })
   },
 
   stopLivenessBatch: () => {

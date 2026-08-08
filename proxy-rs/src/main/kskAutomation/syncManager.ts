@@ -4,12 +4,13 @@ import {
   parseKskProviderResponse,
   type KskAutomationStatus,
   type KskAutomationStatusEvent,
+  type KskLivenessOptions,
   type ProviderKskCredential
 } from '../../shared/kskAutomation'
 import type { PersistedKskAutomationStore, PersistedKskAutomationTask } from './configStore'
 import { sendKskAddedEmail, type KskEmailCredential } from './emailNotifier'
 import {
-  cleanupInvalidLocalAdminCredentials,
+  deleteLocalAdminCredentialsByKey,
   syncKskAccountsToLocalAdmin,
   type KskAutomationFetch,
   type LocalAdminAccount
@@ -22,6 +23,8 @@ import {
 
 export interface ImportedKskCredential extends ProviderKskCredential {
   added: boolean
+  /** 发消息验活判为永久失效，未入库。与 added=false（已存在）要分开统计。 */
+  rejected?: boolean
 }
 
 export interface KskAutomationManagerDeps {
@@ -29,11 +32,15 @@ export interface KskAutomationManagerDeps {
   readTask: (taskId: string) => Promise<PersistedKskAutomationTask | undefined>
   fetchImpl: KskAutomationFetch
   localAdminFetchImpl?: KskAutomationFetch
+  /** 先发消息验活，通过才入库；判死的号返回 rejected=true，不落盘。 */
   importCredential: (
-    input: ProviderKskCredential & { groupId?: string }
+    input: ProviderKskCredential & { groupId?: string; liveness?: KskLivenessOptions }
   ) => Promise<ImportedKskCredential>
   readLocalAdminAccounts: (groupId: string) => Promise<LocalAdminAccount[]>
-  cleanupProxyAccounts?: (groupId?: string) => Promise<KskCredentialCleanupResult>
+  cleanupProxyAccounts?: (
+    groupId: string | undefined,
+    liveness: KskLivenessOptions
+  ) => Promise<KskCredentialCleanupResult>
   notifyStatus: (event: KskAutomationStatusEvent) => void
   notifyAccountsChanged: () => void
   sendAddedEmail?: typeof sendKskAddedEmail
@@ -47,6 +54,7 @@ const EMPTY_STATUS: KskAutomationStatus = {
   lastFetchedCount: 0,
   lastAddedCount: 0,
   totalAddedCount: 0,
+  lastRejectedCount: 0,
   lastEmailedCount: 0,
   lastLocalAdminSyncedCount: 0,
   lastLocalAdminVerifiedCount: 0,
@@ -73,6 +81,24 @@ class KskAutomationRunner {
   private localAdminPromise: Promise<void> | null = null
   private lastLocalAdminIssues: string[] = []
   private readonly pendingEmail = new Map<string, KskEmailCredential>()
+  /**
+   * 已经发过邮件的 key。
+   *
+   * 光靠 importCredential 的 added 标志不够：验活误删刚入库的号后，
+   * 下一轮同一个 key 会重新入库并再次算作「新增」，导致重复发信。
+   * 这里按 key 记账，同一个 key 只通知一次。
+   */
+  private readonly emailedKeys = new Set<string>()
+  /**
+   * 发消息验活判为永久失效的 KSK 明文黑名单。
+   *
+   * 入库验活与全量清理现在同一口径（都发消息），但 Provider 会反复返回同一批号，
+   * 每轮都重新验一遍就是白烧 credits。记住判死的号，下一轮直接跳过。
+   *
+   * 只存在内存里：重启后账号库里本就没有这些号，重新试一次的代价可接受，
+   * 也避免把用户后来手动续费修好的号永久拒之门外。
+   */
+  private readonly invalidKeys = new Set<string>()
   private status: KskAutomationStatus
 
   constructor(
@@ -168,6 +194,7 @@ class KskAutomationRunner {
       lastAttemptAt: Date.now(),
       nextRunAt: undefined,
       lastAddedCount: 0,
+      lastRejectedCount: 0,
       lastEmailedCount: 0,
       lastCleanupCheckedCount: 0,
       lastCleanupRemovedCount: 0,
@@ -190,15 +217,24 @@ class KskAutomationRunner {
         task.config.requestTimeoutSeconds
       )
       const parsed = parseKskProviderResponse(payload)
+      const liveness: KskLivenessOptions = {
+        model: task.config.livenessModel,
+        message: task.config.livenessMessage
+      }
       let importFailureCount = 0
+      // 已判永久失效的 key 直接跳过，别再花 credits 验活一次又被删一次
+      const importable = parsed.credentials.filter(
+        (credential) => !this.invalidKeys.has(credential.key)
+      )
       const importResults = await mapWithConcurrency(
-        parsed.credentials,
+        importable,
         KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
         async (credential, index): Promise<ImportedKskCredential | null> => {
           try {
             return await this.deps.importCredential({
               ...credential,
-              groupId: task.config.providerGroupId
+              groupId: task.config.providerGroupId,
+              liveness
             })
           } catch {
             importFailureCount++
@@ -210,98 +246,111 @@ class KskAutomationRunner {
       const added = importResults.filter((credential): credential is ImportedKskCredential =>
         Boolean(credential?.added)
       )
+      // 验活当场判死的号：不入库，直接拉黑，并交给下面一起从反代删掉
+      const rejectedKeys = importResults
+        .filter((credential) => credential?.rejected)
+        .map((credential) => credential!.key)
+      for (const key of rejectedKeys) this.invalidKeys.add(key)
+
       const roundIssues: string[] = []
+      /*
+       * 本轮确认失效、需要从本机 Admin（kiro-rs 反代）删掉的 key。
+       * 包含入库阶段被拒的和全量验活删掉的：前者可能是上一版本遗留在 Admin 上的，
+       * 后者是本地刚删的，两边都要清掉才算真正一致。
+       */
+      const doomedKeys = new Set(rejectedKeys)
+
       if (added.length > 0) {
+        if (task.config.cleanupInvalidOnAdd && this.deps.cleanupProxyAccounts) {
+          try {
+            const cleanup = await this.deps.cleanupProxyAccounts(
+              task.config.providerGroupId,
+              liveness
+            )
+            // 拉黑本轮被删掉的号；同时撤掉待发邮件，避免为一个已被删除的号发通知
+            for (const key of cleanup.removedKeys ?? []) {
+              this.invalidKeys.add(key)
+              this.pendingEmail.delete(key)
+              doomedKeys.add(key)
+            }
+            this.status = {
+              ...this.status,
+              lastCleanupCheckedCount: cleanup.checked,
+              lastCleanupRemovedCount: cleanup.removed,
+              lastCleanupRetainedCount: cleanup.retainedTransient
+            }
+            roundIssues.push(...cleanup.errors)
+            if (cleanup.retainedTransient > 0) {
+              roundIssues.push(`保留 ${cleanup.retainedTransient} 个暂时无法确认的账号`)
+            }
+          } catch (error) {
+            roundIssues.push(
+              `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
+            )
+          }
+        }
+
+        /*
+         * 先删反代上的挂号，再把活号同步上去：反过来会把刚刚验活判死的号推给反代，
+         * 中间那一小段时间反代仍会拿它去打上游。
+         */
         if (task.config.localAdminEnabled) {
+          roundIssues.push(...(await this.deleteFromLocalAdmin(task, [...doomedKeys])))
           this.queueLocalAdminSync()
           while (this.localAdminPromise) await this.localAdminPromise
           roundIssues.push(...this.lastLocalAdminIssues)
         }
-        if (task.config.cleanupInvalidOnAdd) {
-          const cleanupResults: KskCredentialCleanupResult[] = []
-          if (this.deps.cleanupProxyAccounts) {
-            try {
-              cleanupResults.push(await this.deps.cleanupProxyAccounts(task.config.providerGroupId))
-            } catch (error) {
-              roundIssues.push(
-                `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
-              )
-            }
-          }
-          if (task.config.localAdminEnabled) {
-            try {
-              cleanupResults.push(
-                await cleanupInvalidLocalAdminCredentials({
-                  baseUrl: task.config.localAdminBaseUrl,
-                  adminApiKey: task.secrets.localAdminApiKey,
-                  timeoutSeconds: task.config.requestTimeoutSeconds,
-                  fetchImpl: this.deps.localAdminFetchImpl ?? this.deps.fetchImpl
-                })
-              )
-            } catch (error) {
-              roundIssues.push(
-                `本机 Admin 清理失败：${error instanceof Error ? error.message : String(error)}`
-              )
-            }
-          }
-          const cleanup = cleanupResults.reduce<KskCredentialCleanupResult>(
-            (total, current) => ({
-              checked: total.checked + current.checked,
-              removed: total.removed + current.removed,
-              retainedTransient: total.retainedTransient + current.retainedTransient,
-              errors: [...total.errors, ...current.errors]
-            }),
-            { checked: 0, removed: 0, retainedTransient: 0, errors: [] }
-          )
-          this.status = {
-            ...this.status,
-            lastCleanupCheckedCount: cleanup.checked,
-            lastCleanupRemovedCount: cleanup.removed,
-            lastCleanupRetainedCount: cleanup.retainedTransient
-          }
-          roundIssues.push(...cleanup.errors)
-          if (cleanup.retainedTransient > 0) {
-            roundIssues.push(`保留 ${cleanup.retainedTransient} 个暂时无法确认的账号`)
-          }
-        }
         this.deps.notifyAccountsChanged()
+      } else if (doomedKeys.size > 0 && task.config.localAdminEnabled) {
+        // 一个都没新增但抓出了挂号，反代那边照样得清
+        roundIssues.push(...(await this.deleteFromLocalAdmin(task, [...doomedKeys])))
       }
 
       this.status = {
         ...this.status,
         lastFetchedCount: parsed.credentials.length,
         lastAddedCount: added.length,
-        totalAddedCount: this.status.totalAddedCount + added.length
+        totalAddedCount: this.status.totalAddedCount + added.length,
+        lastRejectedCount: rejectedKeys.length
       }
 
       let emailedCount = 0
       if (task.config.emailEnabled) {
         for (const credential of added) {
+          // 已通知过的 key 不再入队：清理误删后重新入库不该再发一封
+          if (this.emailedKeys.has(credential.key)) continue
+          // 本轮清理刚把它删掉的号也不通知：邮件里给一个界面上找不到的号只会误导
+          if (this.invalidKeys.has(credential.key)) continue
           this.pendingEmail.set(credential.key, {
             key: credential.key,
             region: credential.region
           })
         }
         const pending = [...this.pendingEmail.values()]
-        emailedCount = await (this.deps.sendAddedEmail ?? sendKskAddedEmail)(
-          {
-            host: task.config.smtpHost,
-            port: task.config.smtpPort,
-            secure: task.config.smtpSecure,
-            username: task.config.smtpUsername,
-            password: task.secrets.smtpPassword,
-            from: task.config.smtpFrom,
-            to: task.config.smtpTo
-          },
-          pending
-        )
-        this.pendingEmail.clear()
+        if (pending.length > 0) {
+          emailedCount = await (this.deps.sendAddedEmail ?? sendKskAddedEmail)(
+            {
+              host: task.config.smtpHost,
+              port: task.config.smtpPort,
+              secure: task.config.smtpSecure,
+              username: task.config.smtpUsername,
+              password: task.secrets.smtpPassword,
+              from: task.config.smtpFrom,
+              to: task.config.smtpTo
+            },
+            pending
+          )
+          // 只有发送成功才记账；失败时保留 pendingEmail 供下一轮重试
+          for (const credential of pending) this.emailedKeys.add(credential.key)
+          this.pendingEmail.clear()
+        }
       } else {
         this.pendingEmail.clear()
       }
 
       roundIssues.push(
         parsed.rejectedCount > 0 ? `忽略 ${parsed.rejectedCount} 条无效或重复记录` : '',
+        rejectedKeys.length > 0 ? `${rejectedKeys.length} 条 KSK 验活未通过，未入库` : '',
         importFailureCount > 0 ? `${importFailureCount} 条 KSK 验活或入库失败` : ''
       )
       const effectiveRoundIssues = roundIssues.filter(Boolean)
@@ -347,6 +396,27 @@ class KskAutomationRunner {
       return (await response.json()) as unknown
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /** 把本地判死的 key 从本机 Admin 上删掉；返回本次遇到的问题描述。 */
+  private async deleteFromLocalAdmin(
+    task: PersistedKskAutomationTask,
+    keys: readonly string[]
+  ): Promise<string[]> {
+    if (keys.length === 0) return []
+    try {
+      const removal = await deleteLocalAdminCredentialsByKey({
+        keys,
+        baseUrl: task.config.localAdminBaseUrl,
+        adminApiKey: task.secrets.localAdminApiKey,
+        timeoutSeconds: task.config.requestTimeoutSeconds,
+        fetchImpl: this.deps.localAdminFetchImpl ?? this.deps.fetchImpl
+      })
+      if (removal.removed > 0) this.log(`已从本机 Admin 删除 ${removal.removed} 个失效凭据`)
+      return removal.errors
+    } catch (error) {
+      return [`本机 Admin 清理失败：${error instanceof Error ? error.message : String(error)}`]
     }
   }
 

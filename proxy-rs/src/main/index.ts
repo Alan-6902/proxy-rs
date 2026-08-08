@@ -52,7 +52,6 @@ import { KskAutomationManager } from './kskAutomation/syncManager'
 import {
   KSK_CLEANUP_FALLBACK_MODEL,
   KSK_CLEANUP_MAX_OUTPUT_TOKENS,
-  KSK_CLEANUP_PROBE_MESSAGE,
   KSK_CLEANUP_PROBE_TIMEOUT_MS,
   KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
   KSK_PROBE_VERDICT,
@@ -60,16 +59,28 @@ import {
   mapWithConcurrency,
   pickCheapestModelId,
   removeMatchingInvalidKskAccounts,
+  resolveKskLivenessMessage,
   type KskCredentialCleanupResult,
   type KskProbeVerdict
 } from './kskAutomation/credentialCleanup'
 import { loadKskAutomationStore, loadKskAutomationTask } from './kskAutomation/configStore'
 import {
   registerKskAutomationIpcHandlers,
+  resolveLocalAdminTarget,
   sendKskAutomationAccountsChanged,
   sendKskAutomationStatus
 } from './kskAutomation/ipc-handlers'
-import type { ProviderKskCredential } from '../shared/kskAutomation'
+import type { KskLivenessOptions, ProviderKskCredential } from '../shared/kskAutomation'
+import type { KskAutomationFetch } from './kskAutomation/localAdminClient'
+import { LocalAdminStatsManager } from './localAdminStats/statsManager'
+import {
+  registerLocalAdminStatsIpcHandlers,
+  sendLocalAdminStatsSnapshot
+} from './localAdminStats/ipc-handlers'
+import { KskHunterManager } from './kskHunter/hunterRunner'
+import { hunterLocalDateKey, KSK_HUNTER_CHANNEL_LABEL } from '../shared/kskHunter'
+import { loadKskHunterStore } from './kskHunter/configStore'
+import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
   LocalNotificationService,
@@ -1570,15 +1581,35 @@ function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boole
   )
 }
 
+/**
+ * 验活并入库一个 KSK。
+ *
+ * 顺序是「先发消息验活，通过再拉 usage 建档」：usage 接口对超额和被风控的号照样返回 200，
+ * 只靠它把关会让挂号混进账号库，随后又被全量清理删掉，白折腾一轮还发了邮件。
+ * 判死的号返回 rejected=true 而不是抛错——调用方要据此拉黑并同步清理反代，
+ * 这与「网络抖动导致入库失败」是两件事，不能混在同一个 catch 里。
+ */
 async function importProviderKskCredential(
-  input: ProviderKskCredential & { groupId?: string }
-): Promise<ProviderKskCredential & { added: boolean }> {
+  input: ProviderKskCredential & { groupId?: string; liveness?: KskLivenessOptions }
+): Promise<ProviderKskCredential & { added: boolean; rejected?: boolean }> {
   const duplicate = await accountStoreCoordinator.runExclusive(async () => {
     await initStore()
     const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
     return hasStoredKskAccount(data, input.key)
   })
   if (duplicate) return { ...input, added: false }
+
+  const probeAccount = toKskProbeAccount(input)
+  const verdict = await probeKskAccountLiveness(
+    probeAccount,
+    await resolveKskLivenessModelId(probeAccount, input.liveness?.model),
+    resolveKskLivenessMessage(input.liveness?.message)
+  )
+  if (verdict === KSK_PROBE_VERDICT.PERMANENTLY_INVALID) {
+    return { ...input, added: false, rejected: true }
+  }
+  // TRANSIENT（超时、限流、5xx）不能判死，也不该入库：留给下一轮重试
+  if (verdict !== KSK_PROBE_VERDICT.ALIVE) throw new Error('KSK 验活未能确认，稍后重试')
 
   const usage = await getUsageAndLimits(
     { credentialKind: 'kiro_api_key', kiroApiKey: input.key, idp: 'BuilderId' },
@@ -1685,19 +1716,24 @@ async function importProviderKskCredential(
 }
 
 /**
- * 挑一个尽量便宜的验活模型。
+ * 决定验活用哪个模型。
  *
- * 查 usage 不能反映账号能否真正出活（超额账号的 usage API 照样通），所以清理必须发一条真实消息。
- * 代价是每个账号烧一点 credits，因此按 rateMultiplier 取最便宜的模型，并把输出限到几个 token。
- * 模型列表拉不到（网络问题 / 这个账号本身就废了）就退回 Haiku。
+ * 查 usage 不能反映账号能否真正出活（超额账号的 usage API 照样通），所以验活必须发一条真实消息。
+ * 代价是每个账号烧一点 credits，因此在任务没指定模型时按 rateMultiplier 取最便宜的一个，
+ * 并把输出限到几个 token。模型列表拉不到（网络问题 / 这个账号本身就废了）就退回 Haiku。
  */
-async function resolveKskCleanupModelId(probeAccount: ProxyAccount): Promise<string> {
+async function resolveKskLivenessModelId(
+  probeAccount: ProxyAccount,
+  configured?: string
+): Promise<string> {
+  const explicit = configured?.trim()
+  if (explicit) return explicit
   try {
     const models = await fetchKiroModels(probeAccount)
     return pickCheapestModelId(models) ?? KSK_CLEANUP_FALLBACK_MODEL
   } catch (error) {
     console.warn(
-      '[KSK] Failed to list models for cleanup probe, falling back to',
+      '[KSK] Failed to list models for liveness probe, falling back to',
       KSK_CLEANUP_FALLBACK_MODEL,
       error
     )
@@ -1705,17 +1741,34 @@ async function resolveKskCleanupModelId(probeAccount: ProxyAccount): Promise<str
   }
 }
 
-/** 给单个 KSK 发一条验活消息，返回它是否永久失效。 */
+/** 把一个待入库的 KSK 包成能直接调上游的 ProxyAccount。 */
+function toKskProbeAccount(input: { key: string; region: string }): ProxyAccount {
+  return {
+    id: 'ksk-liveness-probe',
+    credentialKind: 'kiro_api_key',
+    kiroApiKey: input.key,
+    region: input.region,
+    provider: 'BuilderId'
+  }
+}
+
+/**
+ * 给单个 KSK 发一条验活消息，返回它是否永久失效。
+ *
+ * 与账号页「批量验活」面板同一条路径（callKiroApi + 同一句测试消息），
+ * 差别只是输出上限压到几个 token，且判定结果被映射成 alive / 永久失效 / 暂时无法确认。
+ */
 async function probeKskAccountLiveness(
   account: ProxyAccount,
-  model: string
+  model: string,
+  message: string
 ): Promise<KskProbeVerdict> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), KSK_CLEANUP_PROBE_TIMEOUT_MS)
   try {
     const payload = openaiToKiro({
       model,
-      messages: [{ role: 'user', content: KSK_CLEANUP_PROBE_MESSAGE }],
+      messages: [{ role: 'user', content: message }],
       stream: false,
       max_tokens: KSK_CLEANUP_MAX_OUTPUT_TOKENS
     })
@@ -1730,8 +1783,15 @@ async function probeKskAccountLiveness(
   }
 }
 
+/**
+ * 对目标分组的 KSK 全量发消息验活，删掉判死的号。
+ *
+ * 每次新增账号后都跑一遍：Provider 给的号会随时挂（超额、被封、订阅到期），
+ * 只在入库那一刻验过不够。判死的 key 会回给调用方，用于拉黑与清理反代。
+ */
 async function cleanupInvalidStoredKskAccounts(
-  groupId?: string
+  groupId: string | undefined,
+  liveness: KskLivenessOptions = {}
 ): Promise<KskCredentialCleanupResult> {
   const candidates = await accountStoreCoordinator.runExclusive(async () => {
     await initStore()
@@ -1762,11 +1822,12 @@ async function cleanupInvalidStoredKskAccounts(
   })
 
   // 模型列表与账号无关（同一批 KSK 走同一上游），拉一次复用，别每个账号都问一遍
-  const model = await resolveKskCleanupModelId(toProxyAccount(candidates[0]))
+  const model = await resolveKskLivenessModelId(toProxyAccount(candidates[0]), liveness.model)
+  const message = resolveKskLivenessMessage(liveness.message)
   const permanentlyInvalid = new Map<string, { key: string; groupId?: string }>()
 
   await mapWithConcurrency(candidates, KSK_CREDENTIAL_VALIDATION_CONCURRENCY, async (account) => {
-    const verdict = await probeKskAccountLiveness(toProxyAccount(account), model)
+    const verdict = await probeKskAccountLiveness(toProxyAccount(account), model, message)
     if (verdict === KSK_PROBE_VERDICT.PERMANENTLY_INVALID) {
       permanentlyInvalid.set(account.id, {
         key: account.credentials.kiroApiKey,
@@ -1791,6 +1852,9 @@ async function cleanupInvalidStoredKskAccounts(
   })
 
   result.removed = removedIds.length
+  result.removedKeys = removedIds
+    .map((accountId) => permanentlyInvalid.get(accountId)?.key)
+    .filter((key): key is string => Boolean(key))
   return result
 }
 
@@ -1816,6 +1880,15 @@ async function readKskAccountsForLocalAdmin(
   })
 }
 
+const localAdminFetchImpl: KskAutomationFetch = async (url, init) =>
+  (await undiciFetch(url, {
+    method: init.method,
+    headers: init.headers,
+    body: init.body,
+    signal: init.signal,
+    dispatcher: localAdminDirectAgent
+  })) as unknown as Response
+
 const kskAutomationManager = new KskAutomationManager({
   readStore: loadKskAutomationStore,
   readTask: loadKskAutomationTask,
@@ -1826,19 +1899,93 @@ const kskAutomationManager = new KskAutomationManager({
       body: init.body,
       signal: init.signal
     }),
-  localAdminFetchImpl: async (url, init) =>
-    (await undiciFetch(url, {
-      method: init.method,
-      headers: init.headers,
-      body: init.body,
-      signal: init.signal,
-      dispatcher: localAdminDirectAgent
-    })) as unknown as Response,
+  localAdminFetchImpl,
   importCredential: importProviderKskCredential,
   readLocalAdminAccounts: readKskAccountsForLocalAdmin,
   cleanupProxyAccounts: cleanupInvalidStoredKskAccounts,
   notifyStatus: (status) => sendKskAutomationStatus(() => mainWindow, status),
   notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
+  log: (message) => console.log(message)
+})
+
+/**
+ * 反代统计：周期性从本机 Admin 抓成功/失败计数并攒趋势。
+ *
+ * 连接信息复用 ksk 任务里的「同步到本机 Admin」配置，不另开一处配置项；
+ * 没配置时 manager 自己降级为 unconfigured，不发请求。
+ */
+const localAdminStatsManager = new LocalAdminStatsManager({
+  readTarget: async () => {
+    try {
+      return await resolveLocalAdminTarget()
+    } catch {
+      // 没有可用配置属于正常状态，交给 manager 标 unconfigured
+      return undefined
+    }
+  },
+  fetchImpl: localAdminFetchImpl,
+  notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
+  log: (message) => console.log(message)
+})
+
+/**
+ * 抢号器：3 秒一轮盯商品聚合站点。
+ *
+ * 复用 importProviderKskCredential 做验活兼入库（它会先发一条测试消息验活，
+ * 通过才落库），避免再写一份 KSK 落库逻辑。抢号器不带自己的验活参数，
+ * 走默认口径：自动挑最便宜的模型 + 内置测试消息。
+ */
+const kskHunterManager = new KskHunterManager({
+  readStore: loadKskHunterStore,
+  fetchImpl: (url, init) =>
+    fetchWithAppProxy(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal
+    }),
+  // 下游是 loopback，必须绕开系统代理；与本机 Admin 复用同一个直连 agent
+  downstreamFetchImpl: localAdminFetchImpl,
+  importCredential: async (input) => {
+    const result = await importProviderKskCredential(input)
+    // 验活判死的号必须抛错：抢号器据此把记录标 dead_key 并拒绝推给下游
+    if (result.rejected) throw new Error('发消息验活未通过，该号已不可用')
+    return { added: result.added }
+  },
+  notifyInStock: ({ linkName, title, region }) => {
+    localNotifications.notify(LocalNoticeKind.KskHunterInStock, {
+      hunterKey: `${linkName}:${title}:${region}`,
+      bodyOverride: `${linkName} · ${title}${region ? `（${region}）` : ''} 已开货，尽快下单。`
+    })
+  },
+  notifyOrdered: ({ linkName, maskedKey, region }) => {
+    localNotifications.notify(LocalNoticeKind.KskHunterOrdered, {
+      hunterKey: `${linkName}:${maskedKey}`,
+      bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并推送下游。`
+    })
+  },
+  notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
+  notifyBudgetExhausted: ({ scope, channelLabel, spentCny, limitCny }) => {
+    // 去重键带本地日期，跨天会再提醒一次。全局是人民币，渠道是原币，所以不硬写 ¥
+    const unit = scope === 'global' ? '¥' : ''
+    localNotifications.notify(LocalNoticeKind.KskHunterBudgetExhausted, {
+      hunterKey: `${hunterLocalDateKey()}:${scope}:${channelLabel ?? 'all'}`,
+      bodyOverride:
+        `${scope === 'global' ? '全局' : channelLabel} 当日花费 ${unit}${spentCny} 已达上限 ${unit}${limitCny}，` +
+        '已暂停自动下单；开货仍会提醒。'
+    })
+  },
+  notifyLowBalance: ({ channel, balanceUnit, thresholdUnit, unitLabel }) => {
+    localNotifications.notify(LocalNoticeKind.KskHunterLowBalance, {
+      hunterKey: `${hunterLocalDateKey()}:${channel}`,
+      bodyOverride: `${KSK_HUNTER_CHANNEL_LABEL[channel]} 余额仅剩 ${balanceUnit} ${unitLabel}（阈值 ${thresholdUnit}），请及时充值。`
+    })
+  },
+  notifySnapshot: () => {
+    void sendKskHunterStatus(() => mainWindow, kskHunterManager).catch(() => {
+      /* 快照推送失败不能影响抢号主流程 */
+    })
+  },
   log: (message) => console.log(message)
 })
 
@@ -2529,10 +2676,29 @@ app.whenReady().then(async () => {
   // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
   registerKskAutomationIpcHandlers({
     getManager: () => kskAutomationManager,
-    getMainWindow: () => mainWindow
+    getMainWindow: () => mainWindow,
+    localAdminFetchImpl
   })
   void kskAutomationManager.start().catch((err) => {
     console.warn('[KskAutomation] Failed to start:', err)
+  })
+
+  // ============ 反代统计（本机 Admin 成功/失败/用量）IPC ============
+  registerLocalAdminStatsIpcHandlers({
+    getManager: () => localAdminStatsManager,
+    getMainWindow: () => mainWindow
+  })
+  void localAdminStatsManager.start().catch((err) => {
+    console.warn('[LocalAdminStats] Failed to start:', err)
+  })
+
+  // ============ KSK 抢号（商品聚合站点监控）IPC ============
+  registerKskHunterIpcHandlers({
+    getManager: () => kskHunterManager,
+    getMainWindow: () => mainWindow
+  })
+  void kskHunterManager.start().catch((err) => {
+    console.warn('[KskHunter] Failed to start:', err)
   })
 
   // ============ 托盘相关 IPC ============
@@ -5903,6 +6069,10 @@ app.on('will-quit', async (event) => {
   proxyPoolScheduler.stop()
   // 停止 KSK Provider 轮询与后续调度
   kskAutomationManager.stop()
+  // 停止 KSK 抢号轮询与推送重试
+  kskHunterManager.stop()
+  // 停止反代统计采样
+  localAdminStatsManager.stop()
   void localAdminDirectAgent.close()
 
   // 防止应用立即退出，先保存数据

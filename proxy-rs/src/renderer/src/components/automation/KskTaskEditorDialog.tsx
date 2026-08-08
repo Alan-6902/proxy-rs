@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { BellRing, CloudDownload, Loader2, ServerCog, ShieldCheck, X } from 'lucide-react'
 import {
   DEFAULT_KSK_AUTOMATION_CONFIG,
+  KSK_LIVENESS_PROBE_MESSAGE,
   KSK_PROVIDER_POLL_INTERVAL_SECONDS,
   type KskAutomationConfig,
   type KskAutomationTaskInput,
   type KskAutomationTaskView
 } from '../../../../shared/kskAutomation'
+import { LIVENESS_MODELS } from '../../hooks/useLivenessModels'
 import type { AccountGroup } from '../../types/account'
 import {
   Button,
@@ -207,9 +209,41 @@ export function KskTaskEditorDialog({
             <ToggleField
               checked={config.cleanupInvalidOnAdd}
               onChange={(cleanupInvalidOnAdd) => setConfig({ ...config, cleanupInvalidOnAdd })}
-              title="新增 KSK 后清理不可用账号"
-              hint="对目标分组全量发一条测试消息验活（自动选最便宜的模型，少量耗 credits）；认证失败、封禁和配额耗尽会删除，超时、限流和服务异常会保留。"
+              title="新增 KSK 后全量清理不可用账号"
+              hint="每次有新号入库，就对目标分组全部账号再发一条测试消息；认证失败、封禁和配额耗尽会删除（同时清掉 kiro-rs 反代上的对应凭据），超时、限流和服务异常会保留。"
             />
+            <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
+              <div>
+                <Label>验活模型</Label>
+                <datalist id="ksk-task-liveness-models">
+                  {LIVENESS_MODELS.map((model) => (
+                    <option key={model} value={model} />
+                  ))}
+                </datalist>
+                <Input
+                  list="ksk-task-liveness-models"
+                  value={config.livenessModel}
+                  onChange={(event) => setConfig({ ...config, livenessModel: event.target.value })}
+                  placeholder="留空 = 自动选最便宜"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div>
+                <Label>测试消息</Label>
+                <Input
+                  value={config.livenessMessage}
+                  onChange={(event) =>
+                    setConfig({ ...config, livenessMessage: event.target.value })
+                  }
+                  placeholder={KSK_LIVENESS_PROBE_MESSAGE}
+                  className="text-xs"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              入库前的验活与新增后的全量清理都用这组参数，与账号页「批量验活」同一条路径。
+            </p>
           </section>
 
           <section className="space-y-3 rounded-2xl border border-border/70 p-4">

@@ -13,23 +13,25 @@ import { cn } from '@/lib/utils'
  *   右侧操作区
  *
  * accent 决定图标底板与 eyebrow 的色相。默认 'primary' 跟随主题色；
- * 其余色值给语义固定的页面（诊断=emerald、代理池=cyan、配置同步=indigo），
+ * 其余色值给语义固定的页面（诊断=emerald、代理池=cyan、配置同步=indigo、抢号=violet），
  * 保留它们原有的辨识度，同时不再让 h1 直接吃硬编码颜色。
  */
-export type PageHeaderAccent = 'primary' | 'emerald' | 'cyan' | 'indigo'
+export type PageHeaderAccent = 'primary' | 'emerald' | 'cyan' | 'indigo' | 'violet'
 
 const ACCENT_ICON_CLASS: Record<PageHeaderAccent, string> = {
   primary: 'bg-primary/12 text-primary ring-primary/25',
   emerald: 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 ring-emerald-500/25',
   cyan: 'bg-cyan-500/12 text-cyan-600 dark:text-cyan-400 ring-cyan-500/25',
-  indigo: 'bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 ring-indigo-500/25'
+  indigo: 'bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 ring-indigo-500/25',
+  violet: 'bg-violet-500/12 text-violet-600 dark:text-violet-400 ring-violet-500/25'
 }
 
 const ACCENT_EYEBROW_CLASS: Record<PageHeaderAccent, string> = {
   primary: 'text-primary/75',
   emerald: 'text-emerald-600/80 dark:text-emerald-400/80',
   cyan: 'text-cyan-600/80 dark:text-cyan-400/80',
-  indigo: 'text-indigo-600/80 dark:text-indigo-400/80'
+  indigo: 'text-indigo-600/80 dark:text-indigo-400/80',
+  violet: 'text-violet-600/80 dark:text-violet-400/80'
 }
 
 interface PageHeaderProps {

@@ -12,24 +12,27 @@ import {
   KSK_AUTOMATION_STATE,
   KSK_AUTOMATION_STORE_VERSION,
   KSK_AUTOMATION_TASK_TYPE,
+  KSK_LIVENESS_PROBE_MESSAGE,
   parseKskProviderResponse,
   providerUrlHint
 } from '../../src/shared/kskAutomation'
 import {
-  cleanupInvalidLocalAdminCredentials,
+  deleteLocalAdminCredentialsByKey,
+  pushAccountToLocalAdmin,
   resolveLocalAdminApiBase,
   syncKskAccountsToLocalAdmin,
   type KskAutomationFetch
 } from '../../src/main/kskAutomation/localAdminClient'
+import { resolveLocalAdminCredentialPayload } from '../../src/shared/localAdminPush'
 import {
   KSK_CLEANUP_FALLBACK_MODEL,
   KSK_PROBE_VERDICT,
   classifyKskProbeError,
-  isPermanentKskCredentialError,
   KSK_CREDENTIAL_VALIDATION_CONCURRENCY,
   mapWithConcurrency,
   pickCheapestModelId,
-  removeMatchingInvalidKskAccounts
+  removeMatchingInvalidKskAccounts,
+  resolveKskLivenessMessage
 } from '../../src/main/kskAutomation/credentialCleanup'
 import { KiroUpstreamError, type KiroModel } from '../../src/main/proxy/kiroApi'
 import { KskAutomationManager } from '../../src/main/kskAutomation/syncManager'
@@ -43,6 +46,10 @@ import { sendKskAddedEmail, type KskEmailConfig } from '../../src/main/kskAutoma
 const KSK_ONE = 'ksk_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 const KSK_TWO = 'ksk_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
 const TASK_ID = 'task-one'
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
 
 function automationTask(
   overrides: Partial<PersistedKskAutomationTask> = {}
@@ -188,72 +195,84 @@ describe('本机 Admin 地址与同步验活', () => {
     })
   })
 
-  it('清理时只删除明确永久失效的 API Key，临时错误和非 KSK 凭据都保留', async () => {
+  it('按本地验活结论删除反代凭据：只删 hash 命中的 api_key，不碰其它凭据', async () => {
     const requests: string[] = []
     const fetchImpl: KskAutomationFetch = async (url, init) => {
       requests.push(`${init.method} ${url}`)
       if (url.endsWith('/credentials') && init.method === 'GET') {
         return jsonResponse({
           credentials: [
-            { id: 1, authMethod: 'api_key' },
-            { id: 2, authMethod: 'api_key' },
-            { id: 3, authMethod: 'api_key' },
-            { id: 4, authMethod: 'social' }
+            { id: 1, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_ONE) },
+            { id: 2, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_TWO) },
+            // 同一个 hash 但走 social：不是 KSK，不该动
+            { id: 3, authMethod: 'social', apiKeyHash: sha256Hex(KSK_ONE) }
           ]
         })
       }
-      if (url.endsWith('/credentials/1/balance')) return jsonResponse({ remaining: 10 })
-      if (url.endsWith('/credentials/2/balance')) {
-        return jsonResponse({ error: 'Kiro API key AccessDeniedException: HTTP 403' }, 502)
-      }
-      if (url.endsWith('/credentials/3/balance')) {
-        return jsonResponse({ error: 'upstream temporarily unavailable' }, 503)
-      }
-      if (url.endsWith('/credentials/2') && init.method === 'DELETE') return jsonResponse({})
+      if (url.endsWith('/credentials/1') && init.method === 'DELETE') return jsonResponse({})
       return jsonResponse({}, 404)
     }
 
-    const result = await cleanupInvalidLocalAdminCredentials({
+    const result = await deleteLocalAdminCredentialsByKey({
+      keys: [KSK_ONE],
       baseUrl: 'http://127.0.0.1:12888/admin',
       adminApiKey: 'admin_secret',
       timeoutSeconds: 5,
       fetchImpl
     })
 
-    expect(result).toEqual({
-      checked: 3,
-      removed: 1,
-      retainedTransient: 1,
-      errors: []
-    })
-    expect(requests).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/2')
+    expect(result).toEqual({ checked: 1, removed: 1, retainedTransient: 0, errors: [] })
+    expect(requests).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/1')
+    expect(requests).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/2')
     expect(requests).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/3')
-    expect(requests.some((request) => request.includes('/credentials/4/balance'))).toBe(false)
+    // 不再打 balance 探测：判活权全在本地
+    expect(requests.some((request) => request.includes('/balance'))).toBe(false)
   })
 
-  it.each([
-    ['HTTP 401', true],
-    ['HTTP 403', true],
-    ['HTTP 423', true],
-    ['AccountSuspendedException', true],
-    ['HTTP 429', false],
-    ['HTTP 503', false],
-    ['fetch failed', false]
-  ])('永久失效分类 %s => %s', (message, expected) => {
-    expect(isPermanentKskCredentialError(new Error(message))).toBe(expected)
+  it('没有待删 key 时一个 Admin 请求都不发', async () => {
+    const fetchImpl = vi.fn<KskAutomationFetch>()
+    const result = await deleteLocalAdminCredentialsByKey({
+      keys: [],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+    expect(result).toEqual({ checked: 0, removed: 0, retainedTransient: 0, errors: [] })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
-  it('本机 Admin 模式下不会把无凭据语义的 401 当成账号永久失效', () => {
-    expect(
-      isPermanentKskCredentialError(new Error('本机 Admin 请求失败: HTTP 401'), {
-        requireExplicitCredentialSignal: true
-      })
-    ).toBe(false)
-    expect(
-      isPermanentKskCredentialError(new Error('UnauthorizedException'), {
-        requireExplicitCredentialSignal: true
-      })
-    ).toBe(false)
+  it('删除失败只记错误，不影响同批其它凭据', async () => {
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({
+          credentials: [
+            { id: 1, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_ONE) },
+            { id: 2, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_TWO) }
+          ]
+        })
+      }
+      if (url.endsWith('/credentials/2') && init.method === 'DELETE') return jsonResponse({})
+      return jsonResponse({ error: 'boom' }, 500)
+    }
+
+    const result = await deleteLocalAdminCredentialsByKey({
+      keys: [KSK_ONE, KSK_TWO],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result).toMatchObject({ checked: 2, removed: 1 })
+    expect(result.errors).toHaveLength(1)
+  })
+
+  it('验活消息留空时回落到与账号页一致的默认提示词', () => {
+    expect(resolveKskLivenessMessage('')).toBe(KSK_LIVENESS_PROBE_MESSAGE)
+    expect(resolveKskLivenessMessage('   ')).toBe(KSK_LIVENESS_PROBE_MESSAGE)
+    expect(resolveKskLivenessMessage(undefined)).toBe(KSK_LIVENESS_PROBE_MESSAGE)
+    expect(resolveKskLivenessMessage(' say hi ')).toBe('say hi')
   })
 
   it.each([
@@ -364,6 +383,165 @@ describe('本机 Admin 地址与同步验活', () => {
   })
 })
 
+describe('单账号推送到本机 Admin', () => {
+  const REFRESH_TOKEN = 'refresh-token-value'
+
+  it.each([
+    [
+      'ksk 账号映射为 api_key 并双写区域',
+      { credentialKind: 'kiro_api_key' as const, kiroApiKey: KSK_ONE, region: 'eu-central-1' },
+      {
+        authMethod: 'api_key',
+        priority: 0,
+        kiroApiKey: KSK_ONE,
+        authRegion: 'eu-central-1',
+        apiRegion: 'eu-central-1'
+      }
+    ],
+    [
+      'clientId/Secret 齐备映射为 idc',
+      {
+        refreshToken: REFRESH_TOKEN,
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        region: 'us-east-1'
+      },
+      {
+        authMethod: 'idc',
+        priority: 0,
+        refreshToken: REFRESH_TOKEN,
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        authRegion: 'us-east-1'
+      }
+    ],
+    [
+      '仅 refreshToken 映射为 social，且不写 apiRegion',
+      { refreshToken: REFRESH_TOKEN, region: 'us-east-1' },
+      {
+        authMethod: 'social',
+        priority: 0,
+        refreshToken: REFRESH_TOKEN,
+        authRegion: 'us-east-1'
+      }
+    ]
+  ])('%s', (_name, candidate, expectedPayload) => {
+    const resolved = resolveLocalAdminCredentialPayload(candidate)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    expect(JSON.parse(JSON.stringify(resolved.payload))).toEqual(expectedPayload)
+  })
+
+  it.each([
+    [
+      'ksk 账号缺少合法区域',
+      { credentialKind: 'kiro_api_key' as const, kiroApiKey: KSK_ONE },
+      '区域'
+    ],
+    ['ksk 值不是合法的 Kiro API Key', { kiroApiKey: 'not-a-ksk' }, 'Kiro API Key'],
+    ['OAuth 账号缺少 refreshToken', { clientId: 'client-id' }, 'Refresh Token'],
+    [
+      'IdC 只填了一半凭据',
+      { refreshToken: REFRESH_TOKEN, clientId: 'client-id' },
+      'Client ID 和 Client Secret'
+    ]
+  ])('拒绝推送：%s', (_name, candidate, reasonPart) => {
+    const resolved = resolveLocalAdminCredentialPayload(candidate)
+    expect(resolved.ok).toBe(false)
+    if (resolved.ok) return
+    expect(resolved.reason).toContain(reasonPart)
+  })
+
+  it('新建后调用余额验活，余额失败仍算推送成功', async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      requests.push({
+        url,
+        method: init.method,
+        body: init.body ? (JSON.parse(init.body) as unknown) : undefined
+      })
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({ credentials: [] })
+      }
+      if (url.endsWith('/credentials') && init.method === 'POST') {
+        return jsonResponse({ credentialId: 7 })
+      }
+      if (url.endsWith('/credentials/7/balance')) return jsonResponse({ error: 'boom' }, 503)
+      return jsonResponse({}, 404)
+    }
+
+    const result = await pushAccountToLocalAdmin({
+      candidate: { refreshToken: REFRESH_TOKEN },
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result).toEqual({
+      status: 'created',
+      credentialId: '7',
+      verified: false,
+      authMethod: 'social'
+    })
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      'GET http://127.0.0.1:12888/api/admin/credentials',
+      'POST http://127.0.0.1:12888/api/admin/credentials',
+      'GET http://127.0.0.1:12888/api/admin/credentials/7/balance'
+    ])
+  })
+
+  it.each([
+    [
+      'api_key 按 apiKeyHash 判重',
+      { credentialKind: 'kiro_api_key' as const, kiroApiKey: KSK_ONE, region: 'us-east-1' },
+      (hash: string) => ({ id: 3, apiKeyHash: hash }),
+      KSK_ONE
+    ],
+    [
+      'OAuth 按 refreshTokenHash 判重',
+      { refreshToken: REFRESH_TOKEN },
+      (hash: string) => ({ id: 3, refreshTokenHash: hash }),
+      REFRESH_TOKEN
+    ]
+  ])('已存在时返回 existing 且不再创建：%s', async (_name, candidate, buildRemote, secret) => {
+    const hash = createHash('sha256').update(secret).digest('hex')
+    const methods: string[] = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      methods.push(`${init.method} ${url}`)
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({ credentials: [buildRemote(hash)] })
+      }
+      return jsonResponse({}, 404)
+    }
+
+    const result = await pushAccountToLocalAdmin({
+      candidate,
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result).toMatchObject({ status: 'existing', credentialId: '3', verified: false })
+    expect(methods).toEqual(['GET http://127.0.0.1:12888/api/admin/credentials'])
+  })
+
+  it('凭据不可映射时不发任何请求', async () => {
+    const fetchImpl = vi.fn<KskAutomationFetch>()
+    await expect(
+      pushAccountToLocalAdmin({
+        candidate: { clientId: 'client-id' },
+        baseUrl: 'http://127.0.0.1:12888/admin',
+        adminApiKey: 'admin_secret',
+        timeoutSeconds: 5,
+        fetchImpl
+      })
+    ).rejects.toThrow('Refresh Token')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
 describe('KSK 任务存储迁移', () => {
   it('把旧单例配置迁移为一条可管理任务并保留全部密钥', () => {
     const store = normalizeKskAutomationStorePayload(
@@ -436,7 +614,13 @@ describe('KSK 自动拉取调度', () => {
     manager.stop()
 
     expect(imported).toEqual([
-      { key: KSK_ONE, region: 'us-east-1', groupId: 'ksk', claimId: undefined }
+      {
+        key: KSK_ONE,
+        region: 'us-east-1',
+        groupId: 'ksk',
+        claimId: undefined,
+        liveness: { model: '', message: '' }
+      }
     ])
     expect(status).toMatchObject({
       state: KSK_AUTOMATION_STATE.HEALTHY,
@@ -487,7 +671,7 @@ describe('KSK 自动拉取调度', () => {
     manager.stop()
 
     expect(cleanupProxyAccounts).toHaveBeenCalledTimes(1)
-    expect(cleanupProxyAccounts).toHaveBeenCalledWith('ksk')
+    expect(cleanupProxyAccounts).toHaveBeenCalledWith('ksk', { model: '', message: '' })
     expect(first).toMatchObject({
       lastCleanupCheckedCount: 5,
       lastCleanupRemovedCount: 2,
@@ -562,6 +746,115 @@ describe('KSK 自动拉取调度', () => {
     })
   })
 
+  it('清理误删刚入库的 KSK 时，下一轮不会为同一个 key 再发一封邮件', async () => {
+    vi.useFakeTimers()
+    const sendAddedEmail = vi.fn(
+      async (_config, credentials: Array<{ key: string }>) => credentials.length
+    )
+    // 模拟真实 store：入库即存在，被清理删除后再次入库会重新算作「新增」
+    const stored = new Set<string>()
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true,
+        emailEnabled: true,
+        smtpHost: 'smtp.example.com',
+        smtpFrom: 'bot@example.com',
+        smtpTo: 'owner@example.com'
+      },
+      secrets: {
+        providerUrl: 'https://provider.example/get?token=secret',
+        smtpPassword: 'smtp_secret',
+        localAdminApiKey: ''
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [{ account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } }]
+        }),
+      importCredential: async (input) => {
+        if (stored.has(input.key)) return { ...input, added: false }
+        stored.add(input.key)
+        return { ...input, added: true }
+      },
+      // 验活把刚入库的号判成失效并删掉（新 key 尚未在上游生效时会这样）
+      cleanupProxyAccounts: async () => {
+        const removed = stored.delete(KSK_ONE) ? 1 : 0
+        return { checked: 1, removed, retainedTransient: 0, errors: [] }
+      },
+      readLocalAdminAccounts: async () => [],
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn(),
+      sendAddedEmail
+    })
+
+    await manager.runNow(TASK_ID)
+    await manager.runNow(TASK_ID)
+    manager.stop()
+
+    const emailedBatches = sendAddedEmail.mock.calls
+      .map((call) => call[1])
+      .filter((credentials) => credentials.length > 0)
+    expect(emailedBatches).toEqual([[{ key: KSK_ONE, region: 'us-east-1' }]])
+  })
+
+  it('被清理判失效的 KSK 不再重复入库，也不再触发清理', async () => {
+    vi.useFakeTimers()
+    const importedKeys: string[] = []
+    const stored = new Set<string>()
+    const cleanupProxyAccounts = vi.fn(async () => ({
+      checked: 1,
+      removed: stored.delete(KSK_ONE) ? 1 : 0,
+      retainedTransient: 0,
+      errors: [],
+      removedKeys: [KSK_ONE]
+    }))
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [{ account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } }]
+        }),
+      importCredential: async (input) => {
+        importedKeys.push(input.key)
+        if (stored.has(input.key)) return { ...input, added: false }
+        stored.add(input.key)
+        return { ...input, added: true }
+      },
+      cleanupProxyAccounts,
+      readLocalAdminAccounts: async () => [],
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn()
+    })
+
+    const first = await manager.runNow(TASK_ID)
+    const second = await manager.runNow(TASK_ID)
+    manager.stop()
+
+    // 第一轮入库一次并被清理删掉；第二轮该 key 已拉黑，连 importCredential 都不该再调
+    expect(importedKeys).toEqual([KSK_ONE])
+    expect(cleanupProxyAccounts).toHaveBeenCalledTimes(1)
+    expect(first).toMatchObject({ lastAddedCount: 1, lastCleanupRemovedCount: 1 })
+    // 拉取数仍按 Provider 实际返回计，跳过的号不该从统计里消失
+    expect(second).toMatchObject({ lastFetchedCount: 1, lastAddedCount: 0 })
+  })
+
   it('单个 KSK 验活失败不会阻断同一响应里的后续有效 KSK', async () => {
     vi.useFakeTimers()
     const imported: string[] = []
@@ -599,6 +892,219 @@ describe('KSK 自动拉取调度', () => {
       totalAddedCount: 1,
       lastError: '1 条 KSK 验活或入库失败'
     })
+  })
+
+  it('验活未通过的 KSK 不入库、不发邮件，并被拉黑不再重试', async () => {
+    vi.useFakeTimers()
+    const importedKeys: string[] = []
+    const sendAddedEmail = vi.fn<typeof sendKskAddedEmail>(async () => 1)
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        emailEnabled: true,
+        smtpHost: 'smtp.example.com',
+        smtpFrom: 'bot@example.com',
+        smtpTo: 'owner@example.com'
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [
+            { account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } },
+            { account: { key: KSK_TWO, aws_region: 'eu-central-1', status: 'active' } }
+          ]
+        }),
+      importCredential: async (input) => {
+        importedKeys.push(input.key)
+        if (input.key === KSK_ONE) return { ...input, added: false, rejected: true }
+        return { ...input, added: true }
+      },
+      readLocalAdminAccounts: async () => [],
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn(),
+      sendAddedEmail,
+      log: vi.fn()
+    })
+
+    const first = await manager.runNow(TASK_ID)
+    const second = await manager.runNow(TASK_ID)
+    manager.stop()
+
+    // 第二轮 KSK_ONE 已拉黑，只会再验 KSK_TWO
+    expect(importedKeys).toEqual([KSK_ONE, KSK_TWO, KSK_TWO])
+    expect(first).toMatchObject({
+      state: KSK_AUTOMATION_STATE.DEGRADED,
+      lastFetchedCount: 2,
+      lastAddedCount: 1,
+      lastRejectedCount: 1,
+      lastError: '1 条 KSK 验活未通过，未入库'
+    })
+    expect(second).toMatchObject({ lastRejectedCount: 0 })
+    // 只给通过验活的号发信
+    expect(sendAddedEmail.mock.calls[0][1]).toEqual([{ key: KSK_TWO, region: 'eu-central-1' }])
+  })
+
+  it('本地验活判死的号会连带从本机 Admin 删掉，且先删后同步', async () => {
+    vi.useFakeTimers()
+    const adminCalls: string[] = []
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true,
+        localAdminEnabled: true,
+        localAdminGroupId: 'ksk'
+      },
+      secrets: {
+        providerUrl: 'https://provider.example/get?token=secret',
+        smtpPassword: '',
+        localAdminApiKey: 'admin_secret'
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [
+            { account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } },
+            { account: { key: KSK_TWO, aws_region: 'eu-central-1', status: 'active' } }
+          ]
+        }),
+      localAdminFetchImpl: async (url, init) => {
+        adminCalls.push(`${init.method} ${url.replace('http://127.0.0.1:12888/api/admin', '')}`)
+        if (url.endsWith('/credentials') && init.method === 'GET') {
+          return jsonResponse({
+            credentials: [{ id: 7, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_ONE) }]
+          })
+        }
+        return jsonResponse({ credentialId: 9 })
+      },
+      importCredential: async (input) => {
+        if (input.key === KSK_ONE) return { ...input, added: false, rejected: true }
+        return { ...input, added: true }
+      },
+      readLocalAdminAccounts: async () => [{ kiroApiKey: KSK_TWO, region: 'eu-central-1' }],
+      cleanupProxyAccounts: async () => ({
+        checked: 1,
+        removed: 0,
+        retainedTransient: 0,
+        errors: []
+      }),
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn(),
+      log: vi.fn()
+    })
+
+    await manager.runNow(TASK_ID)
+    manager.stop()
+
+    /*
+     * 判死的 KSK_ONE 在 Admin 上被删；本轮的同步必须排在删除之后，
+     * 否则会把刚判死的号又推回反代。用 lastIndexOf 取本轮那次 POST——
+     * 任务启用本机 Admin 时 start() 会先跑一次开机同步，那次不在本断言范围内。
+     */
+    const deleteIndex = adminCalls.indexOf('DELETE /credentials/7')
+    expect(deleteIndex).toBeGreaterThanOrEqual(0)
+    expect(adminCalls.lastIndexOf('POST /credentials')).toBeGreaterThan(deleteIndex)
+  })
+
+  it('一个都没新增但抓出挂号时，反代那边照样清理', async () => {
+    vi.useFakeTimers()
+    const adminCalls: string[] = []
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        localAdminEnabled: true,
+        localAdminGroupId: 'ksk'
+      },
+      secrets: {
+        providerUrl: 'https://provider.example/get?token=secret',
+        smtpPassword: '',
+        localAdminApiKey: 'admin_secret'
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [{ account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } }]
+        }),
+      localAdminFetchImpl: async (url, init) => {
+        adminCalls.push(`${init.method} ${url.replace('http://127.0.0.1:12888/api/admin', '')}`)
+        if (url.endsWith('/credentials') && init.method === 'GET') {
+          return jsonResponse({
+            credentials: [{ id: 7, authMethod: 'api_key', apiKeyHash: sha256Hex(KSK_ONE) }]
+          })
+        }
+        return jsonResponse({})
+      },
+      importCredential: async (input) => ({ ...input, added: false, rejected: true }),
+      readLocalAdminAccounts: async () => [],
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn(),
+      log: vi.fn()
+    })
+
+    await manager.runNow(TASK_ID)
+    manager.stop()
+
+    expect(adminCalls).toContain('DELETE /credentials/7')
+  })
+
+  it('任务里配置的验活模型与消息会透传给入库和全量清理', async () => {
+    vi.useFakeTimers()
+    const livenessSeen: Array<unknown> = []
+    const cleanupProxyAccounts = vi.fn(async () => ({
+      checked: 1,
+      removed: 0,
+      retainedTransient: 0,
+      errors: []
+    }))
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true,
+        livenessModel: 'claude-sonnet-4.5',
+        livenessMessage: 'ping'
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [{ account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } }]
+        }),
+      importCredential: async (input) => {
+        livenessSeen.push(input.liveness)
+        return { ...input, added: true }
+      },
+      readLocalAdminAccounts: async () => [],
+      cleanupProxyAccounts,
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn()
+    })
+
+    await manager.runNow(TASK_ID)
+    manager.stop()
+
+    const expected = { model: 'claude-sonnet-4.5', message: 'ping' }
+    expect(livenessSeen).toEqual([expected])
+    expect(cleanupProxyAccounts).toHaveBeenCalledWith('ksk', expected)
   })
 
   it('不同任务按各自 Provider 和目标分组独立执行', async () => {

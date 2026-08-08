@@ -45,6 +45,8 @@ const zh = {
     home: '主页',
     accounts: '账户管理',
     tasks: '任务管理',
+    hunter: '抢号监控',
+    proxyStats: '反代统计',
     proxyPool: '代理池',
     diagnose: '一键诊断',
     configSync: '配置同步',

@@ -4,6 +4,7 @@ import { Card, CardContent, Badge, Button, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
+import { useAccountActions } from '@/hooks/useAccountActions'
 import type { Account, AccountTag, AccountGroup, AccountLivenessResult } from '@/types/account'
 import {
   Check,
@@ -25,6 +26,8 @@ import {
   RotateCcw,
   Download,
   Zap,
+  CloudUpload,
+  CloudCheck,
   XCircle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -213,6 +216,10 @@ export const AccountCard = memo(function AccountCard({
 
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+
+  // 单账号验活 / 推送到本机 Admin（与列表视图共用同一份逻辑）
+  const { runLiveness, livenessPending, pushToAdmin, pushState, pushError, canPush, pushTitle } =
+    useAccountActions(account, isEn)
 
   // 格式化使用量数值
   const formatUsage = (value: number): string => {
@@ -943,12 +950,12 @@ export const AccountCard = memo(function AccountCard({
             </div>
           </div>
 
-          {/* Right: Actions */}
-          <div className="flex items-center gap-0.5">
+          {/* Right: Actions —— 8 个按钮，窄卡片下靠 w-6 + gap-0 挤得进一行 */}
+          <div className="flex items-center gap-0 shrink-0">
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              className="h-7 w-6 text-muted-foreground hover:text-foreground"
               onClick={(e) => {
                 e.stopPropagation()
                 handleRefresh()
@@ -960,10 +967,65 @@ export const AccountCard = memo(function AccountCard({
                 className={cn('h-3.5 w-3.5', account.status === 'refreshing' && 'animate-spin')}
               />
             </Button>
+
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              className={cn(
+                'h-7 w-6',
+                livenessPending
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400'
+              )}
+              onClick={(e) => {
+                e.stopPropagation()
+                runLiveness()
+              }}
+              disabled={livenessPending || !hasUpstreamKiroCredential(account.credentials)}
+              title={
+                isEn
+                  ? 'Liveness test (send a real message to the model)'
+                  : '验活（给模型发一条真实消息）'
+              }
+            >
+              {livenessPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Zap className="h-3.5 w-3.5" />
+              )}
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className={cn(
+                'h-7 w-6',
+                pushState === 'created' || pushState === 'existing'
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : pushState === 'error'
+                    ? 'text-destructive'
+                    : 'text-muted-foreground hover:text-foreground'
+              )}
+              onClick={(e) => {
+                e.stopPropagation()
+                pushToAdmin()
+              }}
+              disabled={!canPush || pushState === 'pushing'}
+              title={pushError ? `${pushTitle} · ${pushError}` : pushTitle}
+            >
+              {pushState === 'pushing' ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : pushState === 'created' || pushState === 'existing' ? (
+                <CloudCheck className="h-3.5 w-3.5" />
+              ) : (
+                <CloudUpload className="h-3.5 w-3.5" />
+              )}
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-6 text-muted-foreground hover:text-foreground"
               onClick={(e) => {
                 e.stopPropagation()
                 handleRefreshToken()
@@ -977,7 +1039,7 @@ export const AccountCard = memo(function AccountCard({
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              className="h-7 w-6 text-muted-foreground hover:text-foreground"
               onClick={(e) => {
                 e.stopPropagation()
                 setShowExportDialog(true)
@@ -990,7 +1052,7 @@ export const AccountCard = memo(function AccountCard({
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              className="h-7 w-6 text-muted-foreground hover:text-foreground"
               onClick={(e) => {
                 e.stopPropagation()
                 onShowDetail()
@@ -1003,7 +1065,7 @@ export const AccountCard = memo(function AccountCard({
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              className="h-7 w-6 text-muted-foreground hover:text-foreground"
               onClick={(e) => {
                 e.stopPropagation()
                 onEdit()
@@ -1016,7 +1078,7 @@ export const AccountCard = memo(function AccountCard({
             <Button
               size="icon"
               variant="ghost"
-              className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors"
+              className="h-7 w-6 text-muted-foreground hover:text-destructive transition-colors"
               onClick={(e) => {
                 e.stopPropagation()
                 handleDelete()

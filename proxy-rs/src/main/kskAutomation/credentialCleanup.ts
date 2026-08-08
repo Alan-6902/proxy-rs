@@ -1,3 +1,4 @@
+import { KSK_LIVENESS_PROBE_MESSAGE } from '../../shared/kskAutomation'
 import { normalizeKiroUpstreamError, UpstreamRetryCategory, type KiroModel } from '../proxy/kiroApi'
 
 export interface KskCredentialCleanupResult {
@@ -5,6 +6,12 @@ export interface KskCredentialCleanupResult {
   removed: number
   retainedTransient: number
   errors: string[]
+  /**
+   * 本次被判永久失效并删除的 KSK 明文，供调用方拉黑，避免下一轮又从 Provider 拉回来。
+   *
+   * 只有本地 store 清理能给出明文；本机 Admin 那边只有 apiKeyHash，所以是可选字段。
+   */
+  removedKeys?: string[]
 }
 
 export const KSK_CREDENTIAL_VALIDATION_CONCURRENCY = 4
@@ -29,25 +36,6 @@ export interface InvalidKskAccountIdentity {
   groupId?: string
 }
 
-const PERMANENT_HTTP_STATUSES = new Set([401, 403, 423])
-const CREDENTIAL_SPECIFIC_PERMANENT_PATTERNS = [
-  /AccountSuspendedException/i,
-  /temporarily[_ -]?suspended/i,
-  /account[^\n]{0,40}suspended/i,
-  /invalid[^\n]{0,24}(?:api[ _-]?key|credential|token)/i,
-  /(?:api[ _-]?key|credential|token)[^\n]{0,24}invalid/i
-]
-const GENERIC_PERMANENT_PATTERNS = [
-  /UnauthorizedException/i,
-  /AccessDeniedException/i,
-  /ExpiredTokenException/i
-]
-const CREDENTIAL_CONTEXT_PATTERN = /(?:kiro|upstream|account|api[ _-]?key|credential|token)/i
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /**
  * 验活兜底模型：拉不到上游模型列表时用它。Haiku 是当前最便宜的一档，
  * 与 LIVENESS_MODELS 里的候选保持同名（见 renderer/src/hooks/useLivenessModels.ts）。
@@ -57,11 +45,13 @@ export const KSK_CLEANUP_FALLBACK_MODEL = 'claude-haiku-4.5'
 /** 验活请求的最大输出 token：只要上游肯回一个字就够，不必让它写完整句。 */
 export const KSK_CLEANUP_MAX_OUTPUT_TOKENS = 8
 
-/** 验活提示词：让模型只回一个短 token，尽量少耗 credits。 */
-export const KSK_CLEANUP_PROBE_MESSAGE = 'Hi, reply with "pong" only.'
-
 /** 单个账号验活的超时；超时按 transient 处理（保留账号），不作为失效证据。 */
 export const KSK_CLEANUP_PROBE_TIMEOUT_MS = 45_000
+
+/** 验活参数的默认值兜底：配置留空时用它们。 */
+export function resolveKskLivenessMessage(configured?: string): string {
+  return configured?.trim() || KSK_LIVENESS_PROBE_MESSAGE
+}
 
 /**
  * 从上游模型列表里挑最便宜的一个。
@@ -186,28 +176,4 @@ export function classifyKskProbeError(error: unknown): KskProbeVerdict {
 /** 400 是我们发的 payload 有问题（模型 ID 不存在等），与账号有效性无关。 */
 function isRequestSideRejection(statusCode: number): boolean {
   return statusCode === 400
-}
-
-/**
- * KSK 没有 refresh 能力。主应用直接验活时，最终的 401/403/423 可视为永久失效；
- * 经过本机 Admin 转发时则必须同时出现明确的上游凭据语义，避免把 Admin Key 失效误判成账号失效。
- *
- * 仅用于本机 Admin 转发路径（错误已被序列化成字符串，拿不到结构化 statusCode）。
- * 主应用直连路径请用 classifyKskProbeError。
- */
-export function isPermanentKskCredentialError(
-  error: unknown,
-  options: { requireExplicitCredentialSignal?: boolean } = {}
-): boolean {
-  const message = errorMessage(error)
-  if (CREDENTIAL_SPECIFIC_PERMANENT_PATTERNS.some((pattern) => pattern.test(message))) return true
-  const hasGenericPermanentSignal = GENERIC_PERMANENT_PATTERNS.some((pattern) =>
-    pattern.test(message)
-  )
-  if (options.requireExplicitCredentialSignal) {
-    return hasGenericPermanentSignal && CREDENTIAL_CONTEXT_PATTERN.test(message)
-  }
-  if (hasGenericPermanentSignal) return true
-  const status = message.match(/(?:HTTP|status(?: code)?)\s*[:=]?\s*(\d{3})/i)?.[1]
-  return status ? PERMANENT_HTTP_STATUSES.has(Number(status)) : false
 }

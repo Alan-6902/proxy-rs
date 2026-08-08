@@ -27,6 +27,8 @@ export interface LocalAdminPushCandidate {
   clientId?: string
   clientSecret?: string
   region?: string
+  /** 账号登记的认证方式；决定 Admin 该用 social 还是 OIDC 端点刷这个 refreshToken。 */
+  authMethod?: 'IdC' | 'social'
 }
 
 /** Admin 创建凭据的请求体。 */
@@ -49,7 +51,9 @@ export type LocalAdminPayloadResult =
  * 把账号凭据映射为 Admin 的创建请求体。
  *
  * - ksk 账号 → api_key，必须带合法区域（Admin 侧靠它决定调哪个上游端点）
- * - OAuth 账号 → clientId/Secret 齐备走 idc，都没有走 social；只有一个视为配置残缺
+ * - OAuth 账号 → 以账号自己的 authMethod 为准（与本地 refreshTokenByMethod 同一判据）：
+ *   social 直接走 social；IdC 必须齐备 clientId/Secret，缺一半就拒推而不是降级成 social。
+ *   authMethod 缺失时（SSO Token 导入等老路径不写）按 clientId/Secret 存在性推断。
  * - OAuth 只传 authRegion：region 存的是 OIDC 区域，硬塞给 apiRegion 可能把 API 调用带到错误区域
  */
 export function resolveLocalAdminCredentialPayload(
@@ -78,11 +82,27 @@ export function resolveLocalAdminCredentialPayload(
 
   const clientId = candidate.clientId?.trim() ?? ''
   const clientSecret = candidate.clientSecret?.trim() ?? ''
-  if (Boolean(clientId) !== Boolean(clientSecret)) {
+
+  // 账号自己声明的 authMethod 是权威来源：本地刷新链路（refreshTokenByMethod）就按它选
+  // social / OIDC 端点，推给 Admin 必须用同一判据，否则 Admin 会拿错端点去刷这个 token。
+  if (candidate.authMethod === 'social') {
+    return {
+      ok: true,
+      payload: {
+        authMethod: LOCAL_ADMIN_AUTH_METHOD.SOCIAL,
+        priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
+        refreshToken,
+        authRegion: isValidKiroRegion(region) ? region : undefined
+      }
+    }
+  }
+
+  // authMethod 缺失时退回按 clientId/Secret 存在性推断：SSO Token 导入等老路径不写该字段。
+  const isIdc = candidate.authMethod === 'IdC' || Boolean(clientId) || Boolean(clientSecret)
+  if (isIdc && !(clientId && clientSecret)) {
     return { ok: false, reason: 'IdC 账号需要同时提供 Client ID 和 Client Secret' }
   }
 
-  const isIdc = Boolean(clientId)
   return {
     ok: true,
     payload: {
@@ -96,11 +116,36 @@ export function resolveLocalAdminCredentialPayload(
   }
 }
 
-/** 推送结果：created = 新建并验活，existing = Admin 已有同一凭据。 */
+/**
+ * 推送后发消息验活的结论。与 KSK_PROBE_VERDICT 同口径，独立定义是因为
+ * 这个类型要跨 preload 给渲染进程用，不该把主进程的清理模块拖进渲染层。
+ */
+export const LOCAL_ADMIN_PROBE_VERDICT = {
+  ALIVE: 'alive',
+  PERMANENTLY_INVALID: 'permanently_invalid',
+  TRANSIENT: 'transient',
+  /** 没跑验活：Admin 已有同一凭据，或调用方没提供验活能力。 */
+  SKIPPED: 'skipped'
+} as const
+
+export type LocalAdminProbeVerdict =
+  (typeof LOCAL_ADMIN_PROBE_VERDICT)[keyof typeof LOCAL_ADMIN_PROBE_VERDICT]
+
+/**
+ * 推送结果。
+ *
+ * created 是硬承诺：凭据已进 Admin 且验证过能出活。验不过的一律不返回结果，
+ * 而是删掉凭据并抛错——「推过去就一定能用」比「推进去了但可能不能用」有用得多。
+ */
 export interface LocalAdminPushResult {
   status: 'created' | 'existing'
   credentialId?: string
-  /** 新建后余额接口是否调通；existing 时恒为 false。 */
+  /** 新建后余额接口是否调通；created 时恒为 true，existing 时恒为 false。 */
   verified: boolean
   authMethod: LocalAdminAuthMethod
+  /**
+   * 发消息验活的结论。created 时为 alive（未注入探针则为 skipped，表示只过了余额门禁），
+   * existing 时为 skipped。验不过的不会返回结果，所以这里永远不会是失败类结论。
+   */
+  probeVerdict: LocalAdminProbeVerdict
 }

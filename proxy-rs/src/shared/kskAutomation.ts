@@ -62,6 +62,29 @@ export interface KskAutomationConfigView extends KskAutomationConfig {
   localAdminApiKeyTail?: string
 }
 
+export const KSK_AUTOMATION_LOG_LEVEL = {
+  INFO: 'info',
+  WARN: 'warn',
+  ERROR: 'error'
+} as const
+
+export type KskAutomationLogLevel =
+  (typeof KSK_AUTOMATION_LOG_LEVEL)[keyof typeof KSK_AUTOMATION_LOG_LEVEL]
+
+/**
+ * 每个任务在内存里保留的运行日志条数上限。
+ *
+ * 轮询是 30 秒一轮、每轮至少一条汇总，100 条约等于最近 50 分钟；
+ * 日志随 status 事件整体推给渲染层，条数再大就是白占 IPC 带宽。
+ */
+export const KSK_AUTOMATION_LOG_LIMIT = 100
+
+export interface KskAutomationLogEntry {
+  at: number
+  level: KskAutomationLogLevel
+  message: string
+}
+
 export interface KskAutomationStatus {
   state: KskAutomationState
   running: boolean
@@ -78,9 +101,13 @@ export interface KskAutomationStatus {
   lastEmailedCount: number
   lastLocalAdminSyncedCount: number
   lastLocalAdminVerifiedCount: number
+  /** 上一轮从本机 Admin 删掉的「本地已不存在」的残留凭据数量。 */
+  lastLocalAdminPrunedCount: number
   lastCleanupCheckedCount: number
   lastCleanupRemovedCount: number
   lastCleanupRetainedCount: number
+  /** 最近的运行日志，按时间正序；仅存在内存里，应用重启后清空。 */
+  logs: KskAutomationLogEntry[]
 }
 
 export interface KskAutomationTaskView {

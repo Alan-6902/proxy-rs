@@ -22,6 +22,7 @@ import type {
   KskHunterSnapshot,
   KskHunterStatusEvent
 } from '../shared/kskHunter'
+import type { HunterReport } from '../shared/hunterReport'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminStatsSnapshot,
@@ -948,6 +949,8 @@ interface KiroApi {
   kskHunterRunNow: () => Promise<IdcIpcResult<KskHunterSnapshot>>
   kskHunterRetryDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
   kskHunterDeleteDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
+  kskHunterReport: (days?: number) => Promise<IdcIpcResult<HunterReport>>
+  kskHunterRevealReportFile: () => Promise<IdcIpcResult<string>>
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void) => () => void
   localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>

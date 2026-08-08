@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { isValidKiroApiKey, isValidKiroRegion } from '../../shared/kiroApiKey'
 import {
   LOCAL_ADMIN_AUTH_METHOD,
+  LOCAL_ADMIN_PROBE_VERDICT,
   resolveLocalAdminCredentialPayload,
+  type LocalAdminProbeVerdict,
   type LocalAdminPushCandidate,
   type LocalAdminPushResult
 } from '../../shared/localAdminPush'
@@ -13,11 +15,21 @@ export interface LocalAdminAccount {
   region: string
 }
 
+/** 发消息验活的结论 + 失败时的错误摘要。 */
+export interface LocalAdminProbeOutcome {
+  verdict: LocalAdminProbeVerdict
+  error?: string
+}
+
 export interface LocalAdminSyncResult {
   discovered: number
   skippedExisting: number
   synced: number
   verified: number
+  /** 本次删掉的「Admin 有、本地同步分组没有」的残留 api_key 凭据数量。 */
+  pruned: number
+  /** 被删掉的残留凭据脱敏 Key，供日志展示；Admin 不回明文，只能用它的 maskedApiKey。 */
+  prunedMaskedKeys: string[]
   errors: string[]
 }
 
@@ -232,8 +244,9 @@ export async function syncKskAccountsToLocalAdmin(input: {
     timeoutMs,
     { method: 'GET' }
   )
+  const existingCredentials = readRemoteCredentials(existingPayload)
   const existingHashes = new Set(
-    readRemoteCredentials(existingPayload)
+    existingCredentials
       .map((credential) => credential.apiKeyHash)
       .filter((value): value is string => typeof value === 'string' && value.length > 0)
   )
@@ -243,7 +256,41 @@ export async function syncKskAccountsToLocalAdmin(input: {
     skippedExisting: 0,
     synced: 0,
     verified: 0,
+    pruned: 0,
+    prunedMaskedKeys: [],
     errors: []
+  }
+
+  /*
+   * 先删残留，再推新号：本地已经删掉的号必须尽快从反代摘掉，
+   * 而下面的 POST 可能因为网络问题卡住甚至中断，把删除排在后面就等于随时可能不执行。
+   */
+  const localHashes = new Set([...uniqueAccounts.keys()].map((kiroApiKey) => sha256Hex(kiroApiKey)))
+  for (const credential of existingCredentials) {
+    // 只对齐 api_key：oauth 凭据（social / IdC）不在本函数的输入里，无从判断本地是否还存在
+    if (credential.authMethod !== 'api_key') continue
+    const hash = credential.apiKeyHash
+    if (!hash || localHashes.has(hash)) continue
+    const credentialId = remoteCredentialId(credential)
+    if (!credentialId) continue
+    try {
+      await requestJson(
+        input.fetchImpl,
+        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}`,
+        adminApiKey,
+        timeoutMs,
+        { method: 'DELETE' }
+      )
+      result.pruned++
+      result.prunedMaskedKeys.push(credential.maskedApiKey || `#${credentialId}`)
+      existingHashes.delete(hash)
+    } catch (error) {
+      result.errors.push(
+        `删除残留凭据 ${credential.maskedApiKey || `#${credentialId}`} 失败：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    }
   }
 
   for (const account of uniqueAccounts.values()) {
@@ -288,10 +335,69 @@ export async function syncKskAccountsToLocalAdmin(input: {
   return result
 }
 
+/** 验活结论转成给用户看的说法，探针没给具体错误时兜底。 */
+function describeProbeVerdict(verdict: LocalAdminProbeVerdict): string {
+  if (verdict === LOCAL_ADMIN_PROBE_VERDICT.PERMANENTLY_INVALID) {
+    return '账号已失效（认证失败 / 封禁 / 配额耗尽）'
+  }
+  if (verdict === LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT) {
+    return '暂时无法确认（超时 / 限流 / 上游 5xx），请稍后重推'
+  }
+  return '未验证'
+}
+
 /**
- * 把单个账号推送到本机 Admin。与批量同步的差别：
- * 不限 credentialKind（social / idc / api_key 都收），并且 Admin 已有同一凭据时
- * 返回 existing 而不是静默跳过——手动点按钮的人需要知道"没新增"这个结果。
+ * 跑一道门禁；不通过就删掉刚创建的凭据并抛错。
+ *
+ * 删除失败要在错误信息里说清楚：那种情况下 Admin 里留了一条验不过的凭据，
+ * 用户必须知道得手动清，不能让它悄悄留在池子里。
+ */
+async function verifyOrRollback(
+  context: {
+    baseUrl: string
+    adminApiKey: string
+    timeoutMs: number
+    credentialId: string
+    fetchImpl: KskAutomationFetch
+  },
+  verify: () => Promise<void>,
+  describe: (detail: string) => string
+): Promise<void> {
+  try {
+    await verify()
+    return
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    let removed = false
+    try {
+      await requestJson(
+        context.fetchImpl,
+        `${context.baseUrl}/credentials/${encodeURIComponent(context.credentialId)}`,
+        context.adminApiKey,
+        context.timeoutMs,
+        { method: 'DELETE' }
+      )
+      removed = true
+    } catch {
+      removed = false
+    }
+    throw new Error(
+      removed
+        ? `${describe(detail)}；已从 Admin 删除该凭据`
+        : `${describe(detail)}；且删除凭据 #${context.credentialId} 失败，需要手动清理`
+    )
+  }
+}
+
+/**
+ * 把单个账号推送到本机 Admin，并保证「推成功 = 反代真能用」。
+ *
+ * 与批量同步的差别：不限 credentialKind（social / idc / api_key 都收），
+ * 并且 Admin 已有同一凭据时返回 existing 而不是静默跳过——手动点按钮的人
+ * 需要知道"没新增"这个结果。
+ *
+ * 返回 created 即代表两道门禁都过了（Admin 能用这条凭据问到余额 + 真发消息出活）。
+ * 任一关不过都会删掉凭据并抛错，绝不返回「推进去了但不确定能不能用」的结果。
  */
 export async function pushAccountToLocalAdmin(input: {
   candidate: LocalAdminPushCandidate
@@ -299,6 +405,13 @@ export async function pushAccountToLocalAdmin(input: {
   adminApiKey: string
   timeoutSeconds: number
   fetchImpl: KskAutomationFetch
+  /**
+   * 发消息验活：推进 Admin 之后用同一份凭据真发一条消息，确认这个号真能出活。
+   *
+   * 不注入时跳过这一关（只保留 balance 门禁）。之所以做成注入而不是在这里直接调
+   * callKiroApi：这个模块跑在测试里也要能用假 fetch 走完整流程，不该把上游 SDK 拖进来。
+   */
+  probeLiveness?: (candidate: LocalAdminPushCandidate) => Promise<LocalAdminProbeOutcome>
 }): Promise<LocalAdminPushResult> {
   const resolved = resolveLocalAdminCredentialPayload(input.candidate)
   if (!resolved.ok) throw new Error(resolved.reason)
@@ -322,7 +435,8 @@ export async function pushAccountToLocalAdmin(input: {
       status: 'existing',
       credentialId: remoteCredentialId(existing),
       verified: false,
-      authMethod: payload.authMethod
+      authMethod: payload.authMethod,
+      probeVerdict: LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
     }
   }
 
@@ -336,20 +450,52 @@ export async function pushAccountToLocalAdmin(input: {
   const credentialId = readCredentialId(created)
   if (!credentialId) throw new Error('本机 Admin 未返回 credentialId')
 
-  // 验活失败不算推送失败：凭据已经进 Admin，余额接口的问题让 Admin 侧自己暴露
-  let verified = false
-  try {
-    await requestJson(
-      input.fetchImpl,
-      `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance`,
-      adminApiKey,
-      timeoutMs,
-      { method: 'GET' }
+  /*
+   * 两道门禁，任一不过就把刚建的凭据删掉并抛错：调用方要的是「推过去就一定能用」，
+   * 留一条不确定的凭据在池子里，等于把问题推迟到真实请求时才炸。
+   *
+   * 1) balance：让 Admin 用这条凭据去问余额，验的是 Admin 侧接线
+   *    （authMethod 解析对不对、它能不能拿这份凭据刷出 token）。
+   * 2) 发消息：balance 通不代表能出活（超额号 balance 照样通，
+   *    见 credentialCleanup 的注释），所以还要真发一条消息。
+   *
+   * transient（超时 / 限流 / 5xx）在这里也算不通过。它确实可能冤枉好号，
+   * 但「推送失败可以重推」比「推进去了但可能不能用」代价小。
+   */
+  await verifyOrRollback(
+    { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
+    async () => {
+      await requestJson(
+        input.fetchImpl,
+        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance`,
+        adminApiKey,
+        timeoutMs,
+        { method: 'GET' }
+      )
+    },
+    (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`
+  )
+
+  if (input.probeLiveness) {
+    await verifyOrRollback(
+      { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
+      async () => {
+        const outcome = await input.probeLiveness!(input.candidate)
+        if (outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE) return
+        throw new Error(outcome.error || describeProbeVerdict(outcome.verdict))
+      },
+      (detail) => `发消息验活未通过：${detail}`
     )
-    verified = true
-  } catch {
-    verified = false
   }
 
-  return { status: 'created', credentialId, verified, authMethod: payload.authMethod }
+  return {
+    status: 'created',
+    credentialId,
+    verified: true,
+    authMethod: payload.authMethod,
+    // 没注入探针时只过了 balance 那一关，别谎报 alive
+    probeVerdict: input.probeLiveness
+      ? LOCAL_ADMIN_PROBE_VERDICT.ALIVE
+      : LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
+  }
 }

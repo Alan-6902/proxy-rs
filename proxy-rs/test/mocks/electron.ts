@@ -6,6 +6,8 @@ export const app = {
 
 export const ipcMain = { handle: () => undefined, on: () => undefined }
 
+export const shell = { showItemInFolder: () => undefined, openPath: async () => '' }
+
 export class BrowserWindow {
   static getAllWindows(): BrowserWindow[] {
     return []

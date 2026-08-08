@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { ipcMain, type BrowserWindow } from 'electron'
+import { promises as fs } from 'node:fs'
+import { ipcMain, shell, type BrowserWindow } from 'electron'
 import {
   KSK_HUNTER_MODE,
   type KskHunterConfig,
@@ -8,6 +9,8 @@ import {
   type KskHunterSnapshot,
   type KskHunterStatusEvent
 } from '../../shared/kskHunter'
+import type { HunterReport } from '../../shared/hunterReport'
+import { hunterReportStorePath } from './reportStore'
 import {
   createKskHunterLink,
   deleteKskHunterDelivery,
@@ -32,6 +35,8 @@ export const KSK_HUNTER_CHANNEL_NAME = {
   runNow: 'ksk-hunter-run-now',
   retryDelivery: 'ksk-hunter-retry-delivery',
   deleteDelivery: 'ksk-hunter-delete-delivery',
+  report: 'ksk-hunter-report',
+  revealReportFile: 'ksk-hunter-reveal-report-file',
   statusEvent: 'ksk-hunter-status-changed'
 } as const
 
@@ -235,6 +240,32 @@ export function registerKskHunterIpcHandlers(deps: KskHunterIpcDeps): void {
       return await respondSnapshot()
     } catch (error) {
       return toError(error)
+    }
+  })
+
+  // 报表要读整份事件流并聚合，比状态快照重，所以单独一个通道按需拉，
+  // 不挂在 3 秒一次的状态事件上
+  ipcMain.handle(
+    KSK_HUNTER_CHANNEL_NAME.report,
+    async (_event, days?: number): Promise<IpcResult<HunterReport>> => {
+      try {
+        return { success: true, data: await deps.getManager().report(days) }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.revealReportFile, async (): Promise<IpcResult<string>> => {
+    try {
+      const path = hunterReportStorePath()
+      // 没攒到事件时文件还不存在，showItemInFolder 会静默失败，
+      // 所以先确认存在再打开，不存在就把原因回给 UI
+      await fs.access(path)
+      shell.showItemInFolder(path)
+      return { success: true, data: path }
+    } catch {
+      return { success: false, error: '报表历史文件还不存在，抢号产生第一条记录后才会生成' }
     }
   })
 }

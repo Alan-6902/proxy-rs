@@ -60,9 +60,11 @@ const EMPTY_STATUS: KskAutomationStatus = {
   lastEmailedCount: 0,
   lastLocalAdminSyncedCount: 0,
   lastLocalAdminVerifiedCount: 0,
+  lastLocalAdminPrunedCount: 0,
   lastCleanupCheckedCount: 0,
   lastCleanupRemovedCount: 0,
-  lastCleanupRetainedCount: 0
+  lastCleanupRetainedCount: 0,
+  logs: []
 }
 
 let mutationQueue: Promise<void> = Promise.resolve()
@@ -350,6 +352,6 @@ export function toKskAutomationTaskView(
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     config: toKskAutomationConfigView(task),
-    status: { ...status }
+    status: { ...status, logs: [...(status.logs ?? [])] }
   }
 }

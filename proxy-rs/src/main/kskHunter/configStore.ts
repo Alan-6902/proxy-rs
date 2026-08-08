@@ -63,6 +63,12 @@ export interface PersistedKskHunterDelivery {
   id: string
   linkId: string
   linkName: string
+  /**
+   * 下单时所属渠道。推送成功/失败要记进报表，而链接可能已被删除，
+   * 光靠 linkId 回查不到渠道，所以在记录上冗余一份。
+   * 本字段晚于 v2 引入，老记录为 undefined。
+   */
+  channel?: KskHunterChannel
   key: string
   region: string
   state: KskHunterDeliveryState
@@ -257,6 +263,7 @@ function normalizeDelivery(value: unknown, now: number): PersistedKskHunterDeliv
     id,
     linkId: normalizeString(source.linkId),
     linkName: normalizeString(source.linkName) || '未命名链接',
+    channel: normalizeChannelValue(source.channel) ?? undefined,
     key,
     region: normalizeString(source.region),
     state: normalizeDeliveryState(source.state),

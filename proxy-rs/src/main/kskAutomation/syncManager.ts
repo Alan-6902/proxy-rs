@@ -1,7 +1,11 @@
 import {
+  KSK_AUTOMATION_LOG_LEVEL,
+  KSK_AUTOMATION_LOG_LIMIT,
   KSK_AUTOMATION_STATE,
   KSK_PROVIDER_POLL_INTERVAL_SECONDS,
   parseKskProviderResponse,
+  type KskAutomationLogEntry,
+  type KskAutomationLogLevel,
   type KskAutomationStatus,
   type KskAutomationStatusEvent,
   type KskLivenessOptions,
@@ -58,9 +62,11 @@ const EMPTY_STATUS: KskAutomationStatus = {
   lastEmailedCount: 0,
   lastLocalAdminSyncedCount: 0,
   lastLocalAdminVerifiedCount: 0,
+  lastLocalAdminPrunedCount: 0,
   lastCleanupCheckedCount: 0,
   lastCleanupRemovedCount: 0,
-  lastCleanupRetainedCount: 0
+  lastCleanupRetainedCount: 0,
+  logs: []
 }
 
 interface KskAutomationRunnerDeps extends Omit<
@@ -99,6 +105,13 @@ class KskAutomationRunner {
    * 也避免把用户后来手动续费修好的号永久拒之门外。
    */
   private readonly invalidKeys = new Set<string>()
+  /**
+   * 运行日志环形缓冲。
+   *
+   * 不放在 status 里逐次 spread：status 到处被 `{ ...this.status, ... }` 覆写，
+   * 日志混在里面很容易被某个分支的旧快照回滚掉。快照时再拼进去。
+   */
+  private readonly logs: KskAutomationLogEntry[] = []
   private status: KskAutomationStatus
 
   constructor(
@@ -106,10 +119,11 @@ class KskAutomationRunner {
     initialStatus: KskAutomationStatus = EMPTY_STATUS
   ) {
     this.status = { ...initialStatus, running: false, nextRunAt: undefined }
+    this.logs.push(...(initialStatus.logs ?? []))
   }
 
   snapshot(): KskAutomationStatus {
-    return { ...this.status }
+    return { ...this.status, logs: [...this.logs] }
   }
 
   async start(): Promise<void> {
@@ -143,6 +157,7 @@ class KskAutomationRunner {
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
     this.stopped = false
+    this.log('手动触发立即执行')
     await this.runRound()
     return this.snapshot()
   }
@@ -162,6 +177,7 @@ class KskAutomationRunner {
     if (!task?.enabled) throw new Error('任务已暂停，请先恢复任务')
     if (!task.config.localAdminEnabled) throw new Error('任务未开启本机 Admin 同步')
     this.stopped = false
+    this.log('手动触发本机 Admin 同步')
     this.queueLocalAdminSync()
     while (this.localAdminPromise) await this.localAdminPromise
     return this.snapshot()
@@ -238,7 +254,10 @@ class KskAutomationRunner {
             })
           } catch {
             importFailureCount++
-            this.log(`第 ${index + 1} 条 Provider KSK 验活或入库失败`)
+            this.log(
+              `第 ${index + 1} 条 Provider KSK 验活或入库失败`,
+              KSK_AUTOMATION_LOG_LEVEL.WARN
+            )
             return null
           }
         }
@@ -279,14 +298,22 @@ class KskAutomationRunner {
               lastCleanupRemovedCount: cleanup.removed,
               lastCleanupRetainedCount: cleanup.retainedTransient
             }
+            this.log(`全量验活检查 ${cleanup.checked} 个账号，删除 ${cleanup.removed} 个失效号`)
             roundIssues.push(...cleanup.errors)
+            for (const issue of cleanup.errors) {
+              this.log(`全量验活：${issue}`, KSK_AUTOMATION_LOG_LEVEL.WARN)
+            }
             if (cleanup.retainedTransient > 0) {
               roundIssues.push(`保留 ${cleanup.retainedTransient} 个暂时无法确认的账号`)
+              this.log(
+                `保留 ${cleanup.retainedTransient} 个暂时无法确认的账号，待下轮复核`,
+                KSK_AUTOMATION_LOG_LEVEL.WARN
+              )
             }
           } catch (error) {
-            roundIssues.push(
-              `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
-            )
+            const message = `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
+            roundIssues.push(message)
+            this.log(message, KSK_AUTOMATION_LOG_LEVEL.ERROR)
           }
         }
 
@@ -312,6 +339,16 @@ class KskAutomationRunner {
         lastAddedCount: added.length,
         totalAddedCount: this.status.totalAddedCount + added.length,
         lastRejectedCount: rejectedKeys.length
+      }
+
+      const skippedCount = parsed.credentials.length - importable.length
+      this.log(
+        `本轮拉到 ${parsed.credentials.length} 条，新增 ${added.length} 个` +
+          (rejectedKeys.length > 0 ? `，验活未通过 ${rejectedKeys.length} 个` : '') +
+          (skippedCount > 0 ? `，跳过已知失效 ${skippedCount} 个` : '')
+      )
+      if (parsed.rejectedCount > 0) {
+        this.log(`忽略 ${parsed.rejectedCount} 条无效或重复记录`, KSK_AUTOMATION_LOG_LEVEL.WARN)
       }
 
       let emailedCount = 0
@@ -343,6 +380,7 @@ class KskAutomationRunner {
           // 只有发送成功才记账；失败时保留 pendingEmail 供下一轮重试
           for (const credential of pending) this.emailedKeys.add(credential.key)
           this.pendingEmail.clear()
+          this.log(`已发送新增通知邮件，包含 ${emailedCount} 个 KSK`)
         }
       } else {
         this.pendingEmail.clear()
@@ -376,7 +414,7 @@ class KskAutomationRunner {
         lastError: message,
         consecutiveFailures: this.status.consecutiveFailures + 1
       }
-      this.log(`轮询失败：${message}`)
+      this.log(`轮询失败：${message}`, KSK_AUTOMATION_LOG_LEVEL.ERROR)
     } finally {
       this.pushStatus()
       if (!this.stopped) this.scheduleNext(KSK_PROVIDER_POLL_INTERVAL_SECONDS * 1000)
@@ -414,9 +452,14 @@ class KskAutomationRunner {
         fetchImpl: this.deps.localAdminFetchImpl ?? this.deps.fetchImpl
       })
       if (removal.removed > 0) this.log(`已从本机 Admin 删除 ${removal.removed} 个失效凭据`)
+      for (const issue of removal.errors) {
+        this.log(`本机 Admin 删除失效凭据：${issue}`, KSK_AUTOMATION_LOG_LEVEL.WARN)
+      }
       return removal.errors
     } catch (error) {
-      return [`本机 Admin 清理失败：${error instanceof Error ? error.message : String(error)}`]
+      const message = `本机 Admin 清理失败：${error instanceof Error ? error.message : String(error)}`
+      this.log(message, KSK_AUTOMATION_LOG_LEVEL.ERROR)
+      return [message]
     }
   }
 
@@ -439,9 +482,27 @@ class KskAutomationRunner {
       const groupId = task?.config.localAdminGroupId
       if (!task?.enabled || !task.config.localAdminEnabled || !groupId) {
         this.lastLocalAdminIssues = []
+        // 这里静默返回过一段时间，表现就是「同步从没发生过」，必须留痕
+        if (task?.enabled && task.config.localAdminEnabled && !groupId) {
+          this.log('未选择同步分组，跳过本机 Admin 同步', KSK_AUTOMATION_LOG_LEVEL.WARN)
+          this.pushStatus()
+        }
         return
       }
       const accounts = await this.deps.readLocalAdminAccounts(groupId)
+      /*
+       * 一个都没读到时不做同步：残留清理是无条件的，空列表会把 Admin 上所有 api_key
+       * 凭据全删掉。分组选错、分组被删、账号还没导入都会命中这条，代价不对等。
+       */
+      if (accounts.length === 0) {
+        this.lastLocalAdminIssues = []
+        this.log(
+          '同步分组内没有可用的 Kiro API Key 账号，跳过本轮同步（不清理反代凭据）',
+          KSK_AUTOMATION_LOG_LEVEL.WARN
+        )
+        this.pushStatus()
+        return
+      }
       const result = await syncKskAccountsToLocalAdmin({
         accounts,
         baseUrl: task.config.localAdminBaseUrl,
@@ -453,10 +514,26 @@ class KskAutomationRunner {
         ...this.status,
         lastLocalAdminSyncedCount: result.synced,
         lastLocalAdminVerifiedCount: result.verified,
+        lastLocalAdminPrunedCount: result.pruned,
         lastError: result.errors.length > 0 ? result.errors.join('；') : this.status.lastError,
         state: result.errors.length > 0 ? KSK_AUTOMATION_STATE.DEGRADED : this.status.state
       }
       this.lastLocalAdminIssues = result.errors
+      for (const issue of result.errors) {
+        this.log(`本机 Admin 同步：${issue}`, KSK_AUTOMATION_LOG_LEVEL.WARN)
+      }
+      if (result.pruned > 0) {
+        this.log(
+          `已从本机 Admin 清理 ${result.pruned} 个本地已不存在的凭据：` +
+            result.prunedMaskedKeys.join('、')
+        )
+      }
+      if (result.synced > 0 || result.verified > 0) {
+        this.log(`已同步 ${result.synced} 个凭据到本机 Admin，其中 ${result.verified} 个验活通过`)
+      }
+      if (result.synced === 0 && result.pruned === 0 && result.errors.length === 0) {
+        this.log(`本机 Admin 已与本地一致，${result.skippedExisting} 个凭据无需变更`)
+      }
       this.pushStatus()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -466,7 +543,7 @@ class KskAutomationRunner {
         lastError: message
       }
       this.lastLocalAdminIssues = [message]
-      this.log(`本机 Admin 同步失败：${message}`)
+      this.log(`本机 Admin 同步失败：${message}`, KSK_AUTOMATION_LOG_LEVEL.ERROR)
       this.pushStatus()
     }
   }
@@ -475,7 +552,11 @@ class KskAutomationRunner {
     this.deps.notifyStatus(this.snapshot())
   }
 
-  private log(message: string): void {
+  private log(message: string, level: KskAutomationLogLevel = KSK_AUTOMATION_LOG_LEVEL.INFO): void {
+    this.logs.push({ at: Date.now(), level, message })
+    if (this.logs.length > KSK_AUTOMATION_LOG_LIMIT) {
+      this.logs.splice(0, this.logs.length - KSK_AUTOMATION_LOG_LIMIT)
+    }
     ;(this.deps.log ?? ((text) => console.log(text)))(
       `[KskAutomation:${this.deps.taskId}] ${message}`
     )
@@ -498,7 +579,8 @@ export class KskAutomationManager {
   }
 
   snapshot(taskId: string): KskAutomationStatus {
-    return this.runners.get(taskId)?.snapshot() ?? { ...EMPTY_STATUS }
+    // logs 单独复制：浅拷贝会让所有未启动任务共享 EMPTY_STATUS 的那一个数组
+    return this.runners.get(taskId)?.snapshot() ?? { ...EMPTY_STATUS, logs: [] }
   }
 
   async reloadTask(taskId: string): Promise<void> {

@@ -71,7 +71,8 @@ import {
   sendKskAutomationStatus
 } from './kskAutomation/ipc-handlers'
 import type { KskLivenessOptions, ProviderKskCredential } from '../shared/kskAutomation'
-import type { KskAutomationFetch } from './kskAutomation/localAdminClient'
+import type { KskAutomationFetch, LocalAdminProbeOutcome } from './kskAutomation/localAdminClient'
+import { LOCAL_ADMIN_PROBE_VERDICT, type LocalAdminPushCandidate } from '../shared/localAdminPush'
 import { LocalAdminStatsManager } from './localAdminStats/statsManager'
 import {
   registerLocalAdminStatsIpcHandlers,
@@ -1789,6 +1790,95 @@ async function probeKskAccountLiveness(
  * 每次新增账号后都跑一遍：Provider 给的号会随时挂（超额、被封、订阅到期），
  * 只在入库那一刻验过不够。判死的 key 会回给调用方，用于拉黑与清理反代。
  */
+/**
+ * 单账号推送到本机 Admin 后的可用性测试：用同一份凭据真发一条消息。
+ *
+ * 为什么不能只靠 Admin 的 balance 接口：超额号的 balance 照样通（见 credentialCleanup 的注释），
+ * 而且 balance 通不代表 Admin 拿这份凭据能刷到 token——authMethod 推错时 balance 也可能过。
+ * 所以这里走和账号页「验活」按钮同一条路径（callKiroApi + 同一句测试消息）。
+ *
+ * OAuth 账号只有 refreshToken 时先换一次 accessToken：callKiroApi 要的是 accessToken，
+ * 而推送 candidate 里没有它。刷新按账号自己的 authMethod 选 social / OIDC 端点。
+ */
+async function probeLocalAdminPushCandidateLiveness(
+  candidate: LocalAdminPushCandidate
+): Promise<LocalAdminProbeOutcome> {
+  const isApiKey = candidate.credentialKind === 'kiro_api_key' || Boolean(candidate.kiroApiKey)
+  const region = candidate.region?.trim() || 'us-east-1'
+
+  let probeAccount: ProxyAccount
+  if (isApiKey) {
+    const key = candidate.kiroApiKey?.trim()
+    if (!key) {
+      return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Kiro API Key' }
+    }
+    probeAccount = {
+      id: 'local-admin-push-probe',
+      credentialKind: 'kiro_api_key',
+      kiroApiKey: key,
+      region,
+      provider: 'BuilderId'
+    }
+  } else {
+    const refreshToken = candidate.refreshToken?.trim()
+    if (!refreshToken) {
+      return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Refresh Token' }
+    }
+    const refreshed = await refreshUnmanagedKiroCredentials(
+      refreshToken,
+      candidate.clientId?.trim() || '',
+      candidate.clientSecret?.trim() || '',
+      region,
+      candidate.authMethod === 'social' ? 'social' : undefined
+    )
+    if (!refreshed.success || !refreshed.accessToken) {
+      /*
+       * 刷不出 accessToken 就是这份凭据废了：Admin 每次调用都要先刷 token，
+       * 这一步过不去它在 Admin 里也一样不能用，按永久失效处理并回滚。
+       */
+      return {
+        verdict: LOCAL_ADMIN_PROBE_VERDICT.PERMANENTLY_INVALID,
+        error: refreshed.error || '刷新 Access Token 失败'
+      }
+    }
+    probeAccount = {
+      id: 'local-admin-push-probe',
+      accessToken: refreshed.accessToken,
+      refreshToken,
+      clientId: candidate.clientId,
+      clientSecret: candidate.clientSecret,
+      region,
+      authMethod: candidate.authMethod,
+      provider: 'BuilderId'
+    }
+  }
+
+  const model = await resolveKskLivenessModelId(probeAccount)
+  const message = resolveKskLivenessMessage()
+  try {
+    const verdict = await probeKskAccountLiveness(probeAccount, model, message)
+    if (verdict === KSK_PROBE_VERDICT.ALIVE) {
+      return { verdict: LOCAL_ADMIN_PROBE_VERDICT.ALIVE }
+    }
+    return {
+      verdict:
+        verdict === KSK_PROBE_VERDICT.PERMANENTLY_INVALID
+          ? LOCAL_ADMIN_PROBE_VERDICT.PERMANENTLY_INVALID
+          : LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT,
+      error:
+        verdict === KSK_PROBE_VERDICT.PERMANENTLY_INVALID
+          ? '发消息验活失败：账号已失效（认证失败 / 封禁 / 配额耗尽）'
+          : '发消息验活暂时无法确认（超时 / 限流 / 上游 5xx）'
+    }
+  } catch (error) {
+    // 探针自身出错（不是上游拒绝）不能算账号失效
+    return {
+      verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT,
+      error: error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
 async function cleanupInvalidStoredKskAccounts(
   groupId: string | undefined,
   liveness: KskLivenessOptions = {}
@@ -2677,7 +2767,8 @@ app.whenReady().then(async () => {
   registerKskAutomationIpcHandlers({
     getManager: () => kskAutomationManager,
     getMainWindow: () => mainWindow,
-    localAdminFetchImpl
+    localAdminFetchImpl,
+    probeLocalAdminPushLiveness: probeLocalAdminPushCandidateLiveness
   })
   void kskAutomationManager.start().catch((err) => {
     console.warn('[KskAutomation] Failed to start:', err)

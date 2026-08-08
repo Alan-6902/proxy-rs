@@ -23,6 +23,7 @@ import type {
   KskHunterSnapshot,
   KskHunterStatusEvent
 } from '../shared/kskHunter'
+import type { HunterReport } from '../shared/hunterReport'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminStatsSnapshot,
@@ -1214,6 +1215,12 @@ const api = {
 
   kskHunterDeleteDelivery: (deliveryId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
     ipcRenderer.invoke('ksk-hunter-delete-delivery', deliveryId),
+
+  kskHunterReport: (days?: number): Promise<IdcIpcResult<HunterReport>> =>
+    ipcRenderer.invoke('ksk-hunter-report', days),
+
+  kskHunterRevealReportFile: (): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke('ksk-hunter-reveal-report-file'),
 
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: KskHunterStatusEvent): void => {

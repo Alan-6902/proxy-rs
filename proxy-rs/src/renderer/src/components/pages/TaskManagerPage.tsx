@@ -1,24 +1,30 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
+  ChevronDown,
+  ChevronRight,
   CirclePause,
   CirclePlay,
   CloudDownload,
   Edit3,
+  Eraser,
   ListChecks,
   Loader2,
   Mail,
   Play,
   Plus,
   RefreshCw,
+  ScrollText,
   ServerCog,
   ShieldOff,
   Trash2,
   TriangleAlert
 } from 'lucide-react'
 import {
+  KSK_AUTOMATION_LOG_LEVEL,
   KSK_AUTOMATION_STATE,
   KSK_PROVIDER_POLL_INTERVAL_SECONDS,
+  type KskAutomationLogEntry,
   type KskAutomationTaskInput,
   type KskAutomationTaskView
 } from '../../../../shared/kskAutomation'
@@ -29,8 +35,81 @@ import { Badge, Button, Card, CardContent, PageHeader, askConfirm } from '../ui'
 type TaskAction = 'toggle' | 'run' | 'local' | 'delete'
 type BusyAction = { taskId: string; action: TaskAction } | null
 
+/** 日志级别配色：只染级别列与告警正文，正常条目保持中性，避免整片日志发色。 */
+const LOG_LEVEL_COLORS: Record<string, string> = {
+  [KSK_AUTOMATION_LOG_LEVEL.INFO]: 'text-muted-foreground',
+  [KSK_AUTOMATION_LOG_LEVEL.WARN]: 'text-amber-600 dark:text-amber-400',
+  [KSK_AUTOMATION_LOG_LEVEL.ERROR]: 'text-red-600 dark:text-red-400'
+}
+
 function formatTime(value?: number): string {
   return value ? new Date(value).toLocaleString() : '—'
+}
+
+function formatClock(value: number): string {
+  return new Date(value).toLocaleTimeString()
+}
+
+/** 同步到本机 Admin 用的分组名。未选分组时同步会整轮跳过，得让界面说出来。 */
+function syncGroupName(
+  task: KskAutomationTaskView,
+  groupNames: ReadonlyMap<string, string>
+): string {
+  const groupId = task.config.localAdminGroupId
+  if (!groupId) return '未选择'
+  return groupNames.get(groupId) || '分组已删除'
+}
+
+function TaskLogPanel({ logs }: { logs: KskAutomationLogEntry[] }): React.ReactNode {
+  const [open, setOpen] = useState(false)
+  const latest = logs[logs.length - 1]
+
+  return (
+    <div className="mt-4 border-t border-border/60 pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+        )}
+        <ScrollText className="h-3.5 w-3.5 shrink-0" />
+        <span className="font-medium">同步日志</span>
+        <span className="tabular-nums">· {logs.length} 条</span>
+        {!open && latest && (
+          <span className="ml-auto truncate pl-2 text-right">最近 {formatClock(latest.at)}</span>
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-border/60 bg-muted/15 p-2">
+          {logs.length === 0 ? (
+            <p className="px-1 py-2 text-xs text-muted-foreground">
+              暂无日志，任务运行后会记录在这里。
+            </p>
+          ) : (
+            <ul className="space-y-0.5 font-mono text-[11px] leading-5">
+              {/* 最新在上：卡片里的可视区域只有几行，倒序省掉每次都要滚到底 */}
+              {[...logs].reverse().map((entry, index) => (
+                <li key={`${entry.at}-${index}`} className="flex gap-2">
+                  <span className="shrink-0 tabular-nums text-muted-foreground/70">
+                    {formatClock(entry.at)}
+                  </span>
+                  <span className={`min-w-0 break-words ${LOG_LEVEL_COLORS[entry.level] ?? ''}`}>
+                    {entry.message}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function statusLabel(task: KskAutomationTaskView): string {
@@ -375,7 +454,19 @@ export function TaskManagerPage(): React.ReactNode {
                       )}
                       {task.config.localAdminEnabled && (
                         <div className="flex items-center gap-2 text-muted-foreground">
-                          <ServerCog className="h-3.5 w-3.5" /> 本机 Admin 同步已开启
+                          <ServerCog className="h-3.5 w-3.5" />
+                          本机 Admin 同步已开启
+                          {/* 同步分组与拉取分组是两个独立配置，同步方向以这个为准，必须显式标出 */}
+                          <span className="truncate">
+                            · 同步组 {syncGroupName(task, groupNames)}
+                          </span>
+                        </div>
+                      )}
+                      {task.status.lastLocalAdminPrunedCount > 0 && (
+                        <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
+                          <Eraser className="h-3.5 w-3.5" />
+                          上轮从本机 Admin 清理 {task.status.lastLocalAdminPrunedCount}{' '}
+                          个本地已不存在的凭据
                         </div>
                       )}
                       {task.status.lastRejectedCount > 0 && (
@@ -403,7 +494,9 @@ export function TaskManagerPage(): React.ReactNode {
                       </div>
                     )}
 
-                    <div className="mt-5 flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                    <TaskLogPanel logs={task.status.logs ?? []} />
+
+                    <div className="mt-3 flex flex-wrap gap-2 border-t border-border/60 pt-4">
                       <Button
                         size="sm"
                         variant={task.enabled ? 'outline' : 'default'}

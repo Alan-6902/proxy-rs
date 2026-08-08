@@ -23,7 +23,8 @@ import { parseKskEmailRecipients } from './emailNotifier'
 import {
   pushAccountToLocalAdmin,
   resolveLocalAdminApiBase,
-  type KskAutomationFetch
+  type KskAutomationFetch,
+  type LocalAdminProbeOutcome
 } from './localAdminClient'
 import type { KskAutomationManager } from './syncManager'
 
@@ -51,6 +52,10 @@ export interface KskAutomationIpcDeps {
   getMainWindow: () => BrowserWindow | null
   /** 直连本机 Admin 的 fetch（不走应用代理），与自动同步链路共用同一实现。 */
   localAdminFetchImpl: KskAutomationFetch
+  /** 推进 Admin 后用同一份凭据发一条消息验活；判死时调用方会回滚删除该凭据。 */
+  probeLocalAdminPushLiveness: (
+    candidate: LocalAdminPushCandidate
+  ) => Promise<LocalAdminProbeOutcome>
 }
 
 function sendEvent(
@@ -293,7 +298,8 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
             baseUrl: target.baseUrl,
             adminApiKey: target.adminApiKey,
             timeoutSeconds: target.timeoutSeconds,
-            fetchImpl: deps.localAdminFetchImpl
+            fetchImpl: deps.localAdminFetchImpl,
+            probeLiveness: deps.probeLocalAdminPushLiveness
           })
         }
       } catch (error) {

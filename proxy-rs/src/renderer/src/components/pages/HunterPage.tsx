@@ -36,6 +36,7 @@ import {
 import type { IdcIpcResult } from '../../../../shared/idcSeats'
 import { useAccountsStore } from '../../store/accounts'
 import { HunterLinkEditorDialog } from '../automation/HunterLinkEditorDialog'
+import { HunterReportCard } from '../automation/HunterReportCard'
 import {
   Badge,
   Button,
@@ -522,6 +523,9 @@ export function HunterPage(): React.ReactNode {
             </CardContent>
           </Card>
         )}
+
+        {/* 历史报表：数据来自独立的事件流文件，按需拉取而非跟着状态事件刷 */}
+        <HunterReportCard />
 
         {/* 全局配置 */}
         <Card className="mb-5 border-border/70 bg-card/70">

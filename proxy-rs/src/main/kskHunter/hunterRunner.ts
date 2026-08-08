@@ -35,6 +35,14 @@ import {
 } from '../../shared/kskHunter'
 import { maskKiroApiKey } from '../../shared/kiroApiKey'
 import {
+  HUNTER_REPORT_EVENT,
+  summarizeHunterReport,
+  type HunterReport,
+  type HunterReportEvent,
+  type HunterReportEventType
+} from '../../shared/hunterReport'
+import { appendHunterReportEvent, loadHunterReportEvents } from './reportStore'
+import {
   appendKskHunterDelivery,
   appendKskHunterSpend,
   patchKskHunterDelivery,
@@ -94,7 +102,29 @@ export interface KskHunterDeps {
   notifyAccountsChanged: () => void
   /** 推送状态快照给渲染进程。 */
   notifySnapshot: () => void
+  /** 报表事件流的读写；默认落 userData 下的 JSONL，测试里可换成内存实现。 */
+  appendReportEvent?: (event: HunterReportEvent) => Promise<void>
+  readReportEvents?: () => Promise<HunterReportEvent[]>
   log?: (message: string) => void
+}
+
+/**
+ * 从推送记录还原报表事件需要的链接信息。
+ *
+ * 推送可能发生在链接被删掉之后（队列里的号必须继续推），所以链接查不到时
+ * 用记录上冗余的 channel 与 linkName 兜底。两者都缺（v2 以前的老记录）时
+ * 回落到第一个渠道：报表里错归一个渠道，比整条事件丢掉更可接受。
+ */
+function deliveryReportLink(
+  delivery: PersistedKskHunterDelivery,
+  store: PersistedKskHunterStore
+): Pick<PersistedKskHunterLink, 'id' | 'name' | 'channel'> {
+  const link = store.links.find((item) => item.id === delivery.linkId)
+  return {
+    id: delivery.linkId,
+    name: link?.name ?? delivery.linkName,
+    channel: link?.channel ?? delivery.channel ?? KSK_HUNTER_CHANNEL.KIRO_MARKET
+  }
 }
 
 const EMPTY_STATUS: KskHunterStatus = {
@@ -123,9 +153,50 @@ export class KskHunterManager {
   /** 熔断发生在哪一天（本地日期键）。跨天后据此解除熔断，不需要额外定时器。 */
   private budgetBlockDate: string | null = null
   private readonly balanceCache = new HunterBalanceCache()
+  /**
+   * 已记过 blocked 事件的「日期|链接|原因」。
+   *
+   * 预算拦单会在每一轮（3 秒）重复触发，逐次记会把事件流刷爆且报表失真——
+   * 用户想知道的是「今天这个渠道被拦过」，不是「被拦了 28800 次」。
+   */
+  private readonly loggedBlocks = new Set<string>()
   private status: KskHunterStatus = { ...EMPTY_STATUS }
 
   constructor(private readonly deps: KskHunterDeps) {}
+
+  /**
+   * 记一条报表事件。
+   *
+   * 刻意吞掉写盘错误：报表是观测数据，磁盘满了也不该让抢号主流程失败。
+   */
+  private recordReportEvent(
+    type: HunterReportEventType,
+    link: Pick<PersistedKskHunterLink, 'id' | 'name' | 'channel'>,
+    extra: Partial<Omit<HunterReportEvent, 'at' | 'type' | 'channel' | 'linkId' | 'linkName'>> = {}
+  ): void {
+    const append = this.deps.appendReportEvent ?? appendHunterReportEvent
+    void append({
+      at: Date.now(),
+      type,
+      channel: link.channel,
+      linkId: link.id,
+      linkName: link.name,
+      ...extra
+    }).catch((error) => {
+      this.log(`报表事件写入失败：${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /** 当前报表。days 省略时用共享层的默认窗口。 */
+  async report(days?: number, store?: PersistedKskHunterStore): Promise<HunterReport> {
+    const source = store ?? (await this.deps.readStore())
+    const read = this.deps.readReportEvents ?? loadHunterReportEvents
+    return summarizeHunterReport({
+      events: await read(),
+      billing: source.config.billing,
+      days
+    })
+  }
 
   snapshotStatus(): KskHunterStatus {
     return { ...this.status }
@@ -276,11 +347,20 @@ export class KskHunterManager {
       const offers = parseChannelOffers(link.channel, payload).filter(
         (offer) => offer.stock > 0 && matchesHunterRegions(link.regions, offer.region)
       )
+      // 放货只记「无货 → 有货」这一刻：一批货会被连着几十轮都发现，逐轮记会把
+      // 事件流刷爆，也会让「放货次数」这个指标失去意义
+      const wasInStock = this.linkRuntimeOf(link.id).lastInStock
       this.linkRuntime.set(link.id, {
         lastInStock: offers.length > 0,
         lastCheckedAt: Date.now(),
         lastError: undefined
       })
+      if (offers.length > 0 && !wasInStock) {
+        this.recordReportEvent(HUNTER_REPORT_EVENT.RESTOCK, link, {
+          offerCount: offers.length,
+          region: offers[0].region || undefined
+        })
+      }
       if (offers.length === 0) return true
 
       this.status = {
@@ -417,6 +497,22 @@ export class KskHunterManager {
     })
   }
 
+  /**
+   * 同一天、同一链接、同一原因的拦单只记一条报表事件。
+   *
+   * 去重键带日期，所以跨天会自然重新记一次，不需要在跨天时清理这个集合。
+   */
+  private recordBlockOnce(
+    link: PersistedKskHunterLink,
+    reason: KskHunterBudgetBlock,
+    date: string
+  ): void {
+    const dedupeKey = `${date}|${link.id}|${reason}`
+    if (this.loggedBlocks.has(dedupeKey)) return
+    this.loggedBlocks.add(dedupeKey)
+    this.recordReportEvent(HUNTER_REPORT_EVENT.BLOCKED, link, { reason })
+  }
+
   /** 记录熔断状态并提醒一次；通知去重由 LocalNotificationService 负责。 */
   private applyBudgetBlock(
     link: PersistedKskHunterLink,
@@ -426,6 +522,7 @@ export class KskHunterManager {
     balanceUnit?: number
   ): void {
     const billing = store.config.billing[link.channel] ?? DEFAULT_KSK_HUNTER_CHANNEL_BILLING
+    this.recordBlockOnce(link, reason, spend.date)
 
     if (reason === KSK_HUNTER_BUDGET_BLOCK.UNKNOWN_PRICE) {
       // 未知价格是逐商品的问题，不是预算耗尽，不进熔断状态
@@ -508,6 +605,7 @@ export class KskHunterManager {
       id: randomUUID(),
       linkId: link.id,
       linkName: link.name,
+      channel: link.channel,
       key: credential.key,
       region: credential.region,
       state: KSK_HUNTER_DELIVERY_STATE.PENDING,
@@ -529,6 +627,13 @@ export class KskHunterManager {
       at: now
     })
 
+    this.recordReportEvent(HUNTER_REPORT_EVENT.ORDERED, link, {
+      region: credential.region,
+      costUnit: budget.costUnit,
+      costCny: budget.costCny,
+      unitLabel
+    })
+
     if (store.config.notifyOnAutoOrder) {
       this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region })
     }
@@ -546,6 +651,7 @@ export class KskHunterManager {
         state: KSK_HUNTER_DELIVERY_STATE.DEAD_KEY,
         lastError: `验活失败：${message}`
       })
+      this.recordReportEvent(HUNTER_REPORT_EVENT.DEAD_KEY, link, { region: credential.region })
       this.log(`已购 ${maskedKey} 验活失败，不推送下游：${message}`)
       await this.refreshDeliveryCounters()
       return
@@ -637,6 +743,9 @@ export class KskHunterManager {
         nextAttemptAt: undefined,
         lastError: undefined
       })
+      this.recordReportEvent(HUNTER_REPORT_EVENT.DELIVERED, deliveryReportLink(delivery, store), {
+        region: delivery.region || undefined
+      })
       this.status = { ...this.status, totalDelivered: this.status.totalDelivered + 1 }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -647,6 +756,14 @@ export class KskHunterManager {
         nextAttemptAt: exhausted ? undefined : Date.now() + hunterRetryDelayMs(attempts),
         lastError: message
       })
+      // 只在重试耗尽时记事件：每次失败都记会把一条号的 6 次重试算成 6 次失败
+      if (exhausted) {
+        this.recordReportEvent(
+          HUNTER_REPORT_EVENT.DELIVERY_FAILED,
+          deliveryReportLink(delivery, store),
+          { region: delivery.region || undefined }
+        )
+      }
       this.log(
         `推送 ${maskKiroApiKey(delivery.key)} 失败（第 ${attempts} 次）：${message}` +
           (exhausted ? ' · 重试已耗尽，需人工处理' : '')

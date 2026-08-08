@@ -5,6 +5,7 @@ import {
   Ban,
   ChartLine,
   CheckCircle2,
+  Flame,
   Gauge,
   Loader2,
   RefreshCw,
@@ -14,13 +15,18 @@ import {
 } from 'lucide-react'
 import {
   LOCAL_ADMIN_ALERT,
+  LOCAL_ADMIN_REPORT_ALL_HOURS,
   LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS,
   LOCAL_ADMIN_STATS_STATE,
+  LOCAL_ADMIN_USAGE_BUCKET_RETENTION_HOURS,
+  buildLocalAdminReport,
+  toLocalDateKey,
   type LocalAdminAlert,
   type LocalAdminCredentialStats,
+  type LocalAdminReportHour,
   type LocalAdminStatsSnapshot
 } from '../../../../shared/localAdminStats'
-import { Badge, Button, Card, CardContent, PageHeader, askConfirm } from '../ui'
+import { Badge, Button, Card, CardContent, Input, PageHeader, Select, askConfirm } from '../ui'
 import { TrendChart, type TrendSeries } from '../stats/TrendChart'
 import { cn } from '@/lib/utils'
 
@@ -41,6 +47,15 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: SORT_KEY.FAILURE, label: '失败次数' },
   { key: SORT_KEY.LAST_USED, label: '最后调用' },
   { key: SORT_KEY.USAGE, label: '剩余用量' }
+]
+
+/** 小时下拉的选项：全天 + 00:00~23:00。 */
+const HOUR_OPTIONS = [
+  { value: LOCAL_ADMIN_REPORT_ALL_HOURS, label: '全天' },
+  ...Array.from({ length: 24 }, (_, hour) => ({
+    value: String(hour),
+    label: `${`${hour}`.padStart(2, '0')}:00 — ${`${hour}`.padStart(2, '0')}:59`
+  }))
 ]
 
 const ALERT_LABEL: Record<LocalAdminAlert, { text: string; tone: string }> = {
@@ -205,6 +220,9 @@ export function ProxyStatsPage(): React.ReactNode {
   const [onlyAlerts, setOnlyAlerts] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // 报表窗口：默认看今天全天
+  const [reportDate, setReportDate] = useState(() => toLocalDateKey(Date.now()))
+  const [reportHour, setReportHour] = useState<string>(LOCAL_ADMIN_REPORT_ALL_HOURS)
 
   const load = useCallback(async (): Promise<void> => {
     const result = await window.api.localAdminStatsSnapshot()
@@ -277,11 +295,62 @@ export function ProxyStatsPage(): React.ReactNode {
     setNotice('趋势数据已清空')
   }, [])
 
+  /** 跳到当前小时：跨天时日期也要一起更新，否则会停在昨天的同一小时。 */
+  const selectNow = useCallback((): void => {
+    const now = Date.now()
+    setReportDate(toLocalDateKey(now))
+    setReportHour(String(new Date(now).getHours()))
+  }, [])
+
+  const handleClearBuckets = useCallback(async (): Promise<void> => {
+    const confirmed = await askConfirm({
+      title: '清空消耗报表',
+      description:
+        '按小时的消耗记录全靠本地差分攒出来，Admin 不保存历史。清空后这 7 天的报表无法恢复，下一轮采样会重新建立基线。',
+      confirmText: '清空',
+      tone: 'danger'
+    })
+    if (!confirmed) return
+    const result = await window.api.localAdminStatsClearBuckets()
+    if (!result.success) {
+      setError(result.error || '清空失败')
+      return
+    }
+    setSnapshot(result.data)
+    setNotice('消耗报表已清空')
+  }, [])
+
   const credentials = useMemo(() => {
     const list = snapshot?.credentials ?? []
     const filtered = onlyAlerts ? list.filter((item) => item.alerts.length > 0) : list
     return [...filtered].sort((a, b) => compareCredentials(a, b, sortKey))
   }, [snapshot, sortKey, onlyAlerts])
+
+  const hour: LocalAdminReportHour =
+    reportHour === LOCAL_ADMIN_REPORT_ALL_HOURS ? LOCAL_ADMIN_REPORT_ALL_HOURS : Number(reportHour)
+
+  /** 报表按窗口现算：桶数据量小（7 天 × 24 小时 × 凭据数），不值得再缓存一层。 */
+  const report = useMemo(
+    () =>
+      buildLocalAdminReport({
+        buckets: snapshot?.buckets ?? [],
+        range: { date: reportDate, hour },
+        now: Date.now(),
+        presentIds: (snapshot?.credentials ?? []).map((item) => item.id)
+      }),
+    [snapshot, reportDate, hour]
+  )
+
+  /** 报表行按 id 索引，供凭据明细表补「本窗口消耗」列。 */
+  const reportById = useMemo(() => new Map(report.rows.map((row) => [row.id, row])), [report])
+
+  /** KPI 与表头共用的窗口标签，避免「本小时/今天」两处写法不一致。 */
+  const rangeLabel =
+    reportHour === LOCAL_ADMIN_REPORT_ALL_HOURS
+      ? reportDate === toLocalDateKey(Date.now())
+        ? '今天'
+        : reportDate
+      : `${`${hour}`.padStart(2, '0')}:00`
 
   const trend = useMemo(() => {
     const samples = snapshot?.samples ?? []
@@ -394,6 +463,57 @@ export function ProxyStatsPage(): React.ReactNode {
           </div>
         )}
 
+        {/* 报表窗口过滤器：放在最上方，KPI 的「本窗口」数与下方报表都跟着它走 */}
+        <Card>
+          <CardContent className="flex flex-wrap items-end gap-3 p-4">
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground" htmlFor="proxy-stats-report-date">
+                日期
+              </label>
+              <Input
+                id="proxy-stats-report-date"
+                type="date"
+                className="h-9 w-[9.5rem]"
+                value={reportDate}
+                max={toLocalDateKey(Date.now())}
+                min={toLocalDateKey(
+                  Date.now() - (LOCAL_ADMIN_USAGE_BUCKET_RETENTION_HOURS - 1) * 3_600_000
+                )}
+                onChange={(event) => setReportDate(event.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <span className="block text-xs text-muted-foreground">小时</span>
+              <Select
+                className="w-[11.5rem]"
+                value={reportHour}
+                options={HOUR_OPTIONS}
+                onChange={setReportHour}
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => selectNow()}>
+                本小时
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setReportDate(toLocalDateKey(Date.now()))
+                  setReportHour(LOCAL_ADMIN_REPORT_ALL_HOURS)
+                }}
+              >
+                今天
+              </Button>
+            </div>
+            <p className="ml-auto max-w-[22rem] text-xs text-muted-foreground">
+              {report.hoursWithData === 0
+                ? '该时段没有采样。消耗量按相邻两次采样的差值算，需要应用保持运行。'
+                : `该时段共 ${report.hoursWithData} 个小时有采样 · 保留最近 7 天`}
+            </p>
+          </CardContent>
+        </Card>
+
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="成功次数"
@@ -427,13 +547,161 @@ export function ProxyStatsPage(): React.ReactNode {
             }
             hint={
               totals && totals.usageSampleCount > 0
-                ? `已用 ${formatPercent(totals.usagePercentUsed)} · ${totals.usageSampleCount} 条已查`
+                ? `已用 ${formatUsage(totals.usageCurrent)}（${formatPercent(totals.usagePercentUsed)}）· ${totals.usageSampleCount} 条已查`
                 : '点右上「刷新用量」获取'
             }
             icon={Gauge}
             accent={SERIES_COLOR.usage}
           />
         </section>
+
+        {/* 本窗口消耗：过滤器选定时段内的增量，与上方累计 KPI 是不同口径 */}
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard
+            label={`${rangeLabel} 消耗`}
+            value={formatUsage(report.usageDelta)}
+            hint={
+              totals && totals.usageLimit > 0
+                ? `占总额度 ${formatPercent(report.usageDelta / totals.usageLimit)}`
+                : '额度上限未知'
+            }
+            icon={Flame}
+            accent="#f59e0b"
+          />
+          <KpiCard
+            label={`${rangeLabel} 成功`}
+            value={formatNumber(report.successDelta)}
+            hint={`${report.rows.length} 个账号有记录`}
+            icon={CheckCircle2}
+            accent={SERIES_COLOR.success}
+          />
+          <KpiCard
+            label={`${rangeLabel} 失败`}
+            value={formatNumber(report.failureDelta)}
+            hint={`刷新失败 ${formatNumber(report.refreshFailureDelta)}`}
+            icon={XCircle}
+            accent={SERIES_COLOR.failure}
+            tone={report.failureDelta > 0 ? 'danger' : 'default'}
+          />
+          <KpiCard
+            label="平均每次消耗"
+            value={
+              report.successDelta > 0 ? formatUsage(report.usageDelta / report.successDelta) : '—'
+            }
+            hint={report.successDelta > 0 ? '窗口内消耗 / 成功次数' : '窗口内没有成功调用'}
+            icon={Activity}
+            accent="#a855f7"
+          />
+        </section>
+
+        {/* 逐账号消耗报表：含已从 Admin 删除的凭据，否则换号后这段消耗就查无对证 */}
+        <Card>
+          <CardContent className="space-y-3 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-medium">账号消耗明细 · {rangeLabel}</h2>
+                <p className="text-xs text-muted-foreground">
+                  按相邻两次采样的差值累加，每 {LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS} 秒一轮。
+                  额度按月重置或凭据被换掉时，该轮增量按 0 计，不会出现负值。
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleClearBuckets()}
+                disabled={(snapshot?.buckets.length ?? 0) === 0}
+              >
+                <Trash2 className="h-4 w-4" />
+                清空报表
+              </Button>
+            </div>
+
+            {report.rows.length === 0 ? (
+              <div className="grid h-24 place-items-center rounded-xl border border-dashed border-border/60 text-sm text-muted-foreground">
+                {unconfigured ? '未配置本机 Admin' : '该时段暂无消耗记录'}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px] text-sm">
+                  <thead>
+                    <tr className="border-b border-border/60 text-xs text-muted-foreground">
+                      <th className="px-2 py-2 text-left font-medium">账号</th>
+                      <th className="px-2 py-2 text-right font-medium">消耗额度</th>
+                      <th className="px-2 py-2 text-right font-medium">占比</th>
+                      <th className="px-2 py-2 text-right font-medium">成功</th>
+                      <th className="px-2 py-2 text-right font-medium">失败</th>
+                      <th className="px-2 py-2 text-right font-medium">当前水位</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.rows.map((row) => (
+                      <tr key={row.id} className="border-b border-border/40 last:border-0">
+                        <td className="px-2 py-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium">#{row.id}</span>
+                            {row.maskedKey && (
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {row.maskedKey}
+                              </span>
+                            )}
+                            {!row.present && (
+                              <Badge
+                                variant="outline"
+                                className="px-1.5 py-0 text-[10px] text-muted-foreground"
+                              >
+                                已移除
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-2 text-right font-medium tabular-nums text-amber-600 dark:text-amber-400">
+                          {formatUsage(row.usageDelta)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
+                          {report.usageDelta > 0
+                            ? formatPercent(row.usageDelta / report.usageDelta)
+                            : '—'}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {formatNumber(row.successDelta)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-2 py-2 text-right tabular-nums',
+                            row.failureDelta > 0 && 'font-medium text-red-500'
+                          )}
+                        >
+                          {formatNumber(row.failureDelta)}
+                        </td>
+                        <td className="px-2 py-2 text-right text-xs tabular-nums text-muted-foreground">
+                          {row.usageCurrent !== undefined
+                            ? `${formatUsage(row.usageCurrent)}${row.usageLimit ? ` / ${formatUsage(row.usageLimit)}` : ''}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t border-border/60 text-xs">
+                      <td className="px-2 py-2 font-medium">合计</td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
+                        {formatUsage(report.usageDelta)}
+                      </td>
+                      <td className="px-2 py-2" />
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
+                        {formatNumber(report.successDelta)}
+                      </td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
+                        {formatNumber(report.failureDelta)}
+                      </td>
+                      <td className="px-2 py-2" />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardContent className="space-y-2 p-4">
@@ -524,10 +792,12 @@ export function ProxyStatsPage(): React.ReactNode {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[860px] text-sm">
+                <table className="w-full min-w-[1040px] text-sm">
                   <thead>
                     <tr className="border-b border-border/60 text-xs text-muted-foreground">
                       <th className="px-2 py-2 text-left font-medium">凭据</th>
+                      <th className="px-2 py-2 text-right font-medium">{rangeLabel} 消耗</th>
+                      <th className="px-2 py-2 text-right font-medium">已用额度</th>
                       <th className="px-2 py-2 text-right font-medium">成功</th>
                       <th className="px-2 py-2 text-right font-medium">失败</th>
                       <th className="px-2 py-2 text-right font-medium">刷新失败</th>
@@ -569,6 +839,29 @@ export function ProxyStatsPage(): React.ReactNode {
                               .filter(Boolean)
                               .join(' · ') || '—'}
                           </p>
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {(() => {
+                            const row = reportById.get(credential.id)
+                            if (!row || row.usageDelta <= 0) {
+                              return <span className="text-muted-foreground">—</span>
+                            }
+                            return (
+                              <span
+                                className="font-medium text-amber-600 dark:text-amber-400"
+                                title={`${rangeLabel}内成功 ${formatNumber(row.successDelta)} 次`}
+                              >
+                                {formatUsage(row.usageDelta)}
+                              </span>
+                            )
+                          })()}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {credential.usage ? (
+                            formatUsage(credential.usage.current)
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
                         </td>
                         <td className="px-2 py-2 text-right tabular-nums">
                           {formatNumber(credential.successCount)}

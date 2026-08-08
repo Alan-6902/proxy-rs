@@ -100,6 +100,7 @@ export interface LocalAdminStatsTotals {
   successRate?: number
   /** 有用量数据的凭据条数 */
   usageSampleCount: number
+  /** 已消耗的额度合计，KPI 里的「对应量」 */
   usageCurrent: number
   usageLimit: number
   usageRemaining: number
@@ -138,6 +139,8 @@ export interface LocalAdminStatsSnapshot {
   totals: LocalAdminStatsTotals
   credentials: LocalAdminCredentialStats[]
   samples: LocalAdminStatsSample[]
+  /** 按小时的消耗桶，报表过滤器的数据源 */
+  buckets: LocalAdminHourlyBucket[]
 }
 
 /** 手动刷新用量的结果汇总。 */
@@ -209,4 +212,276 @@ export function resolveLocalAdminAlerts(input: {
     }
   }
   return alerts
+}
+
+/* ------------------------------------------------------------------ *
+ * 按小时的消耗报表
+ *
+ * Admin 只回累计值（successCount 单调增、currentUsage 按月累计），要回答
+ * 「这个小时每个账号消耗了多少」只能靠相邻两次观测做差分，再按小时归桶。
+ *
+ * 差分的两个坑，都在 diffLocalAdminCounter 里兜住：
+ * - 计数会归零：Admin 重启清空失败计数，额度到 nextResetAt 按月重置；
+ * - 凭据会换：抢号器删旧增新，id 还可能被复用。首次见到一条凭据时只记基线、
+ *   不记增量，否则会把它入库前的历史用量算成本小时的消耗。
+ * ------------------------------------------------------------------ */
+
+/** 小时桶保留时长：7 天 = 168 小时。 */
+export const LOCAL_ADMIN_USAGE_BUCKET_RETENTION_HOURS = 168
+
+/** 「全天」在小时过滤器里的取值。 */
+export const LOCAL_ADMIN_REPORT_ALL_HOURS = 'all'
+
+export type LocalAdminReportHour = number | typeof LOCAL_ADMIN_REPORT_ALL_HOURS
+
+/** 单个凭据在某个小时内的增量。都是差分结果，可以直接相加。 */
+export interface LocalAdminHourlyCredentialDelta {
+  id: string
+  /** 观测时的脱敏 Key，凭据被删后报表仍能显示它是谁 */
+  maskedKey?: string
+  /** 该小时新增的额度消耗（Kiro credits） */
+  usageDelta: number
+  successDelta: number
+  failureDelta: number
+  refreshFailureDelta: number
+  /** 该小时最后一次观测到的累计用量与上限 */
+  usageCurrent?: number
+  usageLimit?: number
+  /** 该小时最后一次观测到这条凭据的时间 */
+  lastSeenAt: number
+}
+
+export interface LocalAdminHourlyBucket {
+  /** 整小时起点（本地时区，毫秒时间戳） */
+  hour: number
+  credentials: LocalAdminHourlyCredentialDelta[]
+}
+
+/** 上一次观测到的累计值，用来算下一次的增量。 */
+export interface LocalAdminCumulativeCursor {
+  id: string
+  successCount: number
+  failureCount: number
+  refreshFailureCount: number
+  usageCurrent?: number
+  at: number
+}
+
+/**
+ * 单个累计计数器的差分。
+ *
+ * 回落一律记 0 而不是负数：Admin 重启会把失败计数清零，额度到期会按月重置，
+ * 这两种回落都不代表「消耗了负数」。代价是跨重置那一个小时的消耗会少记
+ * （重置后新产生的那部分），这比让报表出现负值更可接受。
+ */
+export function diffLocalAdminCounter(previous: number | undefined, next: number): number {
+  if (previous === undefined || !Number.isFinite(previous)) return 0
+  if (!Number.isFinite(next)) return 0
+  return next > previous ? next - previous : 0
+}
+
+/** 归整到所属小时的起点（本地时区）。 */
+export function toHourStart(at: number): number {
+  const date = new Date(at)
+  date.setMinutes(0, 0, 0)
+  return date.getTime()
+}
+
+/**
+ * 把一次观测并入小时桶，返回更新后的桶列表与新的游标。
+ *
+ * 纯函数：主进程每轮采样调用它，测试也直接喂序列验证差分口径。
+ * 首次见到的凭据只写基线（增量 0），避免把入库前的历史算成本小时消耗。
+ */
+export function accumulateHourlyUsage(input: {
+  buckets: LocalAdminHourlyBucket[]
+  cursors: LocalAdminCumulativeCursor[]
+  credentials: LocalAdminCredentialStats[]
+  at: number
+  retentionHours?: number
+}): { buckets: LocalAdminHourlyBucket[]; cursors: LocalAdminCumulativeCursor[] } {
+  const hour = toHourStart(input.at)
+  const cursorById = new Map(input.cursors.map((cursor) => [cursor.id, cursor]))
+  const bucketByHour = new Map(input.buckets.map((bucket) => [bucket.hour, bucket]))
+  const current = bucketByHour.get(hour) ?? { hour, credentials: [] }
+  const deltaById = new Map(current.credentials.map((item) => [item.id, { ...item }]))
+
+  for (const credential of input.credentials) {
+    const cursor = cursorById.get(credential.id)
+    const usageCurrent = credential.usage?.current
+    const entry = deltaById.get(credential.id) ?? {
+      id: credential.id,
+      maskedKey: credential.maskedKey,
+      usageDelta: 0,
+      successDelta: 0,
+      failureDelta: 0,
+      refreshFailureDelta: 0,
+      lastSeenAt: input.at
+    }
+
+    entry.maskedKey = credential.maskedKey ?? entry.maskedKey
+    entry.successDelta += diffLocalAdminCounter(cursor?.successCount, credential.successCount)
+    entry.failureDelta += diffLocalAdminCounter(cursor?.failureCount, credential.failureCount)
+    entry.refreshFailureDelta += diffLocalAdminCounter(
+      cursor?.refreshFailureCount,
+      credential.refreshFailureCount
+    )
+    if (usageCurrent !== undefined) {
+      entry.usageDelta += diffLocalAdminCounter(cursor?.usageCurrent, usageCurrent)
+      entry.usageCurrent = usageCurrent
+      entry.usageLimit = credential.usage?.limit
+    }
+    entry.lastSeenAt = input.at
+    deltaById.set(credential.id, entry)
+
+    cursorById.set(credential.id, {
+      id: credential.id,
+      successCount: credential.successCount,
+      failureCount: credential.failureCount,
+      refreshFailureCount: credential.refreshFailureCount,
+      // 这一轮没查到用量时保留旧基线，否则下一轮会把整段累计当成新增消耗
+      usageCurrent: usageCurrent ?? cursor?.usageCurrent,
+      at: input.at
+    })
+  }
+
+  bucketByHour.set(hour, { hour, credentials: [...deltaById.values()] })
+  const retentionHours = input.retentionHours ?? LOCAL_ADMIN_USAGE_BUCKET_RETENTION_HOURS
+  const earliest = hour - (retentionHours - 1) * 3_600_000
+  const buckets = [...bucketByHour.values()]
+    .filter((bucket) => bucket.hour >= earliest)
+    .sort((a, b) => a.hour - b.hour)
+
+  // 凭据删了就不再产生新增量，但游标要留着：id 复用时仍需基线来判断回落
+  const aliveIds = new Set(buckets.flatMap((bucket) => bucket.credentials.map((item) => item.id)))
+  const cursors = [...cursorById.values()].filter(
+    (cursor) => aliveIds.has(cursor.id) || cursor.at >= earliest
+  )
+  return { buckets, cursors }
+}
+
+/** 报表窗口：某天的某个小时，或整天。 */
+export interface LocalAdminReportRange {
+  /** 本地日期，YYYY-MM-DD */
+  date: string
+  hour: LocalAdminReportHour
+}
+
+/** 报表里的单个账号行。 */
+export interface LocalAdminReportRow {
+  id: string
+  maskedKey?: string
+  usageDelta: number
+  successDelta: number
+  failureDelta: number
+  refreshFailureDelta: number
+  /** 窗口内最后一次观测到的累计用量与上限，用于显示"当前水位" */
+  usageCurrent?: number
+  usageLimit?: number
+  lastSeenAt: number
+  /** 该凭据是否还在 Admin 里；已删除的凭据历史仍展示 */
+  present: boolean
+}
+
+export interface LocalAdminReport {
+  range: LocalAdminReportRange
+  /** 窗口起止（毫秒时间戳），闭开区间 [from, to) */
+  from: number
+  to: number
+  rows: LocalAdminReportRow[]
+  usageDelta: number
+  successDelta: number
+  failureDelta: number
+  refreshFailureDelta: number
+  /** 窗口内有数据的小时数，用来提示采样是否稀疏 */
+  hoursWithData: number
+}
+
+/** 本地日期串，避免 toISOString 的 UTC 偏移把凌晨算到前一天。 */
+export function toLocalDateKey(at: number): string {
+  const date = new Date(at)
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+/** 解析 YYYY-MM-DD + 小时为本地时间窗口，非法日期回落到当天。 */
+export function resolveReportWindow(
+  range: LocalAdminReportRange,
+  now: number
+): {
+  from: number
+  to: number
+} {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(range.date)
+  const base = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(now)
+  base.setHours(0, 0, 0, 0)
+  if (range.hour === LOCAL_ADMIN_REPORT_ALL_HOURS) {
+    const to = new Date(base)
+    to.setDate(to.getDate() + 1)
+    return { from: base.getTime(), to: to.getTime() }
+  }
+  const hour = Number.isInteger(range.hour) ? Math.min(23, Math.max(0, range.hour)) : 0
+  base.setHours(hour)
+  return { from: base.getTime(), to: base.getTime() + 3_600_000 }
+}
+
+/** 按窗口聚合小时桶，得到每个账号的消耗报表。 */
+export function buildLocalAdminReport(input: {
+  buckets: LocalAdminHourlyBucket[]
+  range: LocalAdminReportRange
+  now: number
+  /** 当前仍在 Admin 里的凭据 id，用于标记已删除的历史行 */
+  presentIds?: Iterable<string>
+}): LocalAdminReport {
+  const { from, to } = resolveReportWindow(input.range, input.now)
+  const present = new Set(input.presentIds ?? [])
+  const rowById = new Map<string, LocalAdminReportRow>()
+  let hoursWithData = 0
+
+  for (const bucket of input.buckets) {
+    if (bucket.hour < from || bucket.hour >= to) continue
+    if (bucket.credentials.length > 0) hoursWithData++
+    for (const item of bucket.credentials) {
+      const row = rowById.get(item.id) ?? {
+        id: item.id,
+        maskedKey: item.maskedKey,
+        usageDelta: 0,
+        successDelta: 0,
+        failureDelta: 0,
+        refreshFailureDelta: 0,
+        lastSeenAt: 0,
+        present: present.has(item.id)
+      }
+      row.maskedKey = item.maskedKey ?? row.maskedKey
+      row.usageDelta += item.usageDelta
+      row.successDelta += item.successDelta
+      row.failureDelta += item.failureDelta
+      row.refreshFailureDelta += item.refreshFailureDelta
+      // 取窗口内最后一次观测的水位，而不是第一次
+      if (item.lastSeenAt >= row.lastSeenAt) {
+        row.lastSeenAt = item.lastSeenAt
+        if (item.usageCurrent !== undefined) row.usageCurrent = item.usageCurrent
+        if (item.usageLimit !== undefined) row.usageLimit = item.usageLimit
+      }
+      rowById.set(item.id, row)
+    }
+  }
+
+  const rows = [...rowById.values()].sort(
+    (a, b) => b.usageDelta - a.usageDelta || Number(a.id) - Number(b.id) || a.id.localeCompare(b.id)
+  )
+  return {
+    range: input.range,
+    from,
+    to,
+    rows,
+    usageDelta: rows.reduce((sum, row) => sum + row.usageDelta, 0),
+    successDelta: rows.reduce((sum, row) => sum + row.successDelta, 0),
+    failureDelta: rows.reduce((sum, row) => sum + row.failureDelta, 0),
+    refreshFailureDelta: rows.reduce((sum, row) => sum + row.refreshFailureDelta, 0),
+    hoursWithData
+  }
 }

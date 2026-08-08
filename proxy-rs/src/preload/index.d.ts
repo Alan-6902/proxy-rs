@@ -953,6 +953,7 @@ interface KiroApi {
   localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshUsage: () => Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>>
   localAdminStatsClearSamples: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
+  localAdminStatsClearBuckets: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   onLocalAdminStatsChanged: (callback: (snapshot: LocalAdminStatsSnapshot) => void) => () => void
 }
 

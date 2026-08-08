@@ -11,11 +11,19 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   LOCAL_ADMIN_ALERT,
+  LOCAL_ADMIN_REPORT_ALL_HOURS,
   LOCAL_ADMIN_STATS_STATE,
   LOCAL_ADMIN_USAGE_WARN_RATIO,
+  accumulateHourlyUsage,
   aggregateLocalAdminStats,
+  buildLocalAdminReport,
   resolveLocalAdminAlerts,
-  type LocalAdminCredentialStats
+  resolveReportWindow,
+  toHourStart,
+  toLocalDateKey,
+  type LocalAdminCredentialStats,
+  type LocalAdminHourlyBucket,
+  type LocalAdminHourlyCredentialDelta
 } from '../../src/shared/localAdminStats'
 import {
   fetchLocalAdminCredentialStats,
@@ -439,5 +447,325 @@ describe('反代统计 · 采集调度', () => {
     await expect(manager.refreshUsageNow()).rejects.toThrow('本机 Admin')
     manager.stop()
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('定时轮询顺带采用量：一轮里既打 /credentials 也逐条打 balance', async () => {
+    const urls: string[] = []
+    const fetchImpl = makeFetch((url) => {
+      urls.push(url)
+      if (url.endsWith('/balance')) {
+        return jsonResponse({
+          currentUsage: 120,
+          usageLimit: 1000,
+          remaining: 880,
+          usagePercentage: 12
+        })
+      }
+      return jsonResponse({ total: 1, available: 1, credentials: [REMOTE_CREDENTIAL] })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({ baseUrl: BASE_URL, adminApiKey: ADMIN_KEY, timeoutSeconds: 5 }),
+      fetchImpl,
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    expect(urls).toContain('http://127.0.0.1:12888/api/admin/credentials/1/balance')
+    // 用量已挂到凭据上，不必再等用户手动点「刷新用量」
+    expect(snapshot.credentials[0].usage?.current).toBe(120)
+    expect(snapshot.totals.usageCurrent).toBe(120)
+  })
+
+  it('用量拉取失败不影响计数入库，状态仍为 healthy', async () => {
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) return jsonResponse({ error: 'upstream down' }, 500)
+      return jsonResponse({ total: 1, available: 1, credentials: [REMOTE_CREDENTIAL] })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({ baseUrl: BASE_URL, adminApiKey: ADMIN_KEY, timeoutSeconds: 5 }),
+      fetchImpl,
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    expect(snapshot.status.state).toBe(LOCAL_ADMIN_STATS_STATE.HEALTHY)
+    expect(snapshot.totals.successCount).toBe(142)
+    expect(snapshot.credentials[0].usage).toBeUndefined()
+    expect(snapshot.status.lastUsageErrorCount).toBe(1)
+  })
+})
+
+describe('反代统计 · 小时桶差分', () => {
+  const HOUR = 3_600_000
+  /** 2026-08-08 10:30 本地时间，落在 10:00 那个桶里。 */
+  const AT = new Date(2026, 7, 8, 10, 30).getTime()
+
+  function credential(patch: Partial<LocalAdminCredentialStats> = {}): LocalAdminCredentialStats {
+    return statsFixture({ maskedKey: 'ksk_...aaaa', ...patch })
+  }
+
+  function usage(current: number): LocalAdminCredentialStats['usage'] {
+    return {
+      current,
+      limit: 10_000,
+      remaining: 10_000 - current,
+      percentUsed: current / 10_000,
+      fetchedAt: 0
+    }
+  }
+
+  it('首次观测只建基线，不把入库前的历史算成本小时消耗', () => {
+    const result = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ successCount: 100, usage: usage(5000) })],
+      at: AT
+    })
+
+    expect(result.buckets).toHaveLength(1)
+    expect(result.buckets[0].credentials[0].usageDelta).toBe(0)
+    expect(result.buckets[0].credentials[0].successDelta).toBe(0)
+    // 基线已记下，下一轮才开始算增量
+    expect(result.cursors[0].usageCurrent).toBe(5000)
+  })
+
+  it('第二次观测按差值累加到同一个小时桶', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ successCount: 100, usage: usage(5000) })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ successCount: 103, usage: usage(5120.5) })],
+      at: AT + 60_000
+    })
+
+    expect(second.buckets).toHaveLength(1)
+    const entry = second.buckets[0].credentials[0]
+    expect(entry.usageDelta).toBeCloseTo(120.5, 5)
+    expect(entry.successDelta).toBe(3)
+    expect(entry.usageCurrent).toBe(5120.5)
+  })
+
+  it('跨小时时增量落到各自的桶里，不串到前一小时', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usage: usage(100) })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ usage: usage(300) })],
+      at: AT + HOUR
+    })
+
+    expect(second.buckets.map((bucket) => bucket.credentials[0]?.usageDelta ?? 0)).toEqual([0, 200])
+  })
+
+  it('额度按月重置导致的回落记 0，不出现负数消耗', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ successCount: 50, usage: usage(9800) })],
+      at: AT
+    })
+    // 重置后累计值回到低位
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ successCount: 50, usage: usage(12) })],
+      at: AT + 60_000
+    })
+
+    expect(second.buckets[0].credentials[0].usageDelta).toBe(0)
+    // 新基线要跟上，否则下一轮会把 12→之后的增长算成从 9800 起跳
+    expect(second.cursors[0].usageCurrent).toBe(12)
+  })
+
+  it('Admin 重启使失败计数归零时同样记 0', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ failureCount: 7, refreshFailureCount: 2 })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ failureCount: 0, refreshFailureCount: 0 })],
+      at: AT + 60_000
+    })
+
+    expect(second.buckets[0].credentials[0].failureDelta).toBe(0)
+    expect(second.buckets[0].credentials[0].refreshFailureDelta).toBe(0)
+  })
+
+  it('这一轮没查到用量时保留旧基线，避免下一轮把整段累计当成新增', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usage: usage(4000) })],
+      at: AT
+    })
+    // 中间一轮 balance 挂了，凭据上没有 usage
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ usage: undefined })],
+      at: AT + 60_000
+    })
+    const third = accumulateHourlyUsage({
+      buckets: second.buckets,
+      cursors: second.cursors,
+      credentials: [credential({ usage: usage(4050) })],
+      at: AT + 120_000
+    })
+
+    expect(second.cursors[0].usageCurrent).toBe(4000)
+    expect(third.buckets[0].credentials[0].usageDelta).toBe(50)
+  })
+
+  it('超出保留窗口的旧桶被裁掉', () => {
+    const stale = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usage: usage(10) })],
+      at: AT
+    })
+    const fresh = accumulateHourlyUsage({
+      buckets: stale.buckets,
+      cursors: stale.cursors,
+      credentials: [credential({ usage: usage(20) })],
+      at: AT + 200 * HOUR,
+      retentionHours: 168
+    })
+
+    expect(fresh.buckets).toHaveLength(1)
+    expect(fresh.buckets[0].hour).toBe(toHourStart(AT + 200 * HOUR))
+  })
+})
+
+describe('反代统计 · 报表窗口', () => {
+  const HOUR = 3_600_000
+  const AT = new Date(2026, 7, 8, 10, 30).getTime()
+
+  function bucketAt(
+    at: number,
+    deltas: Partial<LocalAdminHourlyCredentialDelta>[]
+  ): LocalAdminHourlyBucket {
+    return {
+      hour: toHourStart(at),
+      credentials: deltas.map((delta, index) => ({
+        id: String(index + 1),
+        usageDelta: 0,
+        successDelta: 0,
+        failureDelta: 0,
+        refreshFailureDelta: 0,
+        lastSeenAt: at,
+        ...delta
+      }))
+    }
+  }
+
+  it('按小时过滤只统计该小时，跨小时的量不混进来', () => {
+    const report = buildLocalAdminReport({
+      buckets: [
+        bucketAt(AT, [{ id: '1', usageDelta: 100, successDelta: 2 }]),
+        bucketAt(AT + HOUR, [{ id: '1', usageDelta: 900, successDelta: 9 }])
+      ],
+      range: { date: '2026-08-08', hour: 10 },
+      now: AT
+    })
+
+    expect(report.usageDelta).toBe(100)
+    expect(report.successDelta).toBe(2)
+    expect(report.hoursWithData).toBe(1)
+  })
+
+  it('选全天时把当天各小时相加', () => {
+    const report = buildLocalAdminReport({
+      buckets: [
+        bucketAt(AT, [{ id: '1', usageDelta: 100 }]),
+        bucketAt(AT + HOUR, [{ id: '1', usageDelta: 900 }]),
+        // 次日的量不能算进来
+        bucketAt(AT + 24 * HOUR, [{ id: '1', usageDelta: 5000 }])
+      ],
+      range: { date: '2026-08-08', hour: LOCAL_ADMIN_REPORT_ALL_HOURS },
+      now: AT
+    })
+
+    expect(report.usageDelta).toBe(1000)
+    expect(report.hoursWithData).toBe(2)
+  })
+
+  it('按消耗量倒序排，并标出已从 Admin 删除的账号', () => {
+    const report = buildLocalAdminReport({
+      buckets: [
+        bucketAt(AT, [
+          { id: '1', usageDelta: 50 },
+          { id: '2', usageDelta: 800 }
+        ])
+      ],
+      range: { date: '2026-08-08', hour: 10 },
+      now: AT,
+      presentIds: ['1']
+    })
+
+    expect(report.rows.map((row) => row.id)).toEqual(['2', '1'])
+    expect(report.rows[0].present).toBe(false)
+    expect(report.rows[1].present).toBe(true)
+  })
+
+  it('水位取窗口内最后一次观测，而不是第一次', () => {
+    const report = buildLocalAdminReport({
+      buckets: [
+        {
+          hour: toHourStart(AT),
+          credentials: [
+            {
+              id: '1',
+              usageDelta: 10,
+              successDelta: 0,
+              failureDelta: 0,
+              refreshFailureDelta: 0,
+              usageCurrent: 300,
+              usageLimit: 10_000,
+              lastSeenAt: AT + 60_000
+            }
+          ]
+        }
+      ],
+      range: { date: '2026-08-08', hour: 10 },
+      now: AT
+    })
+
+    expect(report.rows[0].usageCurrent).toBe(300)
+    expect(report.rows[0].usageLimit).toBe(10_000)
+  })
+
+  it('本地日期串不受 UTC 偏移影响，凌晨不会算到前一天', () => {
+    const earlyMorning = new Date(2026, 7, 8, 0, 30).getTime()
+    expect(toLocalDateKey(earlyMorning)).toBe('2026-08-08')
+    const window = resolveReportWindow({ date: '2026-08-08', hour: 0 }, earlyMorning)
+    expect(window.from).toBe(new Date(2026, 7, 8, 0).getTime())
+    expect(window.to).toBe(window.from + HOUR)
+  })
+
+  it('非法日期回落到当天，不抛错也不返回空窗口', () => {
+    const window = resolveReportWindow(
+      { date: 'not-a-date', hour: LOCAL_ADMIN_REPORT_ALL_HOURS },
+      AT
+    )
+    expect(window.from).toBe(new Date(2026, 7, 8).getTime())
+    expect(window.to).toBe(new Date(2026, 7, 9).getTime())
   })
 })

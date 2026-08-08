@@ -1,9 +1,15 @@
 /**
  * 反代统计的采集调度。
  *
- * 计数类免费，所以固定间隔轮询 GET /credentials，顺手往趋势快照里追加一个采样点。
- * 用量类会打上游 AWS，只在 refreshUsageNow 被显式调用（用户点按钮）时逐条串行拉，
- * 拉到的用量缓存在内存里，后续轮询继续挂在凭据上，直到用户再刷新一次。
+ * 每轮固定间隔（60 秒）拉一次 GET /credentials 取计数，并逐条拉 balance 取用量，
+ * 然后往趋势快照追加采样点、把增量并入按小时的消耗桶。
+ *
+ * 用量为什么可以跟着轮询一起采：实测 kiro-rs 的 balance 有约 300 秒本地缓存
+ * （config/kiro_balance_cache.json），60 秒来一轮时绝大多数请求命中缓存、
+ * 不打上游；真正落到 AWS 的频率由那个 TTL 决定，与轮询间隔无关。这个接口是
+ * 只读计量（AWS UsageLimitsResponse），本身不消耗额度。
+ *
+ * 不自动采就没有按小时的消耗报表：Admin 只回累计值，历史全靠本地差分攒。
  *
  * 未配置本机 Admin 不是错误：状态标成 unconfigured，页面提示去任务管理配置即可，
  * 不刷错误红条也不重试。
@@ -13,9 +19,12 @@ import {
   LOCAL_ADMIN_STATS_MAX_SAMPLES,
   LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS,
   LOCAL_ADMIN_STATS_STATE,
+  accumulateHourlyUsage,
   aggregateLocalAdminStats,
   type LocalAdminCredentialStats,
   type LocalAdminCredentialUsage,
+  type LocalAdminCumulativeCursor,
+  type LocalAdminHourlyBucket,
   type LocalAdminStatsSample,
   type LocalAdminStatsSnapshot,
   type LocalAdminStatsStatus,
@@ -28,7 +37,8 @@ import {
 import {
   appendLocalAdminStatsSample,
   clearLocalAdminStatsSamples,
-  loadLocalAdminStatsSamples
+  clearLocalAdminUsageBuckets,
+  loadLocalAdminStatsState
 } from './samplesStore'
 import {
   fetchLocalAdminCredentialStats,
@@ -61,6 +71,8 @@ export class LocalAdminStatsManager {
   private usagePromise: Promise<LocalAdminUsageRefreshSummary> | null = null
   private credentials: LocalAdminCredentialStats[] = []
   private samples: LocalAdminStatsSample[] = []
+  private buckets: LocalAdminHourlyBucket[] = []
+  private cursors: LocalAdminCumulativeCursor[] = []
   private readonly usageCache = new Map<string, LocalAdminCredentialUsage>()
   private status: LocalAdminStatsStatus = {
     state: LOCAL_ADMIN_STATS_STATE.UNCONFIGURED,
@@ -74,14 +86,21 @@ export class LocalAdminStatsManager {
       status: { ...this.status },
       totals: aggregateLocalAdminStats(this.credentials),
       credentials: this.credentials.map((item) => ({ ...item, alerts: [...item.alerts] })),
-      samples: [...this.samples]
+      samples: [...this.samples],
+      buckets: this.buckets.map((bucket) => ({
+        hour: bucket.hour,
+        credentials: bucket.credentials.map((item) => ({ ...item }))
+      }))
     }
   }
 
   async start(): Promise<void> {
     this.stop()
     this.stopped = false
-    this.samples = await loadLocalAdminStatsSamples()
+    const state = await loadLocalAdminStatsState()
+    this.samples = state.samples
+    this.buckets = state.buckets
+    this.cursors = state.cursors
     this.scheduleNext(0)
   }
 
@@ -189,9 +208,31 @@ export class LocalAdminStatsManager {
     this.pushSnapshot()
 
     try {
-      const credentials = await fetchLocalAdminCredentialStats(target, this.usageCache)
-      this.credentials = credentials
+      let credentials = await fetchLocalAdminCredentialStats(target, this.usageCache)
       this.pruneUsageCache(credentials)
+
+      // 顺带采一轮用量：balance 有约 300 秒本地缓存，60 秒一轮基本都命中缓存。
+      // 单条失败不影响计数类结果，所以整段用 try 包住只记日志。
+      try {
+        const { usage, errors } = await fetchLocalAdminUsage(
+          target,
+          credentials.map((item) => item.id)
+        )
+        for (const [id, value] of usage) this.usageCache.set(id, value)
+        if (usage.size > 0) {
+          credentials = await fetchLocalAdminCredentialStats(target, this.usageCache)
+        }
+        if (errors.length > 0) {
+          this.status = { ...this.status, lastUsageErrorCount: errors.length }
+          this.log(`本轮有 ${errors.length} 条用量拉取失败: ${errors[0]}`)
+        } else if (usage.size > 0) {
+          this.status = { ...this.status, lastUsageRefreshAt: Date.now(), lastUsageErrorCount: 0 }
+        }
+      } catch (error) {
+        this.log(`本轮用量采集失败（计数已正常入库）: ${this.message(error)}`)
+      }
+
+      this.credentials = credentials
       await this.recordSample(credentials)
       this.status = {
         ...this.status,
@@ -253,13 +294,39 @@ export class LocalAdminStatsManager {
    * 这样即使磁盘不可写，本次会话的曲线照样能看。
    */
   private async recordSample(credentials: LocalAdminCredentialStats[]): Promise<void> {
-    const sample = this.buildSample(credentials)
+    const at = Date.now()
+    const sample = this.buildSample(credentials, at)
+    // 差分先在内存里算好：即使落盘失败，本次会话的报表也是连续的
+    const accumulated = accumulateHourlyUsage({
+      buckets: this.buckets,
+      cursors: this.cursors,
+      credentials,
+      at
+    })
+    this.buckets = accumulated.buckets
+    this.cursors = accumulated.cursors
     try {
-      this.samples = await appendLocalAdminStatsSample(sample)
+      const state = await appendLocalAdminStatsSample({
+        sample,
+        buckets: accumulated.buckets,
+        cursors: accumulated.cursors
+      })
+      this.samples = state.samples
+      this.buckets = state.buckets
+      this.cursors = state.cursors
     } catch (error) {
       this.samples = [...this.samples, sample].slice(-LOCAL_ADMIN_STATS_MAX_SAMPLES)
       this.log(`趋势采样落盘失败（已保留内存中的曲线）: ${this.message(error)}`)
     }
+  }
+
+  /** 清空消耗报表。与清趋势分开：两者粒度不同，用户可能只想清一个。 */
+  async clearUsageBuckets(): Promise<LocalAdminStatsSnapshot> {
+    await clearLocalAdminUsageBuckets()
+    this.buckets = []
+    this.cursors = []
+    this.pushSnapshot()
+    return this.snapshot()
   }
 
   /** Admin 里已删除的凭据，其用量缓存要一起丢，否则 id 复用时会串数据。 */
@@ -270,10 +337,10 @@ export class LocalAdminStatsManager {
     }
   }
 
-  private buildSample(credentials: LocalAdminCredentialStats[]): LocalAdminStatsSample {
+  private buildSample(credentials: LocalAdminCredentialStats[], at: number): LocalAdminStatsSample {
     const totals = aggregateLocalAdminStats(credentials)
     return {
-      at: Date.now(),
+      at,
       successCount: totals.successCount,
       failureCount: totals.failureCount,
       refreshFailureCount: totals.refreshFailureCount,

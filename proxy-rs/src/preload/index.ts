@@ -1235,6 +1235,9 @@ const api = {
   localAdminStatsClearSamples: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
     ipcRenderer.invoke('local-admin-stats-clear-samples'),
 
+  localAdminStatsClearBuckets: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
+    ipcRenderer.invoke('local-admin-stats-clear-buckets'),
+
   onLocalAdminStatsChanged: (
     callback: (snapshot: LocalAdminStatsSnapshot) => void
   ): (() => void) => {

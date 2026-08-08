@@ -10,6 +10,7 @@ export const LOCAL_ADMIN_STATS_CHANNEL = {
   refreshNow: 'local-admin-stats-refresh-now',
   refreshUsage: 'local-admin-stats-refresh-usage',
   clearSamples: 'local-admin-stats-clear-samples',
+  clearBuckets: 'local-admin-stats-clear-buckets',
   snapshotEvent: 'local-admin-stats-changed'
 } as const
 
@@ -74,6 +75,17 @@ export function registerLocalAdminStatsIpcHandlers(deps: LocalAdminStatsIpcDeps)
     async (): Promise<IpcResult<LocalAdminStatsSnapshot>> => {
       try {
         return { success: true, data: await deps.getManager().clearSamples() }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    LOCAL_ADMIN_STATS_CHANNEL.clearBuckets,
+    async (): Promise<IpcResult<LocalAdminStatsSnapshot>> => {
+      try {
+        return { success: true, data: await deps.getManager().clearUsageBuckets() }
       } catch (error) {
         return toError(error)
       }

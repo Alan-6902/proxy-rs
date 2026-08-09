@@ -1270,3 +1270,92 @@ describe('反代统计 · token 比值的分母口径', () => {
     expect(scoped).toEqual({ usageDelta: 0, successDelta: 0, credentialCount: 0 })
   })
 })
+
+describe('反代统计 · id 复用（换号）', () => {
+  const AT = new Date(2026, 7, 9, 12, 0).getTime()
+
+  function cred(
+    maskedKey: string | undefined,
+    inputTokens: number,
+    successCount: number
+  ): LocalAdminCredentialStats {
+    return statsFixture({ id: '1', maskedKey, inputTokens, outputTokens: 0, successCount })
+  }
+
+  /*
+   * 线上实测的事故：Admin 的凭据 id 会被复用（删掉 #1 再建一条还是 #1），实测同一个
+   * id=1 先后对应过 5 个不同的号。新号计数从 0 起，而游标存着旧号的大数值，差分只防
+   * 回落、不防「换号后重新爬升」，于是新号 0→N 的整段被当成增量，每换一次号叠加一次。
+   * 结果把 386 万的真实消耗记成了 2016 万（多算 5 倍）。
+   */
+  /*
+   * 关键是新号的累计要「超过」旧基线才会暴露 bug：低于旧基线时 diff 的回落保护
+   * 已经记 0，看不出问题。线上正是这种情形——旧号被删时计数不高，新号很快爬过它。
+   */
+  it('换号后新号累计超过旧基线时，不把差额当成增量', () => {
+    // 旧号建立基线：首轮无基线，按首次观测记 0
+    let state = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [cred('ksk_...ItFd', 100_000, 10)],
+      at: AT
+    })
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(0)
+
+    // 换号：新号复用 id=1，自身已累计 500_000，超过旧基线 100_000
+    state = accumulateHourlyUsage({
+      buckets: state.buckets,
+      cursors: state.cursors,
+      credentials: [cred('ksk_...tb0E', 500_000, 50)],
+      at: AT + 60_000
+    })
+    // 修复前这里会记 400_000（新号历史被当成本轮增量），修复后按首次观测记 0
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(0)
+    expect(state.buckets[0].credentials[0].successDelta).toBe(0)
+
+    // 下一轮起按新号自己的基线正常累加
+    state = accumulateHourlyUsage({
+      buckets: state.buckets,
+      cursors: state.cursors,
+      credentials: [cred('ksk_...tb0E', 504_125, 51)],
+      at: AT + 120_000
+    })
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(4_125)
+    expect(state.buckets[0].credentials[0].successDelta).toBe(1)
+    expect(state.cursors.find((c) => c.id === '1')?.maskedKey).toBe('ksk_...tb0E')
+  })
+
+  it('maskedKey 未变时照常累加，不误判为换号', () => {
+    let state = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [cred('ksk_...tb0E', 1_000, 1)],
+      at: AT
+    })
+    state = accumulateHourlyUsage({
+      buckets: state.buckets,
+      cursors: state.cursors,
+      credentials: [cred('ksk_...tb0E', 5_125, 2)],
+      at: AT + 60_000
+    })
+
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(4_125)
+  })
+
+  it('老数据缺 maskedKey 时按同一条凭据处理，不因缺字段丢增量', () => {
+    let state = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [cred(undefined, 1_000, 1)],
+      at: AT
+    })
+    state = accumulateHourlyUsage({
+      buckets: state.buckets,
+      cursors: state.cursors,
+      credentials: [cred(undefined, 3_000, 2)],
+      at: AT + 60_000
+    })
+
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(2_000)
+  })
+})

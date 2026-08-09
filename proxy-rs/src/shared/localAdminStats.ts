@@ -348,6 +348,15 @@ export interface LocalAdminCumulativeCursor {
   inputTokens?: number
   outputTokens?: number
   at: number
+  /**
+   * 上一次观测到的脱敏 Key，用来识别 id 复用。
+   *
+   * Admin 的凭据 id 会被复用：删掉 #1 再建一条新的，它可能还是 #1。新号的计数从 0
+   * 重新起，但游标里存的是旧号的大数值——差分只防回落，不防「换号后重新爬升」，
+   * 于是新号从 0 爬到 N 的整段会被当成增量，每次换号叠加一次。实测把 386 万的真实
+   * 消耗记成了 2016 万。
+   */
+  maskedKey?: string
 }
 
 /**
@@ -390,7 +399,18 @@ export function accumulateHourlyUsage(input: {
   const deltaById = new Map(current.credentials.map((item) => [item.id, { ...item }]))
 
   for (const credential of input.credentials) {
-    const cursor = cursorById.get(credential.id)
+    const previousCursor = cursorById.get(credential.id)
+    /*
+     * id 复用检测：同一个 id 换了 maskedKey 就是另一条凭据了，旧基线一律作废。
+     * 把 cursor 视作 undefined 会让本轮所有 diff 记 0（首次观测语义），
+     * 下一轮才开始按新号的基线正常累加——少记一轮，远好过把新号的历史累计
+     * 整段算成增量。两边都有 maskedKey 才比较，缺失时按同一条处理（老数据没这个字段）。
+     */
+    const rotated =
+      previousCursor?.maskedKey !== undefined &&
+      credential.maskedKey !== undefined &&
+      previousCursor.maskedKey !== credential.maskedKey
+    const cursor = rotated ? undefined : previousCursor
     const usageCurrent = credential.usage?.current
     const entry = deltaById.get(credential.id) ?? {
       id: credential.id,
@@ -435,7 +455,9 @@ export function accumulateHourlyUsage(input: {
       // token 同理：kiro-rs 重启后计数从 0 起，靠 diff 的回落保护记 0
       inputTokens: credential.inputTokens ?? cursor?.inputTokens,
       outputTokens: credential.outputTokens ?? cursor?.outputTokens,
-      at: input.at
+      at: input.at,
+      // 换号后基线要跟着换到新号，否则下一轮又会拿旧 key 判定一次复用
+      maskedKey: credential.maskedKey ?? cursor?.maskedKey
     })
   }
 

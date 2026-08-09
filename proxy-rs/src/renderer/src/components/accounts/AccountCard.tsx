@@ -218,8 +218,17 @@ export const AccountCard = memo(function AccountCard({
   const isEn = t('common.unknown') === 'Unknown'
 
   // 单账号验活 / 推送到本机 Admin（与列表视图共用同一份逻辑）
-  const { runLiveness, livenessPending, pushToAdmin, pushState, pushError, canPush, pushTitle } =
-    useAccountActions(account, isEn)
+  const {
+    runLiveness,
+    livenessPending,
+    pushToAdmin,
+    pushState,
+    pushError,
+    showPushError,
+    dismissPushError,
+    canPush,
+    pushTitle
+  } = useAccountActions(account, isEn)
 
   // 格式化使用量数值
   const formatUsage = (value: number): string => {
@@ -1089,6 +1098,36 @@ export const AccountCard = memo(function AccountCard({
             </Button>
           </div>
         </div>
+
+        {/* 推送到 Admin 失败：常驻到用户收起为止，点正文看完整原因（可直接重试） */}
+        {pushState === 'error' && pushError && (
+          <div className="mt-1 flex items-center gap-1.5 rounded bg-red-50 p-1.5 text-2xs text-red-600 dark:bg-red-500/10 dark:text-red-400">
+            <AlertTriangle className="h-3 w-3 shrink-0" />
+            <button
+              type="button"
+              className="min-w-0 flex-1 truncate text-left hover:underline"
+              onClick={(e) => {
+                e.stopPropagation()
+                showPushError()
+              }}
+              title={isEn ? 'Click for full reason' : '点击查看完整原因'}
+            >
+              {isEn ? 'Add to kiro-admin failed: ' : '推送到 kiro-admin 失败：'}
+              {pushError}
+            </button>
+            <button
+              type="button"
+              className="shrink-0 opacity-70 hover:opacity-100"
+              onClick={(e) => {
+                e.stopPropagation()
+                dismissPushError()
+              }}
+              title={isEn ? 'Dismiss' : '收起'}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
 
         {/* Error Message (Non-banned) */}
         {account.lastError && !isUnauthorized && (

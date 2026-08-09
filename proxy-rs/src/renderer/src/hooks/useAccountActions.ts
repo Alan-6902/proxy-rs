@@ -5,6 +5,7 @@
 
 import { useCallback, useMemo, useState } from 'react'
 import { useAccountsStore } from '@/store/accounts'
+import { askConfirm } from '@/components/ui/confirmDialogStore'
 import type { Account } from '@/types/account'
 import {
   LOCAL_ADMIN_AUTH_METHOD,
@@ -12,11 +13,8 @@ import {
   type LocalAdminPushResult
 } from '../../../shared/localAdminPush'
 
-/** 推送结果提示在按钮上停留的时长。 */
+/** 推送成功提示在按钮上停留的时长。失败不走这个定时器，见 pushToAdmin 的注释。 */
 const PUSH_FEEDBACK_MS = 4000
-
-/** 失败提示留久一些：验活失败的原因（含是否已回滚）用户需要看清再决定要不要重推。 */
-const PUSH_ERROR_FEEDBACK_MS = 12000
 
 export type AdminPushState = 'idle' | 'pushing' | 'created' | 'existing' | 'error'
 
@@ -30,6 +28,10 @@ interface UseAccountActions {
   pushState: AdminPushState
   /** 推送失败原因，或凭据不满足推送条件的原因 */
   pushError?: string
+  /** 弹窗展示完整失败原因（错误常被截断），确认即重试推送 */
+  showPushError: () => void
+  /** 手动收起失败提示 */
+  dismissPushError: () => void
   /** 该账号的凭据是否可推送；false 时按钮置灰，原因见 pushError */
   canPush: boolean
   /** 按钮 title：说明将要推什么，或为什么不能推 */
@@ -79,22 +81,45 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
         if (!response.success) throw new Error(response.error)
         const data: LocalAdminPushResult = response.data
         setPushState(data.status === 'existing' ? 'existing' : 'created')
+        // 成功只是即时反馈，过一会儿回到可再次点击的初始态
+        setTimeout(() => setPushState('idle'), PUSH_FEEDBACK_MS)
       } catch (error) {
+        /*
+         * 失败态不自动消失。原先失败也走定时器（12 秒后清空），而失败原因只存在于
+         * 按钮的原生 title 里——用户得在这十几秒内把鼠标悬到那个小图标上等系统 tooltip，
+         * 实际等于看不到。现在保留到用户自己收起或重试为止。
+         */
         setPushState('error')
         setPushError(error instanceof Error ? error.message : String(error))
-      } finally {
-        // 结果只是即时反馈，过一会儿回到可再次点击的初始态。
-        // 用 setState 回调读最终态：这里的闭包看不到上面刚 set 的值。
-        setPushState((current) => {
-          setTimeout(
-            () => setPushState('idle'),
-            current === 'error' ? PUSH_ERROR_FEEDBACK_MS : PUSH_FEEDBACK_MS
-          )
-          return current
-        })
       }
     })()
   }, [resolved, pushState, account.credentials])
+
+  const dismissPushError = useCallback(() => {
+    setPushState('idle')
+    setPushError(undefined)
+  }, [])
+
+  /**
+   * 弹窗展示完整失败原因。
+   *
+   * 错误串里含「哪一道门禁没过 + 是否已回滚删除凭据」，卡片上那一行放不下；
+   * 确认按钮直接重试，省得再找一遍那个小图标。
+   */
+  const showPushError = useCallback(() => {
+    if (!pushError) return
+    void (async () => {
+      const retry = await askConfirm({
+        title: isEn ? 'Failed to add to kiro-admin' : '推送到 kiro-admin 失败',
+        description: pushError,
+        confirmText: isEn ? 'Retry' : '重试推送',
+        cancelText: isEn ? 'Close' : '关闭',
+        tone: 'warning'
+      })
+      if (retry) pushToAdmin()
+      else dismissPushError()
+    })()
+  }, [pushError, isEn, pushToAdmin, dismissPushError])
 
   const pushTitle = useMemo(() => {
     if (!resolved.ok) {
@@ -115,6 +140,8 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     pushToAdmin,
     pushState,
     pushError: resolved.ok ? pushError : resolved.reason,
+    showPushError,
+    dismissPushError,
     canPush: resolved.ok,
     pushTitle
   }

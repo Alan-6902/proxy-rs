@@ -36,6 +36,7 @@ export const KSK_AUTOMATION_CHANNEL = {
   delete: 'ksk-automation-delete',
   syncNow: 'ksk-automation-sync-now',
   syncLocalAdminNow: 'ksk-automation-sync-local-admin-now',
+  cleanupNow: 'ksk-automation-cleanup-now',
   pushAccountToLocalAdmin: 'ksk-automation-push-account-to-local-admin',
   statusEvent: 'ksk-automation-status-changed',
   accountsChangedEvent: 'ksk-automation-accounts-changed'
@@ -126,10 +127,41 @@ function toError(error: unknown): IpcResult<never> {
   return { success: false, error: error instanceof Error ? error.message : String(error) }
 }
 
+/**
+ * 单账号推送到本机 Admin 的日志分类。
+ *
+ * 走 console 是这个仓库既有的日志出口：主进程的 console 被 interceptConsole 拦下来
+ * 转进 proxyLogStore，日志页按 `[分类]` 前缀分组展示（同 LocalAdminStats 的做法）。
+ */
+const LOCAL_ADMIN_PUSH_LOG_CATEGORY = 'LocalAdminPush'
+
+function logLocalAdminPush(message: string): void {
+  console.log(`[${LOCAL_ADMIN_PUSH_LOG_CATEGORY}] ${message}`)
+}
+
+function logLocalAdminPushError(message: string): void {
+  console.error(`[${LOCAL_ADMIN_PUSH_LOG_CATEGORY}] ${message}`)
+}
+
+/**
+ * 推送目标账号的可辨识描述，不含任何凭据明文。
+ *
+ * 手动推送的 candidate 里没有 email/id（只有凭据字段），所以用「凭据类型 + 认证方式 + 区域」
+ * 定位是哪一次点击；同一时刻只会有一次手动推送，这些信息足够对上账号卡片。
+ */
+function describePushCandidate(candidate: LocalAdminPushCandidate): string {
+  const kind =
+    candidate.credentialKind === 'kiro_api_key' || candidate.kiroApiKey ? 'api_key' : 'oauth'
+  const authMethod = candidate.authMethod ?? '未声明'
+  return `${kind} / authMethod=${authMethod} / region=${candidate.region?.trim() || '未填'}`
+}
+
 export interface LocalAdminTarget {
   baseUrl: string
   adminApiKey: string
   timeoutSeconds: number
+  /** 反代统计采到用量后是否自动删掉额度耗尽的凭据，取自同一条任务配置。 */
+  autoDeleteExhausted: boolean
 }
 
 /**
@@ -150,7 +182,8 @@ export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
   return {
     baseUrl: task.config.localAdminBaseUrl,
     adminApiKey: task.secrets.localAdminApiKey,
-    timeoutSeconds: task.config.requestTimeoutSeconds
+    timeoutSeconds: task.config.requestTimeoutSeconds,
+    autoDeleteExhausted: task.config.autoDeleteExhausted
   }
 }
 
@@ -284,26 +317,53 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
   )
 
   ipcMain.handle(
+    KSK_AUTOMATION_CHANNEL.cleanupNow,
+    async (_event, taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> => {
+      try {
+        return {
+          success: true,
+          data: { taskId, status: await deps.getManager().cleanupNow(taskId) }
+        }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
     KSK_AUTOMATION_CHANNEL.pushAccountToLocalAdmin,
     async (
       _event,
       candidate: LocalAdminPushCandidate
     ): Promise<IpcResult<LocalAdminPushResult>> => {
+      /*
+       * 这条链路必须留日志：失败原因原先只回给渲染进程塞进按钮的 title，
+       * 而按钮几秒后就恢复初始态，等于用户根本没有机会读到失败原因。
+       * 两道门禁（Admin 余额 + 发消息验活）任一不过都会回滚删凭据，
+       * 排查时需要知道是哪一步、报了什么。
+       */
+      const who = describePushCandidate(candidate)
+      logLocalAdminPush(`开始推送账号到本机 Admin：${who}`)
       try {
         const target = await resolveLocalAdminTarget()
-        return {
-          success: true,
-          data: await pushAccountToLocalAdmin({
-            candidate,
-            baseUrl: target.baseUrl,
-            adminApiKey: target.adminApiKey,
-            timeoutSeconds: target.timeoutSeconds,
-            fetchImpl: deps.localAdminFetchImpl,
-            probeLiveness: deps.probeLocalAdminPushLiveness
-          })
-        }
+        const result = await pushAccountToLocalAdmin({
+          candidate,
+          baseUrl: target.baseUrl,
+          adminApiKey: target.adminApiKey,
+          timeoutSeconds: target.timeoutSeconds,
+          fetchImpl: deps.localAdminFetchImpl,
+          probeLiveness: deps.probeLocalAdminPushLiveness
+        })
+        logLocalAdminPush(
+          result.status === 'existing'
+            ? `Admin 已有同一凭据，未新建（#${result.credentialId ?? '未知'}）：${who}`
+            : `推送成功并验证可用（#${result.credentialId ?? '未知'}，验活=${result.probeVerdict}）：${who}`
+        )
+        return { success: true, data: result }
       } catch (error) {
-        return toError(error)
+        const failure = toError(error)
+        logLocalAdminPushError(`推送失败：${failure.error}（${who}）`)
+        return failure
       }
     }
   )

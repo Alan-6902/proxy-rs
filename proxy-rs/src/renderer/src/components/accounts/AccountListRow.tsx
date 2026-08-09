@@ -11,6 +11,7 @@ import {
   Edit,
   Info,
   AlertCircle,
+  AlertTriangle,
   Power,
   RotateCcw,
   ExternalLink,
@@ -20,6 +21,7 @@ import {
   FolderOpen,
   Copy,
   Download,
+  X,
   Zap,
   CloudUpload,
   CloudCheck,
@@ -93,8 +95,17 @@ function AccountListRowComponent({
   const isEn = t('common.unknown') === 'Unknown'
 
   // 单账号验活 / 推送到本机 Admin（与卡片视图共用同一份逻辑）
-  const { runLiveness, livenessPending, pushToAdmin, pushState, pushError, canPush, pushTitle } =
-    useAccountActions(account, isEn)
+  const {
+    runLiveness,
+    livenessPending,
+    pushToAdmin,
+    pushState,
+    pushError,
+    showPushError,
+    dismissPushError,
+    canPush,
+    pushTitle
+  } = useAccountActions(account, isEn)
 
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
@@ -318,6 +329,36 @@ function AccountListRowComponent({
           {accountTags.length > 4 && (
             <span className="px-1.5 py-0.5 text-muted-foreground bg-muted rounded-sm flex-shrink-0">
               +{accountTags.length - 4}
+            </span>
+          )}
+
+          {/* 推送到 Admin 失败：常驻到用户收起为止，点击看完整原因（可直接重试） */}
+          {pushState === 'error' && pushError && (
+            <span className="flex min-w-0 flex-1 items-center gap-1 text-destructive">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              <button
+                type="button"
+                className="min-w-0 truncate text-left hover:underline"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  showPushError()
+                }}
+                title={isEn ? 'Click for full reason' : '点击查看完整原因'}
+              >
+                {isEn ? 'Push failed: ' : '推送失败：'}
+                {pushError}
+              </button>
+              <button
+                type="button"
+                className="shrink-0 opacity-70 hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  dismissPushError()
+                }}
+                title={isEn ? 'Dismiss' : '收起'}
+              >
+                <X className="h-3 w-3" />
+              </button>
             </span>
           )}
 

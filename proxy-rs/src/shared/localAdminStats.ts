@@ -600,3 +600,37 @@ export function buildLocalAdminReport(input: {
     hoursWithData
   }
 }
+
+/** 只覆盖「有 token 记录的号」的合计，供 token 相关比值当分母。 */
+export interface LocalAdminTokenScopedTotals {
+  /** 这批号的额度消耗合计 */
+  usageDelta: number
+  /** 这批号的成功次数合计 */
+  successDelta: number
+  /** 这批号的数量，用于判断是否只是全部号的一个子集 */
+  credentialCount: number
+}
+
+/**
+ * 汇总「有 token 记录的号」的额度与成功次数。
+ *
+ * 为什么不能直接用 report.usageDelta / report.successDelta 当分母：token 只有部分号
+ * 记得到（换号前的旧凭据、升级前建的凭据都没有 token 计数），而额度与成功次数是全部号
+ * 的合计。分子只覆盖一部分号、分母覆盖全部，比出来的数会离谱——实测一次 17 个号里只有
+ * 1 个有 token，「每千 token」虚高约 15 倍（416.1 而非 26.4）、「平均每次 token」
+ * 偏低约 4 倍（216 而非 817）。
+ */
+export function sumLocalAdminTokenScopedTotals(
+  rows: readonly LocalAdminReportRow[]
+): LocalAdminTokenScopedTotals {
+  let usageDelta = 0
+  let successDelta = 0
+  let credentialCount = 0
+  for (const row of rows) {
+    if (row.inputTokenDelta + row.outputTokenDelta <= 0) continue
+    usageDelta += row.usageDelta
+    successDelta += row.successDelta
+    credentialCount++
+  }
+  return { usageDelta, successDelta, credentialCount }
+}

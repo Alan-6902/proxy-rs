@@ -22,6 +22,7 @@ import {
   LOCAL_ADMIN_USAGE_BUCKET_RETENTION_HOURS,
   buildLocalAdminReport,
   selectExhaustedLocalAdminCredentials,
+  sumLocalAdminTokenScopedTotals,
   toLocalDateKey,
   type LocalAdminAlert,
   type LocalAdminCredentialStats,
@@ -383,6 +384,9 @@ export function ProxyStatsPage(): React.ReactNode {
   /** 窗口内「我的」token 合计（输入 + 输出） */
   const reportTokens = report.inputTokenDelta + report.outputTokenDelta
 
+  /** 有 token 记录的那批号的额度与成功次数，供下面两个比值当分母（口径见该函数注释）。 */
+  const tokenScoped = useMemo(() => sumLocalAdminTokenScopedTotals(report.rows), [report])
+
   /**
    * 本机 Admin 是否支持 token 统计。
    *
@@ -639,8 +643,11 @@ export function ProxyStatsPage(): React.ReactNode {
             label={`${rangeLabel} 账号额度`}
             value={formatUsage(report.usageDelta)}
             hint={
-              report.usageDelta > 0 && reportTokens > 0
-                ? `含他人共用 · 每千 token 约 ${formatUsage((report.usageDelta / reportTokens) * 1000)}`
+              // 卡片主数值是全部号的合计；比值只能用有 token 记录的那批号，见 tokenScoped
+              tokenScoped.usageDelta > 0 && reportTokens > 0
+                ? `含他人共用 · 有 token 的号每千 token 约 ${formatUsage(
+                    (tokenScoped.usageDelta / reportTokens) * 1000
+                  )}`
                 : '账号总消耗，含别处共用该号的量'
             }
             icon={Flame}
@@ -657,11 +664,16 @@ export function ProxyStatsPage(): React.ReactNode {
           <KpiCard
             label="平均每次 token"
             value={
-              tokenSupported && report.successDelta > 0
-                ? formatNumber(reportTokens / report.successDelta)
+              // 分母同样收紧到有 token 记录的号，否则被那些记不到 token 的号摊薄
+              tokenSupported && tokenScoped.successDelta > 0
+                ? formatNumber(reportTokens / tokenScoped.successDelta)
                 : '—'
             }
-            hint={report.successDelta > 0 ? '窗口内 token / 成功次数' : '窗口内没有成功调用'}
+            hint={
+              tokenScoped.successDelta > 0
+                ? `有 token 的号：token / ${formatNumber(tokenScoped.successDelta)} 次成功`
+                : '窗口内没有带 token 记录的成功调用'
+            }
             icon={Activity}
             accent="#a855f7"
           />

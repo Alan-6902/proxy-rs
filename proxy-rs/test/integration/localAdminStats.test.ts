@@ -20,11 +20,13 @@ import {
   resolveLocalAdminAlerts,
   resolveReportWindow,
   selectExhaustedLocalAdminCredentials,
+  sumLocalAdminTokenScopedTotals,
   toHourStart,
   toLocalDateKey,
   type LocalAdminCredentialStats,
   type LocalAdminHourlyBucket,
-  type LocalAdminHourlyCredentialDelta
+  type LocalAdminHourlyCredentialDelta,
+  type LocalAdminReportRow
 } from '../../src/shared/localAdminStats'
 import {
   fetchLocalAdminCredentialStats,
@@ -1191,5 +1193,80 @@ describe('反代统计 · token 差分', () => {
 
     expect(totals.inputTokens).toBe(1_020)
     expect(totals.outputTokens).toBe(55)
+  })
+})
+
+describe('反代统计 · token 比值的分母口径', () => {
+  function row(patch: Partial<LocalAdminReportRow> & { id: string }): LocalAdminReportRow {
+    return {
+      maskedKey: `ksk_...${patch.id}`,
+      usageDelta: 0,
+      inputTokenDelta: 0,
+      outputTokenDelta: 0,
+      successDelta: 0,
+      failureDelta: 0,
+      refreshFailureDelta: 0,
+      lastSeenAt: 0,
+      present: true,
+      ...patch
+    }
+  }
+
+  /*
+   * 线上实测的形态：17 个号里只有 #1 有 token 计数，其余是换号前的旧凭据（已从 Admin
+   * 删除、token 恒为 0），但它们的额度与成功次数照样计入合计。拿全部号的合计当分母，
+   * 「每千 token」会从 26.4 虚高到 416.1，「平均每次 token」会从 817 摊薄到 216。
+   */
+  const REAL_ROWS = [
+    row({
+      id: '1',
+      inputTokenDelta: 320_663,
+      outputTokenDelta: 243,
+      usageDelta: 8_456.31,
+      successDelta: 393
+    }),
+    row({ id: '5', usageDelta: 28_075.96, successDelta: 78, present: false }),
+    row({ id: '13', usageDelta: 16_524.21, successDelta: 93, present: false }),
+    row({ id: '4', usageDelta: 15_029.31, successDelta: 76, present: false }),
+    row({ id: '9', usageDelta: 12_823.2, successDelta: 173, present: false }),
+    row({ id: '6', usageDelta: 11_096.53, successDelta: 16, present: false })
+  ]
+
+  it('只累加有 token 记录的号，忽略 token 为 0 的号', () => {
+    const scoped = sumLocalAdminTokenScopedTotals(REAL_ROWS)
+
+    expect(scoped.credentialCount).toBe(1)
+    expect(scoped.usageDelta).toBeCloseTo(8_456.31, 2)
+    expect(scoped.successDelta).toBe(393)
+  })
+
+  it('用它当分母算出的比值与该号自身口径一致', () => {
+    const scoped = sumLocalAdminTokenScopedTotals(REAL_ROWS)
+    const tokens = REAL_ROWS.reduce((sum, r) => sum + r.inputTokenDelta + r.outputTokenDelta, 0)
+
+    // 每千 token 约 26.4（若误用全部号的额度合计会算成 416.1）
+    expect((scoped.usageDelta / tokens) * 1000).toBeCloseTo(26.4, 1)
+    // 平均每次 817（若误用全部号的成功合计会算成 216）
+    expect(Math.round(tokens / scoped.successDelta)).toBe(817)
+  })
+
+  it('全都有 token 时等于全量合计，不改变原有口径', () => {
+    const rows = [
+      row({ id: '1', inputTokenDelta: 100, usageDelta: 10, successDelta: 2 }),
+      row({ id: '2', outputTokenDelta: 50, usageDelta: 5, successDelta: 3 })
+    ]
+    const scoped = sumLocalAdminTokenScopedTotals(rows)
+
+    expect(scoped.credentialCount).toBe(2)
+    expect(scoped.usageDelta).toBe(15)
+    expect(scoped.successDelta).toBe(5)
+  })
+
+  it('没有任何号有 token 时返回全 0，供调用方显示占位而不是除以 0', () => {
+    const scoped = sumLocalAdminTokenScopedTotals([
+      row({ id: '1', usageDelta: 99, successDelta: 9 })
+    ])
+
+    expect(scoped).toEqual({ usageDelta: 0, successDelta: 0, credentialCount: 0 })
   })
 })

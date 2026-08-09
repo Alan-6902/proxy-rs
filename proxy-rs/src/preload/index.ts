@@ -26,6 +26,7 @@ import type {
 import type { HunterReport } from '../shared/hunterReport'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
+  LocalAdminExhaustedCleanupSummary,
   LocalAdminStatsSnapshot,
   LocalAdminUsageRefreshSummary
 } from '../shared/localAdminStats'
@@ -1160,6 +1161,10 @@ const api = {
   ): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
     ipcRenderer.invoke('ksk-automation-sync-local-admin-now', taskId),
 
+  /** 立刻对目标分组全量发消息验活，删掉判死的号（同时清掉反代上的对应凭据）。 */
+  kskAutomationCleanupNow: (taskId: string): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
+    ipcRenderer.invoke('ksk-automation-cleanup-now', taskId),
+
   /** 把单个账号的凭据推送到本机 Admin（复用任务里已保存的 Admin URL / API Key）。 */
   kskAutomationPushAccountToLocalAdmin: (
     candidate: LocalAdminPushCandidate
@@ -1238,6 +1243,10 @@ const api = {
 
   localAdminStatsRefreshUsage: (): Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>> =>
     ipcRenderer.invoke('local-admin-stats-refresh-usage'),
+
+  /** 删掉本机 Admin 上额度已耗尽的凭据，并连带清掉本地账号库里的对应账号。 */
+  localAdminStatsCleanupExhausted: (): Promise<IdcIpcResult<LocalAdminExhaustedCleanupSummary>> =>
+    ipcRenderer.invoke('local-admin-stats-cleanup-exhausted'),
 
   localAdminStatsClearSamples: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
     ipcRenderer.invoke('local-admin-stats-clear-samples'),

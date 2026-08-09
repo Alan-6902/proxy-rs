@@ -168,6 +168,51 @@ function parseKiroDropOffers(payload: unknown): KskHunterOffer[] {
   })
 }
 
+/**
+ * KiroApp（kiroapp.io）的按区域字段清单。
+ *
+ * 该站点不是「商品列表」形状：`GET /api/status` 直接把库存与价格按区域拆成平铺字段，
+ * 所以这里把每个区域合成一条 offer。goodsId 用区域短码（下单时回传，见
+ * buildOrderRequestBody 的 KIRO_APP 分支）。
+ *
+ * 实测响应（2026-08，未登录可直接 GET）：
+ * {"auto_check":true,"auto_generate":false,"generating":false,
+ *  "price":50,"price_eu":30,"price_us":50,
+ *  "stock":0,"stock_eu":0,"stock_us":0,"uptime_seconds":235806,...}
+ */
+const KIRO_APP_ZONES = [
+  { zone: 'eu', region: 'eu-central-1', stockField: 'stock_eu', priceField: 'price_eu' },
+  { zone: 'us', region: 'us-east-1', stockField: 'stock_us', priceField: 'price_us' }
+] as const
+
+/**
+ * KiroApp：没有商品数组，按区域把 stock_xx / price_xx 合成 offer。
+ *
+ * 刻意不走 readOfferArray：那个函数找不到数组就抛错，而这个站点根本没有数组，
+ * 走它等于把正常响应判成故障。
+ *
+ * 兜底顺序上 `stock`/`price`（不带后缀）只在对应区域字段缺失时才用：它们是站点的
+ * 「当前/默认」值，实测与 stock_us/price_us 一致，直接当成某个区域会重复计数。
+ */
+function parseKiroAppOffers(payload: unknown): KskHunterOffer[] {
+  if (!isRecord(payload)) throw new Error('KiroApp 状态接口返回的不是 JSON 对象')
+  // 至少要认出一个区域的库存字段，否则说明接口改了形状，必须报错而不是装作无货
+  const hasAnyZoneField = KIRO_APP_ZONES.some((entry) => entry.stockField in payload)
+  if (!hasAnyZoneField && !('stock' in payload)) {
+    throw new Error('KiroApp 状态接口未返回 stock_eu / stock_us 字段')
+  }
+  return KIRO_APP_ZONES.map((entry) => ({
+    goodsId: entry.zone,
+    title: `Kiro Key · ${entry.region}`,
+    region: entry.region,
+    stock: resolveStock(
+      payload[entry.stockField],
+      entry.stockField in payload ? undefined : payload.stock
+    ),
+    price: readNumber(payload[entry.priceField] ?? payload.price)
+  }))
+}
+
 /** 解析某站点的商品列表响应。 */
 export function parseChannelOffers(channel: KskHunterChannel, payload: unknown): KskHunterOffer[] {
   assertBusinessOk(payload)
@@ -178,6 +223,8 @@ export function parseChannelOffers(channel: KskHunterChannel, payload: unknown):
       return parseKiroCeoOffers(payload)
     case KSK_HUNTER_CHANNEL.KIRO_DROP:
       return parseKiroDropOffers(payload)
+    case KSK_HUNTER_CHANNEL.KIRO_APP:
+      return parseKiroAppOffers(payload)
   }
 }
 
@@ -193,6 +240,19 @@ export function buildOrderRequestBody(
       return { goods_id: offer.goodsId, count: 1 }
     case KSK_HUNTER_CHANNEL.KIRO_DROP:
       return { item_id: offer.goodsId, quantity: 1 }
+    /*
+     * KiroApp 的下单请求体是**按假设写的，待核对**。
+     *
+     * /api/status 是实测的（未登录可 GET），但下单接口挖不到：站点的 /api-docs 需要登录
+     * 才渲染，JS chunk 里只有它自己前端用的 cookie + CSRF 接口（/api/auth/*、/api/status），
+     * 没有第三方下单路径。
+     *
+     * 这里按该站点已暴露的字段命名习惯（zone / region 后缀那套）取名。拿到文档后
+     * 大概率只需要改这两个键名；若它要求鉴权走请求头而不是 URL query，
+     * 还得改 hunterRunner 的 fetchJson —— 那超出渠道适配范围，需要另行处理。
+     */
+    case KSK_HUNTER_CHANNEL.KIRO_APP:
+      return { zone: offer.goodsId, count: 1 }
   }
 }
 

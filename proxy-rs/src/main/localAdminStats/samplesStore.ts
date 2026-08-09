@@ -83,7 +83,9 @@ function normalizeSample(value: unknown): LocalAdminStatsSample | null {
     credentials: readCount(source.credentials),
     available: readCount(source.available),
     usageCurrent: readOptionalNumber(source.usageCurrent),
-    usageLimit: readOptionalNumber(source.usageLimit)
+    usageLimit: readOptionalNumber(source.usageLimit),
+    inputTokens: readOptionalNumber(source.inputTokens),
+    outputTokens: readOptionalNumber(source.outputTokens)
   }
 }
 
@@ -113,6 +115,9 @@ function normalizeDelta(value: unknown): LocalAdminHourlyCredentialDelta | null 
     id,
     maskedKey: readOptionalString(source.maskedKey),
     usageDelta: readDelta(source.usageDelta),
+    // 升级前落的桶没有这两个键，按 0 读入
+    inputTokenDelta: readDelta(source.inputTokenDelta),
+    outputTokenDelta: readDelta(source.outputTokenDelta),
     successDelta: readDelta(source.successDelta),
     failureDelta: readDelta(source.failureDelta),
     refreshFailureDelta: readDelta(source.refreshFailureDelta),
@@ -161,6 +166,8 @@ export function normalizeCursorsPayload(payload: unknown): LocalAdminCumulativeC
         failureCount: readCount(record.failureCount),
         refreshFailureCount: readCount(record.refreshFailureCount),
         usageCurrent: readOptionalNumber(record.usageCurrent),
+        inputTokens: readOptionalNumber(record.inputTokens),
+        outputTokens: readOptionalNumber(record.outputTokens),
         at: readCount(record.at)
       }
     })

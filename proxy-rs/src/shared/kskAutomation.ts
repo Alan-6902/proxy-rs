@@ -7,6 +7,20 @@ export const KSK_AUTOMATION_STORE_VERSION = 2
 export const KSK_AUTOMATION_TASK_TYPE = 'ksk_pull' as const
 
 /**
+ * 周期性全量验活的默认间隔（分钟）。
+ *
+ * 全量验活每个号要烧几个 token，间隔太短纯属浪费；但号池挂号（封禁、订阅到期）
+ * 只能靠它抓出来，间隔太长反代就会长时间拿着废号打上游。30 分钟是个折中。
+ *
+ * 额度耗尽这种最常见的失效不依赖它——那条走 balance，由反代统计每 60 秒免费采一次。
+ */
+export const KSK_CLEANUP_INTERVAL_MINUTES = 30
+
+/** 周期性全量验活的间隔上下限：低于 5 分钟纯烧 credits，高于 24 小时等于没开。 */
+export const KSK_CLEANUP_INTERVAL_MIN_MINUTES = 5
+export const KSK_CLEANUP_INTERVAL_MAX_MINUTES = 1440
+
+/**
  * 验活提示词：让模型只回一个短 token，尽量少耗 credits。
  *
  * 放在 shared 而不是 main：账号页的手动批量验活面板与 KSK 任务的自动验活必须是同一句话，
@@ -29,6 +43,22 @@ export interface KskAutomationConfig {
   providerGroupId?: string
   requestTimeoutSeconds: number
   cleanupInvalidOnAdd: boolean
+  /**
+   * 不依赖「本轮有新增」的周期性全量验活。
+   *
+   * cleanupInvalidOnAdd 只在有新号入库那一刻触发，号池干涸时一次都不跑，
+   * 已入库的号后来挂掉就没人管。开这个才能定期复查。
+   */
+  cleanupPeriodicEnabled: boolean
+  /** 周期性全量验活的间隔（分钟）。 */
+  cleanupIntervalMinutes: number
+  /**
+   * 反代统计每轮采到用量后，自动删掉额度已耗尽的凭据（含本地账号库里的对应账号）。
+   *
+   * 与全量验活互补：这条免费（balance 是只读计量）、60 秒就能发现，但只认额度耗尽；
+   * 封禁与认证失效仍要靠发消息验活。
+   */
+  autoDeleteExhausted: boolean
   /** 验活模型 ID；留空表示自动挑最便宜的可用模型。 */
   livenessModel: string
   /** 验活测试消息；留空表示用 KSK_LIVENESS_PROBE_MESSAGE。 */
@@ -106,6 +136,10 @@ export interface KskAutomationStatus {
   lastCleanupCheckedCount: number
   lastCleanupRemovedCount: number
   lastCleanupRetainedCount: number
+  /** 上一次全量验活的完成时间，用来区分「从没跑过」和「跑了但没删东西」。 */
+  lastCleanupAt?: number
+  /** 下一次周期性全量验活的预定时间；未开启周期清理时为 undefined。 */
+  nextCleanupAt?: number
   /** 最近的运行日志，按时间正序；仅存在内存里，应用重启后清空。 */
   logs: KskAutomationLogEntry[]
 }
@@ -159,6 +193,9 @@ export const DEFAULT_KSK_AUTOMATION_CONFIG: KskAutomationConfig = {
   providerGroupId: undefined,
   requestTimeoutSeconds: KSK_AUTOMATION_REQUEST_TIMEOUT_SECONDS,
   cleanupInvalidOnAdd: true,
+  cleanupPeriodicEnabled: true,
+  cleanupIntervalMinutes: KSK_CLEANUP_INTERVAL_MINUTES,
+  autoDeleteExhausted: true,
   livenessModel: '',
   livenessMessage: '',
   emailEnabled: false,

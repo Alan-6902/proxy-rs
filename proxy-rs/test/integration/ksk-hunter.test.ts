@@ -178,6 +178,72 @@ describe('站点响应解析', () => {
     ])
   })
 
+  /**
+   * KiroApp 用的是真实响应样例（2026-08 实测 GET https://kiroapp.io/api/status，未登录可访问）。
+   * 这个站点没有商品数组，库存与价格按区域平铺，所以解析器要把它合成 offer。
+   */
+  it('KiroApp：把 stock_eu / price_eu 合成按区域的 offer', () => {
+    const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_APP, {
+      auto_check: true,
+      auto_generate: false,
+      captcha_app_id: '199244242',
+      captcha_enabled: true,
+      generating: false,
+      price: 50,
+      price_eu: 30,
+      price_us: 50,
+      started_at: '2026-08-06T10:30:23Z',
+      stock: 2,
+      stock_eu: 1,
+      stock_us: 2,
+      uptime_seconds: 235806
+    })
+    expect(offers).toEqual([
+      {
+        goodsId: 'eu',
+        title: 'Kiro Key · eu-central-1',
+        region: 'eu-central-1',
+        stock: 1,
+        price: 30
+      },
+      {
+        goodsId: 'us',
+        title: 'Kiro Key · us-east-1',
+        region: 'us-east-1',
+        stock: 2,
+        price: 50
+      }
+    ])
+  })
+
+  it('KiroApp：全区无货时返回 stock 0 的 offer 而不是空数组', () => {
+    // 空数组会让「当前有货」状态显示不出来，也让人分不清是无货还是解析挂了
+    const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_APP, {
+      price: 50,
+      price_eu: 30,
+      price_us: 50,
+      stock: 0,
+      stock_eu: 0,
+      stock_us: 0
+    })
+    expect(offers).toHaveLength(2)
+    expect(offers.every((offer) => offer.stock === 0)).toBe(true)
+  })
+
+  it('KiroApp：区域字段缺失时回落到不带后缀的 stock/price', () => {
+    const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_APP, { stock: 3, price: 42 })
+    expect(offers.map((offer) => offer.stock)).toEqual([3, 3])
+    expect(offers.map((offer) => offer.price)).toEqual([42, 42])
+  })
+
+  it('KiroApp：响应里连 stock 都没有时抛错，不装作无货', () => {
+    // 站点改了形状必须报错，否则会把故障伪装成「一直没货」，用户永远等不到通知
+    expect(() =>
+      parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_APP, { generating: true, uptime_seconds: 1 })
+    ).toThrow('stock_eu')
+    expect(() => parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_APP, [])).toThrow('不是 JSON 对象')
+  })
+
   it('业务 code 非 0 时拒绝把 data 当成有货', () => {
     expect(() =>
       parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_MARKET, { code: 500, msg: '限流', data: [] })
@@ -198,6 +264,10 @@ describe('站点响应解析', () => {
       item_id: 'g1',
       quantity: 1
     })
+    // KiroApp 的 goodsId 是区域短码（eu / us），不是商品 id
+    expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_APP, { ...offer, goodsId: 'eu' })).toEqual(
+      { zone: 'eu', count: 1 }
+    )
   })
 })
 

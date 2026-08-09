@@ -81,6 +81,16 @@ export interface LocalAdminCredentialStats {
   successCount: number
   failureCount: number
   refreshFailureCount: number
+  /**
+   * 经本机反代累计的输入 tokens。
+   *
+   * 与 usage（账号额度）是两个口径：额度是账号总消耗，号被原主或别的反代共用时
+   * 会一起涨；这两个 token 字段只统计走本机反代的请求，用来回答「我消耗了多少」。
+   * 需要 kiro-rs 支持（返回 inputTokens/outputTokens），旧版本读不到时为 undefined。
+   */
+  inputTokens?: number
+  /** 经本机反代累计的输出 tokens */
+  outputTokens?: number
   /** 最后一次被调用的时间（毫秒时间戳） */
   lastUsedAt?: number
   usage?: LocalAdminCredentialUsage
@@ -106,6 +116,10 @@ export interface LocalAdminStatsTotals {
   usageRemaining: number
   /** 0-1 小数；usageLimit 为 0 时为 undefined */
   usagePercentUsed?: number
+  /** 经本机反代累计的输入 tokens 合计 */
+  inputTokens: number
+  /** 经本机反代累计的输出 tokens 合计 */
+  outputTokens: number
   alertCount: number
 }
 
@@ -119,6 +133,9 @@ export interface LocalAdminStatsSample {
   available: number
   usageCurrent?: number
   usageLimit?: number
+  /** 经本机反代累计的输入/输出 tokens 合计，旧快照没有该字段 */
+  inputTokens?: number
+  outputTokens?: number
 }
 
 export interface LocalAdminStatsStatus {
@@ -132,6 +149,10 @@ export interface LocalAdminStatsStatus {
   lastUsageRefreshAt?: number
   /** 最近一次手动刷新用量的失败条数 */
   lastUsageErrorCount: number
+  /** 最近一次清理额度耗尽凭据的完成时间 */
+  lastCleanupAt?: number
+  /** 最近一次清理删掉的凭据条数 */
+  lastCleanupRemovedCount?: number
 }
 
 export interface LocalAdminStatsSnapshot {
@@ -151,6 +172,57 @@ export interface LocalAdminUsageRefreshSummary {
   errors: string[]
 }
 
+/**
+ * 清理额度耗尽凭据的结果。
+ *
+ * `removedLocalAccounts` 与 `removed` 可能不等：Admin 上的凭据不一定都能在本地账号库
+ * 找到对应账号（手动推送进 Admin 的号、oauth 凭据都不在自动同步的账号里）。两个数字
+ * 都要报出来，否则用户看不出「反代删了但本地还留着」这种状态。
+ */
+export interface LocalAdminExhaustedCleanupSummary {
+  /** 参与判定的凭据条数（有用量数据的） */
+  checked: number
+  /** 判为额度耗尽的条数 */
+  exhausted: number
+  /** 从 Admin 删掉的条数 */
+  removed: number
+  /** 连带从本地账号库删掉的账号数 */
+  removedLocalAccounts: number
+  /** 被删凭据的脱敏 Key，供日志与提示展示 */
+  removedMaskedKeys: string[]
+  /** 逐条失败原因，已脱敏 */
+  errors: string[]
+}
+
+export const EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP: LocalAdminExhaustedCleanupSummary = {
+  checked: 0,
+  exhausted: 0,
+  removed: 0,
+  removedLocalAccounts: 0,
+  removedMaskedKeys: [],
+  errors: []
+}
+
+/**
+ * 挑出额度已耗尽的凭据。
+ *
+ * 判定只看 balance 拉回来的用量，不看失败计数：失败计数会被上游 5xx 和网络抖动污染，
+ * 而 `remaining <= 0 && limit > 0` 是上游自己给的计量结果，不会冤枉好号。
+ *
+ * 没有 usage 的凭据一律跳过（还没查过余额，或这条查失败了）——把「不知道」
+ * 当成「已耗尽」会删掉刚推进去还没采到用量的新号。
+ *
+ * 与 resolveLocalAdminAlerts 的 QUOTA_EXHAUSTED 同一口径，两处都改才不会出现
+ * 「页面标红但清理不删」的错位，所以这里直接复用那份告警结论。
+ */
+export function selectExhaustedLocalAdminCredentials(
+  credentials: readonly LocalAdminCredentialStats[]
+): LocalAdminCredentialStats[] {
+  return credentials.filter((credential) =>
+    credential.alerts.includes(LOCAL_ADMIN_ALERT.QUOTA_EXHAUSTED)
+  )
+}
+
 export const EMPTY_LOCAL_ADMIN_STATS_TOTALS: LocalAdminStatsTotals = {
   credentials: 0,
   available: 0,
@@ -164,6 +236,8 @@ export const EMPTY_LOCAL_ADMIN_STATS_TOTALS: LocalAdminStatsTotals = {
   usageLimit: 0,
   usageRemaining: 0,
   usagePercentUsed: undefined,
+  inputTokens: 0,
+  outputTokens: 0,
   alertCount: 0
 }
 
@@ -179,6 +253,8 @@ export function aggregateLocalAdminStats(
     totals.successCount += credential.successCount
     totals.failureCount += credential.failureCount
     totals.refreshFailureCount += credential.refreshFailureCount
+    totals.inputTokens += credential.inputTokens ?? 0
+    totals.outputTokens += credential.outputTokens ?? 0
     if (credential.alerts.length > 0) totals.alertCount++
     if (credential.usage) {
       totals.usageSampleCount++
@@ -239,8 +315,12 @@ export interface LocalAdminHourlyCredentialDelta {
   id: string
   /** 观测时的脱敏 Key，凭据被删后报表仍能显示它是谁 */
   maskedKey?: string
-  /** 该小时新增的额度消耗（Kiro credits） */
+  /** 该小时新增的额度消耗（Kiro credits，含别处共用该号的量） */
   usageDelta: number
+  /** 该小时经本机反代新增的输入 tokens（不含外部消耗） */
+  inputTokenDelta: number
+  /** 该小时经本机反代新增的输出 tokens */
+  outputTokenDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -264,6 +344,9 @@ export interface LocalAdminCumulativeCursor {
   failureCount: number
   refreshFailureCount: number
   usageCurrent?: number
+  /** 上一次观测到的累计 tokens；kiro-rs 不支持时为 undefined */
+  inputTokens?: number
+  outputTokens?: number
   at: number
 }
 
@@ -313,6 +396,8 @@ export function accumulateHourlyUsage(input: {
       id: credential.id,
       maskedKey: credential.maskedKey,
       usageDelta: 0,
+      inputTokenDelta: 0,
+      outputTokenDelta: 0,
       successDelta: 0,
       failureDelta: 0,
       refreshFailureDelta: 0,
@@ -326,6 +411,12 @@ export function accumulateHourlyUsage(input: {
       cursor?.refreshFailureCount,
       credential.refreshFailureCount
     )
+    if (credential.inputTokens !== undefined) {
+      entry.inputTokenDelta += diffLocalAdminCounter(cursor?.inputTokens, credential.inputTokens)
+    }
+    if (credential.outputTokens !== undefined) {
+      entry.outputTokenDelta += diffLocalAdminCounter(cursor?.outputTokens, credential.outputTokens)
+    }
     if (usageCurrent !== undefined) {
       entry.usageDelta += diffLocalAdminCounter(cursor?.usageCurrent, usageCurrent)
       entry.usageCurrent = usageCurrent
@@ -341,6 +432,9 @@ export function accumulateHourlyUsage(input: {
       refreshFailureCount: credential.refreshFailureCount,
       // 这一轮没查到用量时保留旧基线，否则下一轮会把整段累计当成新增消耗
       usageCurrent: usageCurrent ?? cursor?.usageCurrent,
+      // token 同理：kiro-rs 重启后计数从 0 起，靠 diff 的回落保护记 0
+      inputTokens: credential.inputTokens ?? cursor?.inputTokens,
+      outputTokens: credential.outputTokens ?? cursor?.outputTokens,
       at: input.at
     })
   }
@@ -371,7 +465,12 @@ export interface LocalAdminReportRange {
 export interface LocalAdminReportRow {
   id: string
   maskedKey?: string
+  /** 窗口内的额度消耗（账号口径，含别处共用该号的量） */
   usageDelta: number
+  /** 窗口内经本机反代的输入 tokens（我的消耗） */
+  inputTokenDelta: number
+  /** 窗口内经本机反代的输出 tokens */
+  outputTokenDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -390,6 +489,9 @@ export interface LocalAdminReport {
   to: number
   rows: LocalAdminReportRow[]
   usageDelta: number
+  /** 窗口内经本机反代的输入/输出 tokens 合计 */
+  inputTokenDelta: number
+  outputTokenDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -449,6 +551,8 @@ export function buildLocalAdminReport(input: {
         id: item.id,
         maskedKey: item.maskedKey,
         usageDelta: 0,
+        inputTokenDelta: 0,
+        outputTokenDelta: 0,
         successDelta: 0,
         failureDelta: 0,
         refreshFailureDelta: 0,
@@ -457,6 +561,9 @@ export function buildLocalAdminReport(input: {
       }
       row.maskedKey = item.maskedKey ?? row.maskedKey
       row.usageDelta += item.usageDelta
+      // 老桶没有这两个字段，按 0 计而不是让整行变 NaN
+      row.inputTokenDelta += item.inputTokenDelta ?? 0
+      row.outputTokenDelta += item.outputTokenDelta ?? 0
       row.successDelta += item.successDelta
       row.failureDelta += item.failureDelta
       row.refreshFailureDelta += item.refreshFailureDelta
@@ -470,8 +577,14 @@ export function buildLocalAdminReport(input: {
     }
   }
 
+  // 主排序键用「我的 token 消耗」而不是账号额度：报表要回答的是我花了多少，
+  // 额度里混着别处共用该号的量。token 全为 0（kiro-rs 旧版）时退回按额度排。
   const rows = [...rowById.values()].sort(
-    (a, b) => b.usageDelta - a.usageDelta || Number(a.id) - Number(b.id) || a.id.localeCompare(b.id)
+    (a, b) =>
+      b.inputTokenDelta + b.outputTokenDelta - (a.inputTokenDelta + a.outputTokenDelta) ||
+      b.usageDelta - a.usageDelta ||
+      Number(a.id) - Number(b.id) ||
+      a.id.localeCompare(b.id)
   )
   return {
     range: input.range,
@@ -479,6 +592,8 @@ export function buildLocalAdminReport(input: {
     to,
     rows,
     usageDelta: rows.reduce((sum, row) => sum + row.usageDelta, 0),
+    inputTokenDelta: rows.reduce((sum, row) => sum + row.inputTokenDelta, 0),
+    outputTokenDelta: rows.reduce((sum, row) => sum + row.outputTokenDelta, 0),
     successDelta: rows.reduce((sum, row) => sum + row.successDelta, 0),
     failureDelta: rows.reduce((sum, row) => sum + row.failureDelta, 0),
     refreshFailureDelta: rows.reduce((sum, row) => sum + row.refreshFailureDelta, 0),

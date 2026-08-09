@@ -48,7 +48,8 @@ export type KskHunterMode = (typeof KSK_HUNTER_MODE)[keyof typeof KSK_HUNTER_MOD
 export const KSK_HUNTER_CHANNEL = {
   KIRO_MARKET: 'kiro_market',
   KIRO_CEO: 'kiro_ceo',
-  KIRO_DROP: 'kiro_drop'
+  KIRO_DROP: 'kiro_drop',
+  KIRO_APP: 'kiro_app'
 } as const
 
 export type KskHunterChannel = (typeof KSK_HUNTER_CHANNEL)[keyof typeof KSK_HUNTER_CHANNEL]
@@ -56,7 +57,8 @@ export type KskHunterChannel = (typeof KSK_HUNTER_CHANNEL)[keyof typeof KSK_HUNT
 export const KSK_HUNTER_CHANNEL_LABEL: Record<KskHunterChannel, string> = {
   [KSK_HUNTER_CHANNEL.KIRO_MARKET]: 'Kiro Market',
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'Kiro CEO',
-  [KSK_HUNTER_CHANNEL.KIRO_DROP]: 'Kiro Drop'
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: 'Kiro Drop',
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: 'KiroApp'
 }
 
 /**
@@ -106,6 +108,13 @@ export const DEFAULT_KSK_HUNTER_BILLING: Record<KskHunterChannel, KskHunterChann
     lowBalanceThresholdUnit: 0
   },
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: {
+    unitLabel: 'CNY',
+    cnyPerUnit: 1,
+    dailyLimitUnit: 0,
+    lowBalanceThresholdUnit: 0
+  },
+  // KiroApp 的 /api/status 直接给 price/price_eu/price_us，实测是人民币整数（30 / 50）
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: {
     unitLabel: 'CNY',
     cnyPerUnit: 1,
     dailyLimitUnit: 0,

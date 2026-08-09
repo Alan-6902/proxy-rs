@@ -8,6 +8,7 @@ import {
   CloudDownload,
   Edit3,
   Eraser,
+  Gauge,
   ListChecks,
   Loader2,
   Mail,
@@ -32,7 +33,7 @@ import { useAccountsStore } from '../../store/accounts'
 import { KskTaskEditorDialog } from '../automation/KskTaskEditorDialog'
 import { Badge, Button, Card, CardContent, PageHeader, askConfirm } from '../ui'
 
-type TaskAction = 'toggle' | 'run' | 'local' | 'delete'
+type TaskAction = 'toggle' | 'run' | 'local' | 'cleanup' | 'delete'
 type BusyAction = { taskId: string; action: TaskAction } | null
 
 /** 日志级别配色：只染级别列与告警正文，正常条目保持中性，避免整片日志发色。 */
@@ -266,6 +267,39 @@ export function TaskManagerPage(): React.ReactNode {
     }
   }
 
+  const handleCleanup = async (task: KskAutomationTaskView): Promise<void> => {
+    const confirmed = await askConfirm({
+      title: `对“${task.name}”全量验活？`,
+      description:
+        '会给目标分组每个账号各发一条测试消息（每个号消耗少量 credits），判为认证失败、封禁或配额耗尽的账号会被删除，同时清掉 kiro-rs 反代上的对应凭据。超时、限流与上游异常的账号保留。',
+      confirmText: '开始验活',
+      cancelText: '取消',
+      tone: 'danger'
+    })
+    if (!confirmed) return
+    setBusy({ taskId: task.id, action: 'cleanup' })
+    setError('')
+    setNotice('')
+    try {
+      const result = await window.api.kskAutomationCleanupNow(task.id)
+      if (!result.success) throw new Error(result.error || '全量验活失败')
+      if (!result.data) throw new Error('全量验活失败')
+      setTasks((current) =>
+        current.map((item) =>
+          item.id === result.data?.taskId ? { ...item, status: result.data.status } : item
+        )
+      )
+      const { lastCleanupCheckedCount, lastCleanupRemovedCount } = result.data.status
+      setNotice(
+        `“${task.name}”已验活 ${lastCleanupCheckedCount} 个账号，删除 ${lastCleanupRemovedCount} 个。`
+      )
+    } catch (cleanupError) {
+      setError(cleanupError instanceof Error ? cleanupError.message : String(cleanupError))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const handleDelete = async (task: KskAutomationTaskView): Promise<void> => {
     const confirmed = await askConfirm({
       title: `删除任务“${task.name}”？`,
@@ -475,15 +509,24 @@ export function TaskManagerPage(): React.ReactNode {
                           上轮 {task.status.lastRejectedCount} 个新号验活未通过，未入库
                         </div>
                       )}
-                      {task.config.cleanupInvalidOnAdd && (
+                      {(task.config.cleanupInvalidOnAdd || task.config.cleanupPeriodicEnabled) && (
                         <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
                           <Trash2 className="h-3.5 w-3.5" />
-                          新增后全量验活 · 上轮检查 {
-                            task.status.lastCleanupCheckedCount
-                          } 个，删除 {task.status.lastCleanupRemovedCount} 个
+                          {task.config.cleanupPeriodicEnabled
+                            ? `每 ${task.config.cleanupIntervalMinutes} 分钟全量验活`
+                            : '新增后全量验活'}
+                          {' · 上次检查 '}
+                          {task.status.lastCleanupCheckedCount} 个，删除{' '}
+                          {task.status.lastCleanupRemovedCount} 个
                           {task.status.lastCleanupRetainedCount > 0
                             ? `，保留 ${task.status.lastCleanupRetainedCount} 个待确认`
                             : ''}
+                        </div>
+                      )}
+                      {task.config.autoDeleteExhausted && (
+                        <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
+                          <Gauge className="h-3.5 w-3.5" />
+                          额度耗尽自动删除已开启 · 由反代统计每分钟查余额触发
                         </div>
                       )}
                     </div>
@@ -540,6 +583,20 @@ export function TaskManagerPage(): React.ReactNode {
                           同步本机
                         </Button>
                       )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleCleanup(task)}
+                        disabled={busy !== null || !task.enabled}
+                        title="立刻对目标分组全量发消息验活，删掉判死的号"
+                      >
+                        {isBusy(task.id, 'cleanup') ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ShieldOff className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        全量验活
+                      </Button>
                       <Button
                         size="sm"
                         variant="ghost"

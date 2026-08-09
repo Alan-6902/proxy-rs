@@ -25,6 +25,7 @@ import type {
 import type { HunterReport } from '../shared/hunterReport'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
+  LocalAdminExhaustedCleanupSummary,
   LocalAdminStatsSnapshot,
   LocalAdminUsageRefreshSummary
 } from '../shared/localAdminStats'
@@ -926,6 +927,7 @@ interface KiroApi {
   kskAutomationSyncLocalAdminNow: (
     taskId: string
   ) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
+  kskAutomationCleanupNow: (taskId: string) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
   kskAutomationPushAccountToLocalAdmin: (
     candidate: LocalAdminPushCandidate
   ) => Promise<IdcIpcResult<LocalAdminPushResult>>
@@ -955,6 +957,7 @@ interface KiroApi {
   localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshUsage: () => Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>>
+  localAdminStatsCleanupExhausted: () => Promise<IdcIpcResult<LocalAdminExhaustedCleanupSummary>>
   localAdminStatsClearSamples: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsClearBuckets: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   onLocalAdminStatsChanged: (callback: (snapshot: LocalAdminStatsSnapshot) => void) => () => void

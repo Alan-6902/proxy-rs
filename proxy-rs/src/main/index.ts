@@ -71,8 +71,19 @@ import {
   sendKskAutomationStatus
 } from './kskAutomation/ipc-handlers'
 import type { KskLivenessOptions, ProviderKskCredential } from '../shared/kskAutomation'
-import type { KskAutomationFetch, LocalAdminProbeOutcome } from './kskAutomation/localAdminClient'
+import {
+  deleteLocalAdminCredentialsById,
+  sha256Hex,
+  type KskAutomationFetch,
+  type LocalAdminProbeOutcome
+} from './kskAutomation/localAdminClient'
 import { LOCAL_ADMIN_PROBE_VERDICT, type LocalAdminPushCandidate } from '../shared/localAdminPush'
+import {
+  EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
+  selectExhaustedLocalAdminCredentials,
+  type LocalAdminCredentialStats,
+  type LocalAdminExhaustedCleanupSummary
+} from '../shared/localAdminStats'
 import { LocalAdminStatsManager } from './localAdminStats/statsManager'
 import {
   registerLocalAdminStatsIpcHandlers,
@@ -1948,6 +1959,103 @@ async function cleanupInvalidStoredKskAccounts(
   return result
 }
 
+/**
+ * 从本地账号库里删掉一批 apiKeyHash 对应的 KSK 账号，返回被删账号的明文 key。
+ *
+ * Admin 只回哈希，所以匹配方向是「本地逐个账号算 sha256，看在不在目标哈希集合里」。
+ * 明文要回给调用方拉黑：只删不拉黑的话，下一轮 Provider 返回同一个号就会重新入库、
+ * 再被同步回 Admin，变成删了又回来的死循环。
+ */
+async function removeStoredKskAccountsByHash(
+  hashes: ReadonlySet<string>
+): Promise<{ removedIds: string[]; removedKeys: string[] }> {
+  if (hashes.size === 0) return { removedIds: [], removedKeys: [] }
+  return await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    const doomed = new Map<string, { key: string; groupId?: string }>()
+    for (const account of Object.values(current.accounts ?? {})) {
+      const key = account.credentials?.kiroApiKey
+      if (account.credentials?.credentialKind !== 'kiro_api_key' || !key) continue
+      if (!hashes.has(sha256Hex(key))) continue
+      doomed.set(account.id, { key, groupId: account.groupId })
+    }
+    if (doomed.size === 0) return { removedIds: [], removedKeys: [] }
+
+    const { data: next, removedIds } = removeMatchingInvalidKskAccounts(current, doomed)
+    if (removedIds.length === 0) return { removedIds: [], removedKeys: [] }
+    store!.set('accountData', next)
+    lastSavedData = next
+    await createBackup(next)
+    return {
+      removedIds,
+      removedKeys: removedIds
+        .map((accountId) => doomed.get(accountId)?.key)
+        .filter((key): key is string => Boolean(key))
+    }
+  })
+}
+
+/**
+ * 删掉本机 Admin 上额度已耗尽的凭据，并同步清掉本地账号库里的对应账号。
+ *
+ * 为什么两边都要删：syncKskAccountsToLocalAdmin 会把「本地有、Admin 没有」的号重新
+ * POST 回 Admin。只删 Admin 的话，下一次同步就把它推回去了。
+ *
+ * 判定口径是 balance 拉回来的 remaining <= 0（见 selectExhaustedLocalAdminCredentials），
+ * 不掺失败计数：那个会被上游 5xx 污染。封禁与认证失效不在这条链路，靠周期性发消息验活。
+ */
+async function cleanupExhaustedLocalAdminCredentials(
+  credentials: readonly LocalAdminCredentialStats[]
+): Promise<LocalAdminExhaustedCleanupSummary> {
+  const exhausted = selectExhaustedLocalAdminCredentials(credentials)
+  const summary: LocalAdminExhaustedCleanupSummary = {
+    ...EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
+    checked: credentials.filter((credential) => credential.usage).length,
+    exhausted: exhausted.length,
+    removedMaskedKeys: [],
+    errors: []
+  }
+  if (exhausted.length === 0) return summary
+
+  const target = await resolveLocalAdminTarget()
+  const removal = await deleteLocalAdminCredentialsById({
+    credentials: exhausted.map((credential) => ({
+      credentialId: credential.id,
+      disabled: credential.disabled
+    })),
+    baseUrl: target.baseUrl,
+    adminApiKey: target.adminApiKey,
+    timeoutSeconds: target.timeoutSeconds,
+    fetchImpl: localAdminFetchImpl
+  })
+  summary.removed = removal.deleted.length
+  summary.errors.push(...removal.errors)
+  summary.removedMaskedKeys = removal.deleted.map(
+    (item) => item.maskedApiKey || `#${item.credentialId}`
+  )
+
+  const hashes = new Set(
+    removal.deleted.map((item) => item.apiKeyHash).filter((hash): hash is string => Boolean(hash))
+  )
+  try {
+    const local = await removeStoredKskAccountsByHash(hashes)
+    summary.removedLocalAccounts = local.removedIds.length
+    // 拉黑明文，否则下一轮 Provider 拉取会把同一个号重新入库并推回 Admin
+    kskAutomationManager.blacklistKeys(local.removedKeys)
+    if (local.removedIds.length > 0) sendKskAutomationAccountsChanged(() => mainWindow)
+  } catch (error) {
+    /*
+     * 本地删失败要显式报出来：Admin 上已经删掉了，本地还留着的话下次同步会把它推回去。
+     * 用户看到这条错误才知道得手动处理，否则表现为「删了又出现」。
+     */
+    summary.errors.push(
+      `已从 Admin 删除，但清理本地账号失败：${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+  return summary
+}
+
 async function readKskAccountsForLocalAdmin(
   groupId: string
 ): Promise<Array<{ kiroApiKey: string; region: string }>> {
@@ -2014,6 +2122,7 @@ const localAdminStatsManager = new LocalAdminStatsManager({
     }
   },
   fetchImpl: localAdminFetchImpl,
+  cleanupExhausted: cleanupExhaustedLocalAdminCredentials,
   notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
   log: (message) => console.log(message)
 })

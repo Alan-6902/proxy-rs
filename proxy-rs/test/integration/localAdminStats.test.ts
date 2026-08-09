@@ -19,6 +19,7 @@ import {
   buildLocalAdminReport,
   resolveLocalAdminAlerts,
   resolveReportWindow,
+  selectExhaustedLocalAdminCredentials,
   toHourStart,
   toLocalDateKey,
   type LocalAdminCredentialStats,
@@ -143,6 +144,34 @@ describe('反代统计 · 响应解析', () => {
   it('remaining 缺失时由 limit - current 兜底', () => {
     const usage = toCredentialUsage({ currentUsage: 400, usageLimit: 1000 }, 1000)
     expect(usage!.remaining).toBe(600)
+  })
+
+  it('解析 kiro-rs 返回的 token 统计', () => {
+    const stats = toCredentialStats({
+      ...REMOTE_CREDENTIAL,
+      inputTokens: 6_604_122,
+      outputTokens: 3_077
+    })
+    expect(stats!.inputTokens).toBe(6_604_122)
+    expect(stats!.outputTokens).toBe(3_077)
+  })
+
+  it('旧版 kiro-rs 不返回 token 字段时保持 undefined，而不是 0', () => {
+    // 必须能区分「不支持该字段」与「支持但确实是 0」，否则页面会把
+    // 旧版本显示成「消耗 0」误导人
+    const stats = toCredentialStats(REMOTE_CREDENTIAL)
+    expect(stats!.inputTokens).toBeUndefined()
+    expect(stats!.outputTokens).toBeUndefined()
+  })
+
+  it('token 字段为负数或非法值时按缺失处理', () => {
+    const stats = toCredentialStats({
+      ...REMOTE_CREDENTIAL,
+      inputTokens: -5,
+      outputTokens: 'abc' as unknown as number
+    })
+    expect(stats!.inputTokens).toBeUndefined()
+    expect(stats!.outputTokens).toBeUndefined()
   })
 })
 
@@ -499,6 +528,278 @@ describe('反代统计 · 采集调度', () => {
   })
 })
 
+describe('反代统计 · 清理额度耗尽的凭据', () => {
+  /** 额度耗尽的 balance 响应，对应界面上 0.00 / 10000.00（0.0% 剩余）那种。 */
+  const EXHAUSTED_BALANCE = {
+    currentUsage: 10000,
+    usageLimit: 10000,
+    remaining: 0,
+    usagePercentage: 100
+  }
+
+  function statsCredential(
+    patch: Partial<LocalAdminCredentialStats> = {}
+  ): LocalAdminCredentialStats {
+    return {
+      id: '9',
+      priority: 0,
+      disabled: false,
+      isCurrent: false,
+      successCount: 0,
+      failureCount: 0,
+      refreshFailureCount: 0,
+      alerts: [],
+      ...patch
+    }
+  }
+
+  it('只挑额度耗尽的：没查过用量、还有剩余、只是失败过的都不动', () => {
+    const exhausted = statsCredential({
+      id: '9',
+      usage: { current: 10000, limit: 10000, remaining: 0, percentUsed: 1, fetchedAt: 1 },
+      alerts: [LOCAL_ADMIN_ALERT.QUOTA_EXHAUSTED]
+    })
+    const selected = selectExhaustedLocalAdminCredentials([
+      exhausted,
+      // 还有剩余
+      statsCredential({
+        id: '1',
+        usage: { current: 500, limit: 1000, remaining: 500, percentUsed: 0.5, fetchedAt: 1 },
+        alerts: []
+      }),
+      // 用量未知：还没采到余额的新号，不能当成耗尽删掉
+      statsCredential({ id: '2', alerts: [] }),
+      // 只是调用失败过，可能是上游 5xx，不算账号失效
+      statsCredential({ id: '3', failureCount: 7, alerts: [LOCAL_ADMIN_ALERT.FAILING] })
+    ])
+
+    expect(selected).toEqual([exhausted])
+  })
+
+  it('自动清理开启时采完用量就删，并把重新抓到的列表更新到快照', async () => {
+    const cleanupExhausted = vi.fn(async (credentials: readonly LocalAdminCredentialStats[]) => ({
+      checked: credentials.length,
+      exhausted: 1,
+      removed: 1,
+      removedLocalAccounts: 1,
+      removedMaskedKeys: ['ksk_...rcnS'],
+      errors: []
+    }))
+    let deleted = false
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) return jsonResponse(EXHAUSTED_BALANCE)
+      // 清理后再抓一次，那时候这条已经不在了
+      return jsonResponse({
+        total: deleted ? 0 : 1,
+        available: deleted ? 0 : 1,
+        credentials: deleted ? [] : [REMOTE_CREDENTIAL]
+      })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        autoDeleteExhausted: true
+      }),
+      fetchImpl,
+      cleanupExhausted: async (credentials) => {
+        deleted = true
+        return cleanupExhausted(credentials)
+      },
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    expect(cleanupExhausted).toHaveBeenCalledTimes(1)
+    expect(cleanupExhausted.mock.calls[0][0]).toHaveLength(1)
+    expect(snapshot.status.lastCleanupRemovedCount).toBe(1)
+    // 删完立刻重抓，页面上那条不该等下一轮才消失
+    expect(snapshot.credentials).toEqual([])
+  })
+
+  it('开关关闭时不调清理，即使有额度耗尽的凭据', async () => {
+    const cleanupExhausted = vi.fn()
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) return jsonResponse(EXHAUSTED_BALANCE)
+      return jsonResponse({ total: 1, available: 1, credentials: [REMOTE_CREDENTIAL] })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        autoDeleteExhausted: false
+      }),
+      fetchImpl,
+      cleanupExhausted,
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    expect(cleanupExhausted).not.toHaveBeenCalled()
+    // 不删，但告警照标：用户要能在页面上看见它已经耗尽
+    expect(snapshot.credentials[0].alerts).toContain(LOCAL_ADMIN_ALERT.QUOTA_EXHAUSTED)
+  })
+
+  it('没有额度耗尽的凭据时一次清理都不发起', async () => {
+    const cleanupExhausted = vi.fn()
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) {
+        return jsonResponse({ currentUsage: 100, usageLimit: 1000, remaining: 900 })
+      }
+      return jsonResponse({ total: 1, available: 1, credentials: [REMOTE_CREDENTIAL] })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        autoDeleteExhausted: true
+      }),
+      fetchImpl,
+      cleanupExhausted,
+      notifySnapshot: () => undefined
+    })
+
+    await manager.refreshNow()
+    manager.stop()
+
+    expect(cleanupExhausted).not.toHaveBeenCalled()
+  })
+
+  it('清理失败不把整轮采集判成失败，只在 lastError 留痕', async () => {
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) return jsonResponse(EXHAUSTED_BALANCE)
+      return jsonResponse({ total: 1, available: 1, credentials: [REMOTE_CREDENTIAL] })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        autoDeleteExhausted: true
+      }),
+      fetchImpl,
+      cleanupExhausted: async () => {
+        throw new Error('admin refused')
+      },
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    expect(snapshot.status.state).toBe(LOCAL_ADMIN_STATS_STATE.HEALTHY)
+    expect(snapshot.status.lastError).toContain('admin refused')
+    expect(snapshot.totals.successCount).toBe(142)
+  })
+
+  it('手动清理先刷一遍用量再判，且开关关闭也照样能手动清', async () => {
+    const balanceCalls: string[] = []
+    let deleted = false
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) {
+        balanceCalls.push(url)
+        return jsonResponse(EXHAUSTED_BALANCE)
+      }
+      return jsonResponse({
+        total: deleted ? 0 : 1,
+        available: deleted ? 0 : 1,
+        credentials: deleted ? [] : [REMOTE_CREDENTIAL]
+      })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        // 自动清理关着，手动按钮仍要能用
+        autoDeleteExhausted: false
+      }),
+      fetchImpl,
+      cleanupExhausted: async () => {
+        deleted = true
+        return {
+          checked: 1,
+          exhausted: 1,
+          removed: 1,
+          removedLocalAccounts: 1,
+          removedMaskedKeys: ['ksk_...ibfB'],
+          errors: []
+        }
+      },
+      notifySnapshot: () => undefined
+    })
+
+    const summary = await manager.cleanupExhaustedNow()
+    manager.stop()
+
+    // 页面上的用量可能是几分钟前采的，那之后额度可能已经重置，所以要先刷一遍
+    expect(balanceCalls.length).toBeGreaterThan(0)
+    expect(summary).toMatchObject({ removed: 1, removedLocalAccounts: 1 })
+  })
+
+  it('未接入清理能力时手动清理明确报错，不静默成功', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({ credentials: [] }))
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({ baseUrl: BASE_URL, adminApiKey: ADMIN_KEY, timeoutSeconds: 5 }),
+      fetchImpl,
+      notifySnapshot: () => undefined
+    })
+
+    await expect(manager.cleanupExhaustedNow()).rejects.toThrow('清理')
+    manager.stop()
+  })
+
+  it('删掉的凭据这一小时已产生的消耗仍留在报表里', async () => {
+    let deleted = false
+    const fetchImpl = makeFetch((url) => {
+      if (url.endsWith('/balance')) return jsonResponse(EXHAUSTED_BALANCE)
+      return jsonResponse({
+        total: deleted ? 0 : 1,
+        available: deleted ? 0 : 1,
+        credentials: deleted ? [] : [REMOTE_CREDENTIAL]
+      })
+    })
+    const manager = new LocalAdminStatsManager({
+      readTarget: async () => ({
+        baseUrl: BASE_URL,
+        adminApiKey: ADMIN_KEY,
+        timeoutSeconds: 5,
+        autoDeleteExhausted: true
+      }),
+      fetchImpl,
+      cleanupExhausted: async () => {
+        deleted = true
+        return {
+          checked: 1,
+          exhausted: 1,
+          removed: 1,
+          removedLocalAccounts: 1,
+          removedMaskedKeys: ['ksk_...ibfB'],
+          errors: []
+        }
+      },
+      notifySnapshot: () => undefined
+    })
+
+    const snapshot = await manager.refreshNow()
+    manager.stop()
+
+    /*
+     * 清理前必须先记账：删完再 accumulate 的话这条凭据当轮就不在列表里了，
+     * 它这一小时的消耗会永久丢失，换号后那段用量就查无对证。
+     */
+    const hourBucket = snapshot.buckets.at(-1)
+    expect(hourBucket?.credentials.map((item) => item.id)).toContain('1')
+  })
+})
+
 describe('反代统计 · 小时桶差分', () => {
   const HOUR = 3_600_000
   /** 2026-08-08 10:30 本地时间，落在 10:00 那个桶里。 */
@@ -667,6 +968,8 @@ describe('反代统计 · 报表窗口', () => {
       credentials: deltas.map((delta, index) => ({
         id: String(index + 1),
         usageDelta: 0,
+        inputTokenDelta: 0,
+        outputTokenDelta: 0,
         successDelta: 0,
         failureDelta: 0,
         refreshFailureDelta: 0,
@@ -734,6 +1037,8 @@ describe('反代统计 · 报表窗口', () => {
             {
               id: '1',
               usageDelta: 10,
+              inputTokenDelta: 0,
+              outputTokenDelta: 0,
               successDelta: 0,
               failureDelta: 0,
               refreshFailureDelta: 0,
@@ -767,5 +1072,124 @@ describe('反代统计 · 报表窗口', () => {
     )
     expect(window.from).toBe(new Date(2026, 7, 8).getTime())
     expect(window.to).toBe(new Date(2026, 7, 9).getTime())
+  })
+
+  it('按「我的 token」倒序排，而不是按账号额度', () => {
+    // #1 额度掉得多但 token 少（被别处共用），#2 才是我用得多的号
+    const report = buildLocalAdminReport({
+      buckets: [
+        bucketAt(AT, [
+          { id: '1', usageDelta: 9000, inputTokenDelta: 100, outputTokenDelta: 10 },
+          { id: '2', usageDelta: 200, inputTokenDelta: 50_000, outputTokenDelta: 900 }
+        ])
+      ],
+      range: { date: '2026-08-08', hour: 10 },
+      now: AT
+    })
+
+    expect(report.rows.map((row) => row.id)).toEqual(['2', '1'])
+    expect(report.inputTokenDelta).toBe(50_100)
+    expect(report.outputTokenDelta).toBe(910)
+  })
+
+  it('老桶没有 token 字段时按 0 计，不产生 NaN', () => {
+    const legacyBucket: LocalAdminHourlyBucket = {
+      hour: toHourStart(AT),
+      credentials: [
+        {
+          id: '1',
+          usageDelta: 500,
+          successDelta: 3,
+          failureDelta: 0,
+          refreshFailureDelta: 0,
+          lastSeenAt: AT
+          // inputTokenDelta / outputTokenDelta 缺失，模拟升级前落的桶
+        } as unknown as LocalAdminHourlyCredentialDelta
+      ]
+    }
+    const report = buildLocalAdminReport({
+      buckets: [legacyBucket],
+      range: { date: '2026-08-08', hour: 10 },
+      now: AT
+    })
+
+    expect(report.inputTokenDelta).toBe(0)
+    expect(report.outputTokenDelta).toBe(0)
+    expect(Number.isNaN(report.inputTokenDelta)).toBe(false)
+    // 额度口径不受影响，老数据仍可读
+    expect(report.usageDelta).toBe(500)
+  })
+})
+
+describe('反代统计 · token 差分', () => {
+  const AT = new Date(2026, 7, 8, 10, 30).getTime()
+
+  function credential(patch: Partial<LocalAdminCredentialStats> = {}): LocalAdminCredentialStats {
+    return statsFixture({ maskedKey: 'ksk_...aaaa', ...patch })
+  }
+
+  it('两轮观测按差值累加 token，与账号额度各自独立', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ inputTokens: 1_000, outputTokens: 100 })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ inputTokens: 1_450, outputTokens: 180 })],
+      at: AT + 60_000
+    })
+
+    const entry = second.buckets[0].credentials[0]
+    expect(entry.inputTokenDelta).toBe(450)
+    expect(entry.outputTokenDelta).toBe(80)
+    // 没查用量时额度增量保持 0，不会被 token 带上
+    expect(entry.usageDelta).toBe(0)
+  })
+
+  it('kiro-rs 重启使 token 计数归零时记 0，不出现负值', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ inputTokens: 900_000, outputTokens: 5_000 })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ inputTokens: 120, outputTokens: 8 })],
+      at: AT + 60_000
+    })
+
+    const entry = second.buckets[0].credentials[0]
+    expect(entry.inputTokenDelta).toBe(0)
+    expect(entry.outputTokenDelta).toBe(0)
+    // 新基线要跟上，否则下一轮会把 120 之后的增长当成从 900000 起跳
+    expect(second.cursors[0].inputTokens).toBe(120)
+  })
+
+  it('kiro-rs 不支持 token 时不记增量，也不把基线写成 0', () => {
+    const state = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ inputTokens: undefined, outputTokens: undefined })],
+      at: AT
+    })
+
+    expect(state.buckets[0].credentials[0].inputTokenDelta).toBe(0)
+    expect(state.cursors[0].inputTokens).toBeUndefined()
+  })
+
+  it('总览把各凭据的 token 相加，缺字段的按 0 计', () => {
+    const totals = aggregateLocalAdminStats([
+      statsFixture({ id: '1', inputTokens: 1_000, outputTokens: 50 }),
+      statsFixture({ id: '2', inputTokens: 20, outputTokens: 5 }),
+      statsFixture({ id: '3' })
+    ])
+
+    expect(totals.inputTokens).toBe(1_020)
+    expect(totals.outputTokens).toBe(55)
   })
 })

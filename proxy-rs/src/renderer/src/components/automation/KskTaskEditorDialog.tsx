@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { BellRing, CloudDownload, Loader2, ServerCog, ShieldCheck, X } from 'lucide-react'
 import {
   DEFAULT_KSK_AUTOMATION_CONFIG,
+  KSK_CLEANUP_INTERVAL_MAX_MINUTES,
+  KSK_CLEANUP_INTERVAL_MIN_MINUTES,
   KSK_LIVENESS_PROBE_MESSAGE,
   KSK_PROVIDER_POLL_INTERVAL_SECONDS,
   type KskAutomationConfig,
@@ -211,6 +213,40 @@ export function KskTaskEditorDialog({
               onChange={(cleanupInvalidOnAdd) => setConfig({ ...config, cleanupInvalidOnAdd })}
               title="新增 KSK 后全量清理不可用账号"
               hint="每次有新号入库，就对目标分组全部账号再发一条测试消息；认证失败、封禁和配额耗尽会删除（同时清掉 kiro-rs 反代上的对应凭据），超时、限流和服务异常会保留。"
+            />
+            <ToggleField
+              checked={config.cleanupPeriodicEnabled}
+              onChange={(cleanupPeriodicEnabled) =>
+                setConfig({ ...config, cleanupPeriodicEnabled })
+              }
+              title="按周期全量清理不可用账号"
+              hint="不等有新号也定期复查。只靠上面那条的话，号池没新货时一次都不跑，已入库的号后来被封或到期就会一直留在反代里。"
+            />
+            {config.cleanupPeriodicEnabled && (
+              <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
+                <div>
+                  <Label>清理间隔（分钟）</Label>
+                  <Input
+                    type="number"
+                    min={KSK_CLEANUP_INTERVAL_MIN_MINUTES}
+                    max={KSK_CLEANUP_INTERVAL_MAX_MINUTES}
+                    value={config.cleanupIntervalMinutes}
+                    onChange={(event) =>
+                      setConfig({ ...config, cleanupIntervalMinutes: Number(event.target.value) })
+                    }
+                  />
+                </div>
+                <p className="self-end pb-2 text-xs text-muted-foreground">
+                  每轮每个号都会发一条测试消息，间隔太短纯烧 credits。额度耗尽这种最常见的失效
+                  不依赖它——那条走余额接口，由反代统计每分钟免费查一次。
+                </p>
+              </div>
+            )}
+            <ToggleField
+              checked={config.autoDeleteExhausted}
+              onChange={(autoDeleteExhausted) => setConfig({ ...config, autoDeleteExhausted })}
+              title="额度耗尽自动删除"
+              hint="反代统计每分钟采一次余额，发现额度已耗尽（剩余 0）就把凭据从 kiro-rs 反代删掉，并连带删除本地账号库里的对应账号。查余额是只读计量，不消耗额度。"
             />
             <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
               <div>

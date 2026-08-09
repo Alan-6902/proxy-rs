@@ -78,10 +78,26 @@ interface KskAutomationRunnerDeps extends Omit<
   notifyStatus: (status: KskAutomationStatus) => void
 }
 
+/** 全量验活的一次结果：判死的 key 与本次遇到的问题描述。 */
+interface CleanupPassOutcome {
+  doomedKeys: string[]
+  issues: string[]
+}
+
 class KskAutomationRunner {
   private timer: ReturnType<typeof setTimeout> | null = null
   private stopped = true
   private roundPromise: Promise<void> | null = null
+  /** 周期性全量验活的定时器，与 Provider 轮询各自独立。 */
+  private cleanupTimer: ReturnType<typeof setTimeout> | null = null
+  private cleanupRoundPromise: Promise<void> | null = null
+  /**
+   * 正在进行的全量验活。
+   *
+   * Provider 新增触发的清理与周期性清理会撞在一起，两个同时跑就是把每个号的
+   * 验活 credits 花两遍。并发调用一律汇聚到同一次执行上。
+   */
+  private cleanupPassPromise: Promise<CleanupPassOutcome> | null = null
   private localAdminRunning = false
   private localAdminQueued = false
   private localAdminPromise: Promise<void> | null = null
@@ -138,14 +154,42 @@ class KskAutomationRunner {
     if (task.config.providerEnabled && task.secrets.providerUrl) this.scheduleNext(0)
     else this.pushStatus()
     if (task.config.localAdminEnabled) this.queueLocalAdminSync()
+    /*
+     * 周期性验活不等第一个间隔就跑一次：应用重启后号池里可能已经躺了一批挂号，
+     * 让它们再赖满一个间隔没有道理。
+     */
+    if (task.config.cleanupPeriodicEnabled && this.deps.cleanupProxyAccounts) {
+      this.scheduleCleanup(0)
+    }
   }
 
   stop(): void {
     this.stopped = true
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
+    if (this.cleanupTimer) clearTimeout(this.cleanupTimer)
+    this.cleanupTimer = null
     this.localAdminQueued = false
-    this.status = { ...this.status, running: false, nextRunAt: undefined }
+    this.status = { ...this.status, running: false, nextRunAt: undefined, nextCleanupAt: undefined }
+  }
+
+  /** 手动触发一次全量验活，不等周期到点。 */
+  async cleanupNow(): Promise<KskAutomationStatus> {
+    const task = await this.deps.readTask()
+    if (!task?.enabled) throw new Error('任务已暂停，请先恢复任务')
+    if (!this.deps.cleanupProxyAccounts) throw new Error('当前构建未接入账号清理能力')
+    this.stopped = false
+    this.log('手动触发全量验活')
+    await this.runCleanupRound()
+    return this.snapshot()
+  }
+
+  /** 外部（额度耗尽清理）判死的 key：拉黑，避免下一轮 Provider 又把它拉回来。 */
+  blacklistKeys(keys: readonly string[]): void {
+    for (const key of keys) {
+      this.invalidKeys.add(key)
+      this.pendingEmail.delete(key)
+    }
   }
 
   async runNow(): Promise<KskAutomationStatus> {
@@ -202,6 +246,126 @@ class KskAutomationRunner {
     return this.roundPromise
   }
 
+  private scheduleCleanup(delayMs: number): void {
+    if (this.stopped) return
+    if (this.cleanupTimer) clearTimeout(this.cleanupTimer)
+    this.status = { ...this.status, nextCleanupAt: Date.now() + delayMs }
+    this.cleanupTimer = setTimeout(() => {
+      this.cleanupTimer = null
+      void this.runCleanupRound()
+    }, delayMs)
+    this.pushStatus()
+  }
+
+  private runCleanupRound(): Promise<void> {
+    if (this.cleanupRoundPromise) return this.cleanupRoundPromise
+    this.cleanupRoundPromise = this.executeCleanupRound().finally(() => {
+      this.cleanupRoundPromise = null
+    })
+    return this.cleanupRoundPromise
+  }
+
+  /**
+   * 独立周期的全量验活。
+   *
+   * 与 Provider 轮询分开跑：轮询只在有新号时才顺手清理，号池干涸时一次都不跑，
+   * 已入库的号后来挂掉（订阅到期、被封）就一直赖在反代池子里。
+   *
+   * 判死的号除了从本地账号库删掉，还要同步从本机 Admin 摘掉，否则反代会继续拿它打上游。
+   */
+  private async executeCleanupRound(): Promise<void> {
+    try {
+      const task = await this.deps.readTask()
+      if (
+        !task?.enabled ||
+        !task.config.cleanupPeriodicEnabled ||
+        !this.deps.cleanupProxyAccounts
+      ) {
+        this.status = { ...this.status, nextCleanupAt: undefined }
+        this.pushStatus()
+        return
+      }
+      const { doomedKeys, issues } = await this.runCleanupPass(task)
+      if (doomedKeys.length > 0 && task.config.localAdminEnabled) {
+        issues.push(...(await this.deleteFromLocalAdmin(task, doomedKeys)))
+      }
+      if (doomedKeys.length > 0) this.deps.notifyAccountsChanged()
+      if (issues.length > 0) {
+        this.status = {
+          ...this.status,
+          state: KSK_AUTOMATION_STATE.DEGRADED,
+          lastError: issues.join('；')
+        }
+      }
+    } catch (error) {
+      const message = `周期性全量验活失败：${error instanceof Error ? error.message : String(error)}`
+      this.status = { ...this.status, state: KSK_AUTOMATION_STATE.DEGRADED, lastError: message }
+      this.log(message, KSK_AUTOMATION_LOG_LEVEL.ERROR)
+    } finally {
+      this.pushStatus()
+      const task = await this.deps.readTask().catch(() => undefined)
+      if (!this.stopped && task?.enabled && task.config.cleanupPeriodicEnabled) {
+        this.scheduleCleanup(task.config.cleanupIntervalMinutes * 60_000)
+      }
+    }
+  }
+
+  /**
+   * 跑一次全量验活，返回判死的 key 与问题描述。
+   *
+   * 并发调用汇聚到同一次执行：新增触发与周期触发撞在一起时，重复验活等于把每个号的
+   * credits 花两遍，而两者要的结果完全一样。
+   */
+  private runCleanupPass(task: PersistedKskAutomationTask): Promise<CleanupPassOutcome> {
+    if (this.cleanupPassPromise) return this.cleanupPassPromise
+    this.cleanupPassPromise = this.executeCleanupPass(task).finally(() => {
+      this.cleanupPassPromise = null
+    })
+    return this.cleanupPassPromise
+  }
+
+  private async executeCleanupPass(task: PersistedKskAutomationTask): Promise<CleanupPassOutcome> {
+    const outcome: CleanupPassOutcome = { doomedKeys: [], issues: [] }
+    if (!this.deps.cleanupProxyAccounts) return outcome
+    const liveness: KskLivenessOptions = {
+      model: task.config.livenessModel,
+      message: task.config.livenessMessage
+    }
+    try {
+      const cleanup = await this.deps.cleanupProxyAccounts(task.config.providerGroupId, liveness)
+      // 拉黑本次被删掉的号；同时撤掉待发邮件，避免为一个已被删除的号发通知
+      for (const key of cleanup.removedKeys ?? []) {
+        this.invalidKeys.add(key)
+        this.pendingEmail.delete(key)
+        outcome.doomedKeys.push(key)
+      }
+      this.status = {
+        ...this.status,
+        lastCleanupCheckedCount: cleanup.checked,
+        lastCleanupRemovedCount: cleanup.removed,
+        lastCleanupRetainedCount: cleanup.retainedTransient,
+        lastCleanupAt: Date.now()
+      }
+      this.log(`全量验活检查 ${cleanup.checked} 个账号，删除 ${cleanup.removed} 个失效号`)
+      outcome.issues.push(...cleanup.errors)
+      for (const issue of cleanup.errors) {
+        this.log(`全量验活：${issue}`, KSK_AUTOMATION_LOG_LEVEL.WARN)
+      }
+      if (cleanup.retainedTransient > 0) {
+        outcome.issues.push(`保留 ${cleanup.retainedTransient} 个暂时无法确认的账号`)
+        this.log(
+          `保留 ${cleanup.retainedTransient} 个暂时无法确认的账号，待下轮复核`,
+          KSK_AUTOMATION_LOG_LEVEL.WARN
+        )
+      }
+    } catch (error) {
+      const message = `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
+      outcome.issues.push(message)
+      this.log(message, KSK_AUTOMATION_LOG_LEVEL.ERROR)
+    }
+    return outcome
+  }
+
   private async executeRound(): Promise<void> {
     this.status = {
       ...this.status,
@@ -211,10 +375,11 @@ class KskAutomationRunner {
       nextRunAt: undefined,
       lastAddedCount: 0,
       lastRejectedCount: 0,
-      lastEmailedCount: 0,
-      lastCleanupCheckedCount: 0,
-      lastCleanupRemovedCount: 0,
-      lastCleanupRetainedCount: 0
+      lastEmailedCount: 0
+      /*
+       * 清理计数不在这里归零：全量验活现在有独立周期，Provider 轮询把它清零会让
+       * 界面上刚跑完的周期清理结果被下一次拉取擦成 0。计数由 executeCleanupPass 自己覆写。
+       */
     }
     this.pushStatus()
 
@@ -281,40 +446,9 @@ class KskAutomationRunner {
 
       if (added.length > 0) {
         if (task.config.cleanupInvalidOnAdd && this.deps.cleanupProxyAccounts) {
-          try {
-            const cleanup = await this.deps.cleanupProxyAccounts(
-              task.config.providerGroupId,
-              liveness
-            )
-            // 拉黑本轮被删掉的号；同时撤掉待发邮件，避免为一个已被删除的号发通知
-            for (const key of cleanup.removedKeys ?? []) {
-              this.invalidKeys.add(key)
-              this.pendingEmail.delete(key)
-              doomedKeys.add(key)
-            }
-            this.status = {
-              ...this.status,
-              lastCleanupCheckedCount: cleanup.checked,
-              lastCleanupRemovedCount: cleanup.removed,
-              lastCleanupRetainedCount: cleanup.retainedTransient
-            }
-            this.log(`全量验活检查 ${cleanup.checked} 个账号，删除 ${cleanup.removed} 个失效号`)
-            roundIssues.push(...cleanup.errors)
-            for (const issue of cleanup.errors) {
-              this.log(`全量验活：${issue}`, KSK_AUTOMATION_LOG_LEVEL.WARN)
-            }
-            if (cleanup.retainedTransient > 0) {
-              roundIssues.push(`保留 ${cleanup.retainedTransient} 个暂时无法确认的账号`)
-              this.log(
-                `保留 ${cleanup.retainedTransient} 个暂时无法确认的账号，待下轮复核`,
-                KSK_AUTOMATION_LOG_LEVEL.WARN
-              )
-            }
-          } catch (error) {
-            const message = `Proxy RS 清理失败：${error instanceof Error ? error.message : String(error)}`
-            roundIssues.push(message)
-            this.log(message, KSK_AUTOMATION_LOG_LEVEL.ERROR)
-          }
+          const cleanup = await this.runCleanupPass(task)
+          for (const key of cleanup.doomedKeys) doomedKeys.add(key)
+          roundIssues.push(...cleanup.issues)
         }
 
         /*
@@ -629,7 +763,25 @@ export class KskAutomationManager {
     return runner.syncLocalAdminNow()
   }
 
+  async cleanupNow(taskId: string): Promise<KskAutomationStatus> {
+    if (!this.runners.has(taskId)) await this.reloadTask(taskId)
+    const runner = this.runners.get(taskId)
+    if (!runner) throw new Error('任务不存在或已删除')
+    return runner.cleanupNow()
+  }
+
   queueLocalAdminSync(): void {
     for (const runner of this.runners.values()) runner.queueLocalAdminSync()
+  }
+
+  /**
+   * 把外部判死的 key 拉黑到所有 runner。
+   *
+   * 额度耗尽清理走的是反代统计那条链路，它不知道这些号属于哪个任务；而只要有任何一个
+   * 任务的 Provider 还会返回它，下一轮就会被重新拉回来。所以一律全量拉黑。
+   */
+  blacklistKeys(keys: readonly string[]): void {
+    if (keys.length === 0) return
+    for (const runner of this.runners.values()) runner.blacklistKeys(keys)
   }
 }

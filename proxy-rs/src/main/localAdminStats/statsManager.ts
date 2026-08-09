@@ -19,9 +19,12 @@ import {
   LOCAL_ADMIN_STATS_MAX_SAMPLES,
   LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS,
   LOCAL_ADMIN_STATS_STATE,
+  EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
   accumulateHourlyUsage,
   aggregateLocalAdminStats,
+  selectExhaustedLocalAdminCredentials,
   type LocalAdminCredentialStats,
+  type LocalAdminExhaustedCleanupSummary,
   type LocalAdminCredentialUsage,
   type LocalAdminCumulativeCursor,
   type LocalAdminHourlyBucket,
@@ -53,6 +56,8 @@ export interface LocalAdminStatsTargetConfig {
   baseUrl: string
   adminApiKey: string
   timeoutSeconds: number
+  /** 采到用量后自动删掉额度耗尽的凭据。未配置时按不自动处理。 */
+  autoDeleteExhausted?: boolean
 }
 
 export interface LocalAdminStatsManagerDeps {
@@ -60,6 +65,15 @@ export interface LocalAdminStatsManagerDeps {
   readTarget: () => Promise<LocalAdminStatsTargetConfig | undefined>
   /** 直连 loopback 的 fetch，不走系统代理 */
   fetchImpl: KskAutomationFetch
+  /**
+   * 删掉额度耗尽的凭据（Admin 与本地账号库两边）。
+   *
+   * 做成注入而不是在这里直接删：本地账号库归 index.ts 的 store 管，把它拖进统计模块
+   * 会让这个模块在测试里没法用假 fetch 跑完整流程。不注入时自动清理整块跳过。
+   */
+  cleanupExhausted?: (
+    credentials: readonly LocalAdminCredentialStats[]
+  ) => Promise<LocalAdminExhaustedCleanupSummary>
   notifySnapshot: (snapshot: LocalAdminStatsSnapshot) => void
   log?: (message: string) => void
 }
@@ -69,6 +83,8 @@ export class LocalAdminStatsManager {
   private stopped = true
   private roundPromise: Promise<void> | null = null
   private usagePromise: Promise<LocalAdminUsageRefreshSummary> | null = null
+  private cleanupPromise: Promise<LocalAdminExhaustedCleanupSummary> | null = null
+  private lastCleanup: LocalAdminExhaustedCleanupSummary = EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP
   private credentials: LocalAdminCredentialStats[] = []
   private samples: LocalAdminStatsSample[] = []
   private buckets: LocalAdminHourlyBucket[] = []
@@ -129,6 +145,67 @@ export class LocalAdminStatsManager {
       this.usagePromise = null
     })
     return this.usagePromise
+  }
+
+  /**
+   * 手动清理额度耗尽的凭据。
+   *
+   * 先拉一轮用量再判：页面上的用量可能是几分钟前采的，那之后可能已经重置了。
+   * balance 有约 300 秒本地缓存，多这一次请求基本不打上游。
+   */
+  async cleanupExhaustedNow(): Promise<LocalAdminExhaustedCleanupSummary> {
+    if (this.cleanupPromise) return this.cleanupPromise
+    this.cleanupPromise = this.executeManualCleanup().finally(() => {
+      this.cleanupPromise = null
+    })
+    return this.cleanupPromise
+  }
+
+  private async executeManualCleanup(): Promise<LocalAdminExhaustedCleanupSummary> {
+    if (!this.deps.cleanupExhausted) throw new Error('当前构建未接入凭据清理能力')
+    await this.refreshUsageNow()
+    const summary = await this.runExhaustedCleanup(this.credentials)
+    return summary ? this.lastCleanup : EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP
+  }
+
+  /**
+   * 跑一次额度耗尽清理，返回删除后重新抓到的凭据列表（没删任何东西时返回 undefined）。
+   *
+   * 清理失败不能把整轮采集判成失败：统计本身已经拿到了，标个 lastError 让用户看见即可。
+   */
+  private async runExhaustedCleanup(
+    credentials: readonly LocalAdminCredentialStats[]
+  ): Promise<LocalAdminCredentialStats[] | undefined> {
+    if (!this.deps.cleanupExhausted) return undefined
+    if (selectExhaustedLocalAdminCredentials(credentials).length === 0) return undefined
+    try {
+      const summary = await this.deps.cleanupExhausted(credentials)
+      this.lastCleanup = summary
+      this.status = {
+        ...this.status,
+        lastCleanupAt: Date.now(),
+        lastCleanupRemovedCount: summary.removed
+      }
+      if (summary.removed > 0) {
+        this.log(
+          `已清理 ${summary.removed} 个额度耗尽的凭据（本地账号 ${summary.removedLocalAccounts} 个）：` +
+            summary.removedMaskedKeys.join('、')
+        )
+      }
+      for (const issue of summary.errors) this.log(`清理额度耗尽凭据：${issue}`)
+      if (summary.errors.length > 0) {
+        this.status = { ...this.status, lastError: summary.errors.join('；') }
+      }
+      if (summary.removed === 0) return undefined
+      // 删完重新抓一遍：不然页面上那几条已删的凭据要等下一轮才消失
+      const target = await this.resolveTarget()
+      if (!target) return undefined
+      return await fetchLocalAdminCredentialStats(target, this.usageCache)
+    } catch (error) {
+      this.status = { ...this.status, lastError: this.message(error) }
+      this.log(`清理额度耗尽凭据失败: ${this.message(error)}`)
+      return undefined
+    }
   }
 
   /** 清空本地趋势快照。上游没有历史，清掉就真没了，由调用方做二次确认。 */
@@ -233,12 +310,29 @@ export class LocalAdminStatsManager {
       }
 
       this.credentials = credentials
+      /*
+       * 差分先记账再清理：删掉的凭据这一小时已经产生的消耗必须留在报表里，
+       * 顺序反了那段消耗就查无对证了（accumulateHourlyUsage 只记它当轮看见的凭据）。
+       */
       await this.recordSample(credentials)
+
+      /*
+       * healthy 先落地，再跑清理：清理的报错要留在 lastError 里，而这里的
+       * `lastError: undefined` 会把它抹掉。采集本身已经成功了，顺序不能反。
+       */
       this.status = {
         ...this.status,
         state: LOCAL_ADMIN_STATS_STATE.HEALTHY,
         lastSuccessAt: Date.now(),
         lastError: undefined
+      }
+
+      if (target.autoDeleteExhausted && this.deps.cleanupExhausted) {
+        const remaining = await this.runExhaustedCleanup(credentials)
+        if (remaining) {
+          this.credentials = remaining
+          this.pruneUsageCache(remaining)
+        }
       }
     } catch (error) {
       this.status = {
@@ -348,7 +442,9 @@ export class LocalAdminStatsManager {
       available: totals.available,
       // 没查过用量时不写 0，否则趋势图会出现一段假的「用量归零」
       usageCurrent: totals.usageSampleCount > 0 ? totals.usageCurrent : undefined,
-      usageLimit: totals.usageSampleCount > 0 ? totals.usageLimit : undefined
+      usageLimit: totals.usageSampleCount > 0 ? totals.usageLimit : undefined,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens
     }
   }
 

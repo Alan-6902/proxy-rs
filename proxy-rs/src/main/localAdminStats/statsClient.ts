@@ -31,6 +31,8 @@ export interface LocalAdminStatsTarget {
   adminApiKey: string
   timeoutSeconds: number
   fetchImpl: KskAutomationFetch
+  /** 采到用量后自动删掉额度耗尽的凭据。这里两个抓取函数都不用它，由调度层读。 */
+  autoDeleteExhausted?: boolean
 }
 
 function readCount(value: unknown): number {
@@ -40,6 +42,20 @@ function readCount(value: unknown): number {
 
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/**
+ * 读一个可缺失的非负计数。
+ *
+ * 与 readCount 的差别：字段缺失时回 undefined 而不是 0。token 统计需要区分
+ * 「这个 kiro-rs 不支持该字段」和「支持但确实是 0」——前者不该在页面上显示成
+ * 「本窗口消耗 0」误导人。
+ */
+function readOptionalCount(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const numberValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numberValue) || numberValue < 0) return undefined
+  return Math.floor(numberValue)
 }
 
 /** Admin 的时间字段是 RFC3339 字符串，也可能是秒级时间戳。 */
@@ -81,6 +97,9 @@ export function toCredentialStats(
     successCount: readCount(credential.successCount),
     failureCount,
     refreshFailureCount,
+    // 旧版 kiro-rs 不返回这两个字段，保持 undefined 以区分「不支持」与「真的是 0」
+    inputTokens: readOptionalCount(credential.inputTokens),
+    outputTokens: readOptionalCount(credential.outputTokens),
     lastUsedAt: readTimestamp(credential.lastUsedAt),
     usage,
     alerts: resolveLocalAdminAlerts({ disabled, failureCount, refreshFailureCount, usage })

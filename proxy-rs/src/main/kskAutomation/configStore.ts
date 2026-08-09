@@ -5,6 +5,9 @@ import {
   DEFAULT_KSK_AUTOMATION_CONFIG,
   KSK_AUTOMATION_REQUEST_TIMEOUT_SECONDS,
   KSK_AUTOMATION_STATE,
+  KSK_CLEANUP_INTERVAL_MAX_MINUTES,
+  KSK_CLEANUP_INTERVAL_MIN_MINUTES,
+  KSK_CLEANUP_INTERVAL_MINUTES,
   KSK_AUTOMATION_STORE_VERSION,
   KSK_AUTOMATION_TASK_TYPE,
   KSK_PROVIDER_POLL_INTERVAL_SECONDS,
@@ -112,6 +115,14 @@ export function normalizeKskAutomationConfig(
       120
     ),
     cleanupInvalidOnAdd: source.cleanupInvalidOnAdd !== false,
+    cleanupPeriodicEnabled: source.cleanupPeriodicEnabled !== false,
+    cleanupIntervalMinutes: positiveInt(
+      source.cleanupIntervalMinutes,
+      KSK_CLEANUP_INTERVAL_MINUTES,
+      KSK_CLEANUP_INTERVAL_MIN_MINUTES,
+      KSK_CLEANUP_INTERVAL_MAX_MINUTES
+    ),
+    autoDeleteExhausted: source.autoDeleteExhausted !== false,
     livenessModel: normalizeString(source.livenessModel),
     livenessMessage: normalizeString(source.livenessMessage),
     emailEnabled: source.emailEnabled === true,

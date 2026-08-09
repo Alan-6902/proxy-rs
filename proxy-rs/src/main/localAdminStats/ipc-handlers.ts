@@ -1,5 +1,6 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import type {
+  LocalAdminExhaustedCleanupSummary,
   LocalAdminStatsSnapshot,
   LocalAdminUsageRefreshSummary
 } from '../../shared/localAdminStats'
@@ -9,6 +10,7 @@ export const LOCAL_ADMIN_STATS_CHANNEL = {
   snapshot: 'local-admin-stats-snapshot',
   refreshNow: 'local-admin-stats-refresh-now',
   refreshUsage: 'local-admin-stats-refresh-usage',
+  cleanupExhausted: 'local-admin-stats-cleanup-exhausted',
   clearSamples: 'local-admin-stats-clear-samples',
   clearBuckets: 'local-admin-stats-clear-buckets',
   snapshotEvent: 'local-admin-stats-changed'
@@ -64,6 +66,17 @@ export function registerLocalAdminStatsIpcHandlers(deps: LocalAdminStatsIpcDeps)
     async (): Promise<IpcResult<LocalAdminUsageRefreshSummary>> => {
       try {
         return { success: true, data: await deps.getManager().refreshUsageNow() }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    LOCAL_ADMIN_STATS_CHANNEL.cleanupExhausted,
+    async (): Promise<IpcResult<LocalAdminExhaustedCleanupSummary>> => {
+      try {
+        return { success: true, data: await deps.getManager().cleanupExhaustedNow() }
       } catch (error) {
         return toError(error)
       }

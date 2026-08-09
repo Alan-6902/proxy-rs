@@ -119,6 +119,22 @@ function formatNumber(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
 }
 
+/**
+ * token 数按 K / M 压缩显示。
+ *
+ * token 动辄六七位数，`320,906` 这种写法要数位数才知道量级，纵向扫一列更难比大小。
+ * 压成 `320.9K` / `2.46M` 后量级一眼可辨；精确值仍放 title，需要对账时能拿到。
+ *
+ * 阈值取 10_000：五位以内（如 `4,125`）本来就好读，压成 `4.1K` 反而丢精度。
+ */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  const abs = Math.abs(value)
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
+  if (abs >= 10_000) return `${(value / 1_000).toFixed(1)}K`
+  return formatNumber(value)
+}
+
 function formatUsage(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 })
 }
@@ -177,6 +193,8 @@ interface KpiCardProps {
   icon: React.ElementType
   accent: string
   tone?: 'default' | 'warn' | 'danger'
+  /** 主数值的悬浮提示；数值被压缩显示（如 320.9K）时用来给出精确值。 */
+  valueTitle?: string
 }
 
 function KpiCard({
@@ -185,7 +203,8 @@ function KpiCard({
   hint,
   icon: Icon,
   accent,
-  tone = 'default'
+  tone = 'default',
+  valueTitle
 }: KpiCardProps): React.ReactNode {
   return (
     <Card>
@@ -204,6 +223,7 @@ function KpiCard({
               tone === 'danger' && 'text-red-500',
               tone === 'warn' && 'text-amber-500'
             )}
+            title={valueTitle}
           >
             {value}
           </p>
@@ -630,12 +650,14 @@ export function ProxyStatsPage(): React.ReactNode {
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label={`${rangeLabel} 我的 token`}
-            value={tokenSupported ? formatNumber(reportTokens) : '不支持'}
+            value={tokenSupported ? formatTokens(reportTokens) : '不支持'}
             hint={
               tokenSupported
-                ? `输入 ${formatNumber(report.inputTokenDelta)} · 输出 ${formatNumber(report.outputTokenDelta)}`
+                ? `输入 ${formatTokens(report.inputTokenDelta)} · 输出 ${formatTokens(report.outputTokenDelta)}`
                 : '需升级 kiro-rs 才有此数据'
             }
+            // 压缩显示后精确值只能从 title 拿，对账时需要
+            valueTitle={tokenSupported ? `${formatNumber(reportTokens)} tokens` : undefined}
             icon={Coins}
             accent="#f59e0b"
           />
@@ -743,8 +765,11 @@ export function ProxyStatsPage(): React.ReactNode {
                             )}
                           </div>
                         </td>
-                        <td className="px-2 py-2 text-right font-medium tabular-nums text-amber-600 dark:text-amber-400">
-                          {formatNumber(row.inputTokenDelta + row.outputTokenDelta)}
+                        <td
+                          className="px-2 py-2 text-right font-medium tabular-nums text-amber-600 dark:text-amber-400"
+                          title={`${formatNumber(row.inputTokenDelta + row.outputTokenDelta)} tokens`}
+                        >
+                          {formatTokens(row.inputTokenDelta + row.outputTokenDelta)}
                         </td>
                         <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
                           {reportTokens > 0
@@ -753,8 +778,11 @@ export function ProxyStatsPage(): React.ReactNode {
                               )
                             : '—'}
                         </td>
-                        <td className="px-2 py-2 text-right text-xs tabular-nums text-muted-foreground">
-                          {formatNumber(row.inputTokenDelta)} / {formatNumber(row.outputTokenDelta)}
+                        <td
+                          className="px-2 py-2 text-right text-xs tabular-nums text-muted-foreground"
+                          title={`输入 ${formatNumber(row.inputTokenDelta)} / 输出 ${formatNumber(row.outputTokenDelta)}`}
+                        >
+                          {formatTokens(row.inputTokenDelta)} / {formatTokens(row.outputTokenDelta)}
                         </td>
                         <td
                           className="px-2 py-2 text-right tabular-nums text-muted-foreground"
@@ -784,13 +812,19 @@ export function ProxyStatsPage(): React.ReactNode {
                   <tfoot>
                     <tr className="border-t border-border/60 text-xs">
                       <td className="px-2 py-2 font-medium">合计</td>
-                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
-                        {formatNumber(reportTokens)}
+                      <td
+                        className="px-2 py-2 text-right font-semibold tabular-nums"
+                        title={`${formatNumber(reportTokens)} tokens`}
+                      >
+                        {formatTokens(reportTokens)}
                       </td>
                       <td className="px-2 py-2" />
-                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
-                        {formatNumber(report.inputTokenDelta)} /{' '}
-                        {formatNumber(report.outputTokenDelta)}
+                      <td
+                        className="px-2 py-2 text-right font-semibold tabular-nums"
+                        title={`输入 ${formatNumber(report.inputTokenDelta)} / 输出 ${formatNumber(report.outputTokenDelta)}`}
+                      >
+                        {formatTokens(report.inputTokenDelta)} /{' '}
+                        {formatTokens(report.outputTokenDelta)}
                       </td>
                       <td className="px-2 py-2 text-right font-semibold tabular-nums">
                         {formatUsage(report.usageDelta)}
@@ -958,9 +992,9 @@ export function ProxyStatsPage(): React.ReactNode {
                             return (
                               <span
                                 className="font-medium text-amber-600 dark:text-amber-400"
-                                title={`输入 ${formatNumber(row!.inputTokenDelta)} · 输出 ${formatNumber(row!.outputTokenDelta)} · 成功 ${formatNumber(row!.successDelta)} 次`}
+                                title={`合计 ${formatNumber(tokens)} · 输入 ${formatNumber(row!.inputTokenDelta)} · 输出 ${formatNumber(row!.outputTokenDelta)} · 成功 ${formatNumber(row!.successDelta)} 次`}
                               >
-                                {formatNumber(tokens)}
+                                {formatTokens(tokens)}
                               </span>
                             )
                           })()}

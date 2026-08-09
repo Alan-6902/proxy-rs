@@ -605,17 +605,21 @@ describe('单账号推送到本机 Admin', () => {
         refreshToken: REFRESH_TOKEN,
         clientId: 'client-id',
         clientSecret: 'client-secret',
-        authRegion: 'us-east-1'
+        authRegion: 'us-east-1',
+        apiRegion: 'us-east-1'
       }
     ],
     [
-      '仅 refreshToken 映射为 social，且不写 apiRegion',
+      // apiRegion 必须写：Admin 的 effective_api_region 不会从 region 回退，
+      // 缺了它就落到全局 region，跨区调用会被上游拒（403 not authorized）
+      '仅 refreshToken 映射为 social，且同时写 authRegion 与 apiRegion',
       { refreshToken: REFRESH_TOKEN, region: 'us-east-1' },
       {
         authMethod: 'social',
         priority: 0,
         refreshToken: REFRESH_TOKEN,
-        authRegion: 'us-east-1'
+        authRegion: 'us-east-1',
+        apiRegion: 'us-east-1'
       }
     ],
     [
@@ -633,7 +637,8 @@ describe('单账号推送到本机 Admin', () => {
         refreshToken: REFRESH_TOKEN,
         clientId: 'client-id',
         clientSecret: 'client-secret',
-        authRegion: 'us-east-1'
+        authRegion: 'us-east-1',
+        apiRegion: 'us-east-1'
       }
     ],
     [
@@ -649,7 +654,8 @@ describe('单账号推送到本机 Admin', () => {
         authMethod: 'social',
         priority: 0,
         refreshToken: REFRESH_TOKEN,
-        authRegion: 'us-east-1'
+        authRegion: 'us-east-1',
+        apiRegion: 'us-east-1'
       }
     ]
   ])('%s', (_name, candidate, expectedPayload) => {

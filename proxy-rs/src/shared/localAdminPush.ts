@@ -54,7 +54,16 @@ export type LocalAdminPayloadResult =
  * - OAuth 账号 → 以账号自己的 authMethod 为准（与本地 refreshTokenByMethod 同一判据）：
  *   social 直接走 social；IdC 必须齐备 clientId/Secret，缺一半就拒推而不是降级成 social。
  *   authMethod 缺失时（SSO Token 导入等老路径不写）按 clientId/Secret 存在性推断。
- * - OAuth 只传 authRegion：region 存的是 OIDC 区域，硬塞给 apiRegion 可能把 API 调用带到错误区域
+ * - OAuth 同时传 authRegion 与 apiRegion，都取账号自己的 region。
+ *
+ * 曾经只传 authRegion，理由是「region 存的是 OIDC 区域，硬塞给 apiRegion 可能带错区域」。
+ * 这个顾虑反了：Admin 的 effective_api_region 只看凭据的 apiRegion，不会回退到 region，
+ * 缺了它就落到 config.json 的全局 region。本机全局是 eu-central-1，于是 us-east-1 的
+ * Enterprise 号被拿去打 q.eu-central-1.amazonaws.com，getUsageLimits 回
+ * 403 `User is not authorized to make this call.`，推送门禁据此把可用的号判死。
+ *
+ * 实测（凭据 #6，mosaic.ma1）：补上 apiRegion=us-east-1 后 balance 200
+ * （KIRO POWER 805.76/10000），且经 Admin 发消息拿到 200 + "pong"。
  */
 export function resolveLocalAdminCredentialPayload(
   candidate: LocalAdminPushCandidate
@@ -83,6 +92,9 @@ export function resolveLocalAdminCredentialPayload(
   const clientId = candidate.clientId?.trim() ?? ''
   const clientSecret = candidate.clientSecret?.trim() ?? ''
 
+  // 账号区域同时用于 OIDC 刷新与 API 调用；apiRegion 必须显式给，Admin 不会从 region 回退
+  const credentialRegion = isValidKiroRegion(region) ? region : undefined
+
   // 账号自己声明的 authMethod 是权威来源：本地刷新链路（refreshTokenByMethod）就按它选
   // social / OIDC 端点，推给 Admin 必须用同一判据，否则 Admin 会拿错端点去刷这个 token。
   if (candidate.authMethod === 'social') {
@@ -92,7 +104,8 @@ export function resolveLocalAdminCredentialPayload(
         authMethod: LOCAL_ADMIN_AUTH_METHOD.SOCIAL,
         priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
         refreshToken,
-        authRegion: isValidKiroRegion(region) ? region : undefined
+        authRegion: credentialRegion,
+        apiRegion: credentialRegion
       }
     }
   }
@@ -111,7 +124,8 @@ export function resolveLocalAdminCredentialPayload(
       refreshToken,
       clientId: isIdc ? clientId : undefined,
       clientSecret: isIdc ? clientSecret : undefined,
-      authRegion: isValidKiroRegion(region) ? region : undefined
+      authRegion: credentialRegion,
+      apiRegion: credentialRegion
     }
   }
 }

@@ -140,7 +140,13 @@ export type LocalAdminProbeVerdict =
 export interface LocalAdminPushResult {
   status: 'created' | 'existing'
   credentialId?: string
-  /** 新建后余额接口是否调通；created 时恒为 true，existing 时恒为 false。 */
+  /**
+   * 新建后余额接口是否调通。existing 时恒为 false。
+   *
+   * created 时通常为 true，但有一个例外：上游拒绝该身份查额度（Enterprise 号实测会吃
+   * 403 `User is not authorized to make this call.`）时余额门禁被放过，此时为 false，
+   * 凭据的可用性由发消息验活背书。
+   */
   verified: boolean
   authMethod: LocalAdminAuthMethod
   /**

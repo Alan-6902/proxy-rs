@@ -18,6 +18,7 @@ import {
   providerUrlHint
 } from '../../src/shared/kskAutomation'
 import {
+  deleteLocalAdminCredentialsById,
   deleteLocalAdminCredentialsByKey,
   pushAccountToLocalAdmin,
   resolveLocalAdminApiBase,
@@ -397,6 +398,69 @@ describe('本机 Admin 地址与同步验活', () => {
     expect(result.errors).toHaveLength(1)
   })
 
+  it('按 id 删除凭据时走先禁用再删两步，并回传 apiKeyHash 供对齐本地账号库', async () => {
+    const requests: string[] = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      requests.push(`${init.method} ${url}`)
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({
+          credentials: [
+            {
+              id: 9,
+              authMethod: 'api_key',
+              apiKeyHash: sha256Hex(KSK_ONE),
+              maskedApiKey: 'ksk_...rcnS',
+              disabled: false
+            }
+          ]
+        })
+      }
+      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
+        return jsonResponse({})
+      }
+      if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
+      return jsonResponse({}, 404)
+    }
+
+    const result = await deleteLocalAdminCredentialsById({
+      credentials: [{ credentialId: '9', disabled: false }],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result.errors).toEqual([])
+    expect(result.deleted).toEqual([
+      { credentialId: '9', apiKeyHash: sha256Hex(KSK_ONE), maskedApiKey: 'ksk_...rcnS' }
+    ])
+    // Admin 只收已禁用的凭据，少了 disabled 那一步启用中的号永远删不掉
+    expect(requests).toContain('POST http://127.0.0.1:12888/api/admin/credentials/9/disabled')
+    expect(requests).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+  })
+
+  it('按 id 删除时列表里已不存在的凭据算成功，不报错也不再发删除请求', async () => {
+    const requests: string[] = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      requests.push(`${init.method} ${url}`)
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({ credentials: [] })
+      }
+      return jsonResponse({}, 404)
+    }
+
+    const result = await deleteLocalAdminCredentialsById({
+      credentials: [{ credentialId: '9' }],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result).toEqual({ deleted: [], errors: [] })
+    expect(requests.some((request) => request.startsWith('DELETE'))).toBe(false)
+  })
+
   it('验活消息留空时回落到与账号页一致的默认提示词', () => {
     expect(resolveKskLivenessMessage('')).toBe(KSK_LIVENESS_PROBE_MESSAGE)
     expect(resolveKskLivenessMessage('   ')).toBe(KSK_LIVENESS_PROBE_MESSAGE)
@@ -678,7 +742,13 @@ describe('单账号推送到本机 Admin', () => {
    */
   const runPushWithProbe = async (
     probe: (() => Promise<{ verdict: string; error?: string }>) | undefined,
-    options: { deleteFails?: boolean; balanceFails?: boolean; disableFails?: boolean } = {}
+    options: {
+      deleteFails?: boolean
+      balanceFails?: boolean
+      disableFails?: boolean
+      /** 余额接口的失败响应体与状态码，用来区分「真的挂了」和「不允许查额度」。 */
+      balanceFailure?: { body: unknown; status: number }
+    } = {}
   ): Promise<{ result: LocalAdminPushResult; calls: string[] }> => {
     const calls: string[] = []
     const fetchImpl: KskAutomationFetch = async (url, init) => {
@@ -690,6 +760,9 @@ describe('单账号推送到本机 Admin', () => {
         return jsonResponse({ credentialId: 9 })
       }
       if (url.endsWith('/credentials/9/balance')) {
+        if (options.balanceFailure) {
+          return jsonResponse(options.balanceFailure.body, options.balanceFailure.status)
+        }
         return options.balanceFails
           ? jsonResponse({ error: 'boom' }, 503)
           : jsonResponse({ balance: 1 })
@@ -782,6 +855,51 @@ describe('单账号推送到本机 Admin', () => {
       /本机 Admin 无法使用该凭据.*已从 Admin 删除该凭据/
     )
     expect(probe).not.toHaveBeenCalled()
+  })
+
+  /*
+   * Enterprise 号实测：Admin 刷出 token 后调 getUsageLimits 吃 403
+   * `User is not authorized to make this call.`，但同一条凭据在反代里发消息完全正常。
+   * 这个 403 只说明「查不到额度」，据它否决推送会把可用的号判死，所以必须放过，
+   * 由发消息验活定生死；同时 verified 要如实报 false（余额确实没验成）。
+   */
+  it('上游不允许查额度时放过余额门禁，交给发消息验活定生死', async () => {
+    const probe = vi.fn(async () => ({ verdict: 'alive' }))
+    const { result, calls } = await runPushWithProbe(probe as never, {
+      balanceFailure: {
+        body: {
+          error: {
+            type: 'api_error',
+            message:
+              '上游服务错误: 权限不足，无法获取使用额度: 403 Forbidden {"message":"User is not authorized to make this call.","reason":null}'
+          }
+        },
+        status: 502
+      }
+    })
+
+    expect(result).toEqual({
+      status: 'created',
+      credentialId: '9',
+      // 余额没验成，如实报 false；可用性由发消息验活背书
+      verified: false,
+      authMethod: 'social',
+      probeVerdict: 'alive'
+    })
+    expect(probe).toHaveBeenCalledOnce()
+    // 关键：没有回滚，凭据留在 Admin 里
+    expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+  })
+
+  it('上游不允许查额度但发消息验活也不过时，照旧删凭据并抛错', async () => {
+    await expect(
+      runPushWithProbe(async () => ({ verdict: 'permanently_invalid', error: '账号已失效' }), {
+        balanceFailure: {
+          body: { error: { message: '上游服务错误: 权限不足，无法获取使用额度: 403 Forbidden' } },
+          status: 502
+        }
+      })
+    ).rejects.toThrow(/发消息验活未通过.*账号已失效.*已从 Admin 删除该凭据/)
   })
 
   it('验活不过且删除也失败时，错误里点明需要手动清理', async () => {
@@ -962,7 +1080,7 @@ describe('KSK 自动拉取调度', () => {
     })
   })
 
-  it('只有本轮新增 KSK 时才触发目标分组清理，并回写清理统计', async () => {
+  it('只有本轮新增 KSK 时才触发新增清理，清理统计不被后续轮询清零', async () => {
     vi.useFakeTimers()
     let added = true
     const cleanupProxyAccounts = vi.fn(async () => ({
@@ -976,7 +1094,9 @@ describe('KSK 自动拉取调度', () => {
         ...DEFAULT_KSK_AUTOMATION_CONFIG,
         providerEnabled: true,
         providerGroupId: 'ksk',
-        cleanupInvalidOnAdd: true
+        cleanupInvalidOnAdd: true,
+        // 只验「新增触发」这一条；周期清理会另外再调一次，会干扰调用次数断言
+        cleanupPeriodicEnabled: false
       }
     })
     const manager = new KskAutomationManager({
@@ -1009,11 +1129,126 @@ describe('KSK 自动拉取调度', () => {
       lastCleanupRemovedCount: 2,
       lastCleanupRetainedCount: 0
     })
+    /*
+     * 第二轮没有新增，不该再验活一次；但上一次的清理结果必须留着——
+     * 清理已经是独立周期的事情，被 Provider 轮询清零会让界面看不到刚跑完的结果。
+     */
     expect(second).toMatchObject({
       lastAddedCount: 0,
-      lastCleanupCheckedCount: 0,
-      lastCleanupRemovedCount: 0
+      lastCleanupCheckedCount: 5,
+      lastCleanupRemovedCount: 2
     })
+  })
+
+  it('号池没新号时周期清理照样跑，并把判死的号从本机 Admin 删掉', async () => {
+    vi.useFakeTimers()
+    const doomedHash = sha256Hex(KSK_TWO)
+    const cleanupProxyAccounts = vi.fn(async () => ({
+      checked: 3,
+      removed: 1,
+      retainedTransient: 0,
+      errors: [],
+      removedKeys: [KSK_TWO]
+    }))
+    const localAdminFetch = vi.fn(async (url: string, init: { method: string }) => {
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({
+          credentials: [
+            { id: 9, apiKeyHash: doomedHash, authMethod: 'api_key', maskedApiKey: 'ksk_...rcnS' }
+          ]
+        })
+      }
+      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
+        return jsonResponse({})
+      }
+      if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
+      return jsonResponse({}, 404)
+    })
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        // Provider 关掉：这一条要验的正是「一个新号都没有也会清理」
+        providerEnabled: false,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true,
+        cleanupPeriodicEnabled: true,
+        localAdminEnabled: true,
+        localAdminGroupId: 'ksk'
+      },
+      secrets: { providerUrl: '', smtpPassword: '', localAdminApiKey: 'admin-secret' }
+    })
+    const notifyAccountsChanged = vi.fn()
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: vi.fn(),
+      localAdminFetchImpl: localAdminFetch,
+      importCredential: vi.fn(),
+      readLocalAdminAccounts: async () => [],
+      cleanupProxyAccounts,
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged
+    })
+
+    const status = await manager.cleanupNow(task.id)
+    manager.stop()
+
+    expect(cleanupProxyAccounts).toHaveBeenCalledWith('ksk', { model: '', message: '' })
+    expect(status).toMatchObject({ lastCleanupCheckedCount: 3, lastCleanupRemovedCount: 1 })
+    expect(notifyAccountsChanged).toHaveBeenCalled()
+    // 本地删了还不够，反代上那条也必须摘掉，否则它会继续拿废号打上游
+    const deleteCalls = localAdminFetch.mock.calls.filter(([, init]) => init.method === 'DELETE')
+    expect(deleteCalls).toHaveLength(1)
+    expect(status.logs.map((entry) => entry.message)).toContain('已从本机 Admin 删除 1 个失效凭据')
+  })
+
+  it('新增触发与周期触发撞在一起时只验活一次，不重复烧 credits', async () => {
+    vi.useFakeTimers()
+    let releaseCleanup: (() => void) | undefined
+    const cleanupProxyAccounts = vi.fn(
+      () =>
+        new Promise<{
+          checked: number
+          removed: number
+          retainedTransient: number
+          errors: string[]
+        }>((resolve) => {
+          releaseCleanup = () =>
+            resolve({ checked: 2, removed: 0, retainedTransient: 0, errors: [] })
+        })
+    )
+    const task = automationTask({
+      config: {
+        ...DEFAULT_KSK_AUTOMATION_CONFIG,
+        providerEnabled: true,
+        providerGroupId: 'ksk',
+        cleanupInvalidOnAdd: true,
+        cleanupPeriodicEnabled: true
+      }
+    })
+    const manager = new KskAutomationManager({
+      readStore: async () => managerStore(task),
+      readTask: async (taskId) => (taskId === task.id ? task : undefined),
+      fetchImpl: async () =>
+        jsonResponse({
+          code: 0,
+          data: [{ account: { key: KSK_ONE, aws_region: 'us-east-1', status: 'active' } }]
+        }),
+      importCredential: async (input) => ({ ...input, added: true }),
+      readLocalAdminAccounts: async () => [],
+      cleanupProxyAccounts,
+      notifyStatus: vi.fn(),
+      notifyAccountsChanged: vi.fn()
+    })
+
+    const fromProvider = manager.runNow(task.id)
+    await vi.waitFor(() => expect(cleanupProxyAccounts).toHaveBeenCalledTimes(1))
+    const fromPeriodic = manager.cleanupNow(task.id)
+    releaseCleanup?.()
+    await Promise.all([fromProvider, fromPeriodic])
+    manager.stop()
+
+    expect(cleanupProxyAccounts).toHaveBeenCalledTimes(1)
   })
 
   it('邮件发送失败时保留待通知 KSK，并在下一轮重试', async () => {

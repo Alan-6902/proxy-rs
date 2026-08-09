@@ -57,6 +57,9 @@ export interface RemoteCredential {
   successCount?: number
   failureCount?: number
   refreshFailureCount?: number
+  /** 经本机反代累计的 tokens，需 kiro-rs 支持；旧版本不返回该字段 */
+  inputTokens?: number
+  outputTokens?: number
   lastUsedAt?: string | number | null
   expiresAt?: string | number | null
   hasProfileArn?: boolean
@@ -91,7 +94,13 @@ export function resolveLocalAdminApiBase(value: string): string {
   return parsed.toString().replace(/\/$/, '')
 }
 
-function sha256Hex(value: string): string {
+/**
+ * Admin 侧凭据哈希的算法。
+ *
+ * 导出是因为「按 id 删 Admin 凭据后要找出本地对应账号」这条反向匹配也得用它：
+ * Admin 只回哈希，本地只有明文，两边靠同一个算法碰。改这里就得改 Admin，别单独动。
+ */
+export function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
@@ -234,6 +243,96 @@ export async function deleteLocalAdminCredentialsByKey(input: {
       result.removed++
     } catch (error) {
       result.errors.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+  return result
+}
+
+/** 按 id 删除时的单条结果，供调用方对齐本地账号库。 */
+export interface LocalAdminDeletedCredential {
+  credentialId: string
+  /** Admin 侧的 sha256(明文 key)。本地按同样算法反查出是哪个账号。 */
+  apiKeyHash?: string
+  maskedApiKey?: string
+}
+
+export interface LocalAdminDeleteByIdResult {
+  deleted: LocalAdminDeletedCredential[]
+  errors: string[]
+}
+
+/**
+ * 按 Admin 侧的 id 删除凭据。
+ *
+ * 与 deleteLocalAdminCredentialsByKey 的分工：那个函数的输入是本地明文 key（本地先判死，
+ * 再去 Admin 找对应哈希）；这个函数的输入是已经从 Admin 列表里挑好的 id——额度耗尽是
+ * 从 Admin 的 balance 读出来的，本地压根不知道是哪个 key，只能反过来按 id 删、再把
+ * 删掉的 apiKeyHash 回给调用方去对齐本地账号库。
+ *
+ * 单条失败不影响其余条目：一条删不掉就把它记进 errors，剩下的照删。
+ */
+export async function deleteLocalAdminCredentialsById(input: {
+  credentials: ReadonlyArray<{ credentialId: string; disabled?: boolean }>
+  baseUrl: string
+  adminApiKey: string
+  timeoutSeconds: number
+  fetchImpl: KskAutomationFetch
+}): Promise<LocalAdminDeleteByIdResult> {
+  const result: LocalAdminDeleteByIdResult = { deleted: [], errors: [] }
+  if (input.credentials.length === 0) return result
+
+  const baseUrl = resolveLocalAdminApiBase(input.baseUrl)
+  const adminApiKey = input.adminApiKey.trim()
+  if (!adminApiKey) throw new Error('未配置本机 Admin API Key')
+  const timeoutMs = Math.max(3, input.timeoutSeconds) * 1000
+
+  /*
+   * 删之前先读一遍列表：要拿 apiKeyHash 才能对齐本地账号库，而 disabled 状态也可能
+   * 在统计采样之后被改过（用户手动禁用了）。传进来的 disabled 只当兜底。
+   */
+  const remoteById = new Map<string, RemoteCredential>()
+  try {
+    const payload = await requestJson(
+      input.fetchImpl,
+      `${baseUrl}/credentials`,
+      adminApiKey,
+      timeoutMs,
+      { method: 'GET' }
+    )
+    for (const credential of readRemoteCredentials(payload)) {
+      const id = remoteCredentialId(credential)
+      if (id) remoteById.set(id, credential)
+    }
+  } catch (error) {
+    throw new Error(
+      `读取本机 Admin 凭据列表失败：${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+
+  for (const target of input.credentials) {
+    const remote = remoteById.get(target.credentialId)
+    // 列表里已经没有了：可能被别的链路先删了，算成功而不是报错
+    if (!remote) continue
+    try {
+      await deleteRemoteCredential({
+        baseUrl,
+        adminApiKey,
+        timeoutMs,
+        credentialId: target.credentialId,
+        disabled: remote.disabled === true,
+        fetchImpl: input.fetchImpl
+      })
+      result.deleted.push({
+        credentialId: target.credentialId,
+        apiKeyHash: remote.apiKeyHash ?? undefined,
+        maskedApiKey: remote.maskedApiKey
+      })
+    } catch (error) {
+      result.errors.push(
+        `删除凭据 ${remote.maskedApiKey || `#${target.credentialId}`} 失败：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
     }
   }
   return result
@@ -392,13 +491,20 @@ async function verifyOrRollback(
     fetchImpl: KskAutomationFetch
   },
   verify: () => Promise<void>,
-  describe: (detail: string) => string
+  describe: (detail: string) => string,
+  /**
+   * 判定这次失败是否应当放过（不回滚）。
+   *
+   * 只有在「失败本身并不证明凭据不可用」时才该放过，见 isBalanceQueryUnauthorized。
+   */
+  tolerate?: (detail: string) => boolean
 ): Promise<void> {
   try {
     await verify()
     return
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
+    if (tolerate?.(detail)) return
     let removed = false
     try {
       // 刚 POST 出来的凭据一定是启用状态，所以这里必须走「先禁用再删」的两步
@@ -420,6 +526,21 @@ async function verifyOrRollback(
         : `${describe(detail)}；且删除凭据 #${context.credentialId} 失败，需要手动清理`
     )
   }
+}
+
+/**
+ * 余额查询是否因「上游不允许这个身份查额度」而失败（而非凭据不可用）。
+ *
+ * Enterprise 账号实测：Admin 用它的 refreshToken 刷出 token 后调 getUsageLimits 会吃
+ * 403 `User is not authorized to make this call.`，但同一条凭据在反代里发消息完全正常
+ * （successCount 照涨）。也就是说这个 403 只说明「查不到额度」，不说明「凭据不能用」，
+ * 拿它否决推送会把可用的号判死。
+ *
+ * Admin 侧把「权限不足」归类成 UpstreamError → HTTP 502（见后端 classify_balance_error），
+ * 所以这里按响应体里的特征串匹配，而不是只看状态码：502 也可能是真的上游挂了。
+ */
+function isBalanceQueryUnauthorized(detail: string): boolean {
+  return detail.includes('权限不足') || detail.includes('User is not authorized to make this call')
 }
 
 /**
@@ -489,12 +610,15 @@ export async function pushAccountToLocalAdmin(input: {
    *
    * 1) balance：让 Admin 用这条凭据去问余额，验的是 Admin 侧接线
    *    （authMethod 解析对不对、它能不能拿这份凭据刷出 token）。
+   *    例外见 isBalanceQueryUnauthorized：上游拒绝这个身份查额度时，
+   *    这一关证明不了任何事，放过去交给发消息验活定生死。
    * 2) 发消息：balance 通不代表能出活（超额号 balance 照样通，
    *    见 credentialCleanup 的注释），所以还要真发一条消息。
    *
    * transient（超时 / 限流 / 5xx）在这里也算不通过。它确实可能冤枉好号，
    * 但「推送失败可以重推」比「推进去了但可能不能用」代价小。
    */
+  let balanceVerified = true
   await verifyOrRollback(
     { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
     async () => {
@@ -506,7 +630,12 @@ export async function pushAccountToLocalAdmin(input: {
         { method: 'GET' }
       )
     },
-    (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`
+    (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`,
+    (detail) => {
+      if (!isBalanceQueryUnauthorized(detail)) return false
+      balanceVerified = false
+      return true
+    }
   )
 
   if (input.probeLiveness) {
@@ -524,7 +653,11 @@ export async function pushAccountToLocalAdmin(input: {
   return {
     status: 'created',
     credentialId,
-    verified: true,
+    /*
+     * verified 说的是「余额接口调通了」。上游拒绝这个身份查额度时这一关被放过，
+     * 那就不能报 true——此时凭据的可用性是发消息验活背书的，不是余额接口背书的。
+     */
+    verified: balanceVerified,
     authMethod: payload.authMethod,
     // 没注入探针时只过了 balance 那一关，别谎报 alive
     probeVerdict: input.probeLiveness

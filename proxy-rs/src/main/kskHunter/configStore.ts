@@ -99,6 +99,11 @@ export interface PersistedKskHunterStore {
     downstreamApiKey: string
     /** 每渠道余额查询地址（含 token）。未配置的渠道键缺失或为空串。 */
     balanceUrls: Partial<Record<KskHunterChannel, string>>
+    /**
+     * 每渠道的请求头鉴权密钥（见 KSK_HUNTER_CHANNEL_REQUIRES_API_KEY）。
+     * 本字段晚于 v2 引入，老 store 读出来是 {}。
+     */
+    apiKeys: Partial<Record<KskHunterChannel, string>>
   }
   links: PersistedKskHunterLink[]
   deliveries: PersistedKskHunterDelivery[]
@@ -196,15 +201,35 @@ function normalizeBilling(value: unknown): Record<KskHunterChannel, KskHunterCha
   return result
 }
 
-/** 余额地址：只保留渠道枚举里认识的键，值按普通字符串归一化。 */
-function normalizeBalanceUrls(value: unknown): Partial<Record<KskHunterChannel, string>> {
+/** 按渠道存的密钥类字段：只保留渠道枚举里认识的键，空值不落盘。 */
+function normalizeChannelSecrets(value: unknown): Partial<Record<KskHunterChannel, string>> {
   const source = (value ?? {}) as Record<string, unknown>
   const result: Partial<Record<KskHunterChannel, string>> = {}
   for (const channel of Object.values(KSK_HUNTER_CHANNEL) as KskHunterChannel[]) {
-    const url = normalizeString(source[channel])
-    if (url) result[channel] = url
+    const text = normalizeString(source[channel])
+    if (text) result[channel] = text
   }
   return result
+}
+
+/**
+ * 合并按渠道存的密钥类字段。
+ *
+ * 语义与 UI 的「留空保持」一致：键省略 → 保留原值；空串 → 清除；有值 → 覆盖。
+ * 不能整体替换，否则用户只改了一个渠道就会把其它渠道的密钥清空。
+ */
+function mergeChannelSecrets(
+  current: Partial<Record<KskHunterChannel, string>> | undefined,
+  patch: Partial<Record<KskHunterChannel, string>>
+): Partial<Record<KskHunterChannel, string>> {
+  const merged = { ...(current ?? {}) }
+  for (const [channel, value] of Object.entries(patch)) {
+    if (value === undefined) continue
+    const trimmed = normalizeString(value)
+    if (trimmed) merged[channel as KskHunterChannel] = trimmed
+    else delete merged[channel as KskHunterChannel]
+  }
+  return merged
 }
 
 export function normalizeKskHunterConfig(
@@ -317,7 +342,7 @@ function emptyStore(): PersistedKskHunterStore {
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: normalizeKskHunterConfig(undefined),
-    secrets: { downstreamApiKey: '', balanceUrls: {} },
+    secrets: { downstreamApiKey: '', balanceUrls: {}, apiKeys: {} },
     links: [],
     deliveries: [],
     spend: []
@@ -361,7 +386,8 @@ export function normalizeKskHunterStorePayload(
     config: normalizeKskHunterConfig(source.config),
     secrets: {
       downstreamApiKey: normalizeString(source.secrets?.downstreamApiKey),
-      balanceUrls: normalizeBalanceUrls(source.secrets?.balanceUrls)
+      balanceUrls: normalizeChannelSecrets(source.secrets?.balanceUrls),
+      apiKeys: normalizeChannelSecrets(source.secrets?.apiKeys)
     },
     links,
     deliveries,
@@ -428,15 +454,15 @@ export async function updateKskHunterConfig(
     if (secrets?.downstreamApiKey !== undefined) {
       store.secrets.downstreamApiKey = normalizeString(secrets.downstreamApiKey)
     }
-    // 余额地址按渠道逐个合并：省略的键保留原值，空串表示清除
+    // 余额地址与渠道密钥都按渠道逐个合并：省略的键保留原值，空串表示清除
     if (secrets?.balanceUrls) {
-      store.secrets.balanceUrls = { ...(store.secrets.balanceUrls ?? {}) }
-      for (const [channel, url] of Object.entries(secrets.balanceUrls)) {
-        if (url === undefined) continue
-        const trimmed = normalizeString(url)
-        if (trimmed) store.secrets.balanceUrls[channel as KskHunterChannel] = trimmed
-        else delete store.secrets.balanceUrls[channel as KskHunterChannel]
-      }
+      store.secrets.balanceUrls = mergeChannelSecrets(
+        store.secrets.balanceUrls,
+        secrets.balanceUrls
+      )
+    }
+    if (secrets?.apiKeys) {
+      store.secrets.apiKeys = mergeChannelSecrets(store.secrets.apiKeys, secrets.apiKeys)
     }
     return store
   })
@@ -565,6 +591,12 @@ export function toKskHunterConfigView(store: PersistedKskHunterStore): KskHunter
         channel,
         hunterUrlHint(store.secrets.balanceUrls?.[channel] ?? '')
       ])
+    ) as Record<KskHunterChannel, string | undefined>,
+    apiKeyHints: Object.fromEntries(
+      (Object.values(KSK_HUNTER_CHANNEL) as KskHunterChannel[]).map((channel) => [
+        channel,
+        maskHunterSecretTail(store.secrets.apiKeys?.[channel] ?? '')
+      ])
     ) as Record<KskHunterChannel, string | undefined>
   }
 }
@@ -574,6 +606,11 @@ export interface KskHunterLinkRuntime {
   lastInStock: boolean
   lastCheckedAt?: number
   lastError?: string
+  /**
+   * 尚未成交的下单幂等键（仅要求幂等键的渠道有）。
+   * 刻意不落盘：见 KskHunterManager.resolveIdempotencyKey 的说明。
+   */
+  pendingOrder?: { goodsId: string; key: string }
 }
 
 export function toKskHunterLinkView(

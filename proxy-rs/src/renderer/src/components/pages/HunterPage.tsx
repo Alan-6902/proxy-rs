@@ -22,6 +22,7 @@ import {
   KSK_HUNTER_BUDGET_BLOCK,
   KSK_HUNTER_CHANNEL,
   KSK_HUNTER_CHANNEL_LABEL,
+  KSK_HUNTER_CHANNEL_REQUIRES_API_KEY,
   KSK_HUNTER_DELIVERY_STATE,
   KSK_HUNTER_MODE,
   KSK_HUNTER_POLL_INTERVAL_SECONDS,
@@ -51,6 +52,23 @@ import {
 } from '../ui'
 
 const UNGROUPED_OPTION = '__ungrouped__'
+
+/** 通用余额地址占位符：站点契约未知的渠道用它。 */
+const GENERIC_BALANCE_URL_PLACEHOLDER = 'https://.../api/balance?token=...'
+
+/**
+ * 各渠道余额查询地址的占位提示。
+ *
+ * Kiro CEO 必须填 /api/my/profile（余额在 remaining 字段）。**不能填 /api/my/stock**：
+ * 那个响应里 parseHunterBalance 会递归到 zones[0].available，把「可购数量」当成余额，
+ * 于是余额判断彻底跑偏（有 5 个可买就以为有 5 积分）。
+ */
+const BALANCE_URL_PLACEHOLDER: Record<KskHunterChannel, string> = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: GENERIC_BALANCE_URL_PLACEHOLDER,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'https://kiro.ceo/api/my/profile',
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: GENERIC_BALANCE_URL_PLACEHOLDER,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: GENERIC_BALANCE_URL_PLACEHOLDER
+}
 
 type LinkAction = 'toggle' | 'delete'
 type BusyKey = { id: string; action: LinkAction | 'delivery' } | null
@@ -121,6 +139,8 @@ export function HunterPage(): React.ReactNode {
   const [downstreamApiKey, setDownstreamApiKey] = useState('')
   /** 余额地址是密钥类字段：不回填明文，留空表示保持原值。 */
   const [balanceUrlDrafts, setBalanceUrlDrafts] = useState<Partial<Record<string, string>>>({})
+  /** 渠道 API Key 同样是密钥类字段：不回填明文，留空表示保持原值。 */
+  const [apiKeyDrafts, setApiKeyDrafts] = useState<Partial<Record<string, string>>>({})
 
   const applySnapshot = useCallback((next: KskHunterSnapshot): void => {
     setSnapshot(next)
@@ -136,6 +156,7 @@ export function HunterPage(): React.ReactNode {
       balanceCheckEnabled: next.config.balanceCheckEnabled
     })
     setBalanceUrlDrafts({})
+    setApiKeyDrafts({})
   }, [])
 
   const load = useCallback(async (): Promise<void> => {
@@ -248,16 +269,24 @@ export function HunterPage(): React.ReactNode {
     setError('')
     setNotice('')
     try {
-      // 只提交用户实际填过的余额地址；留空的键省略，主进程会保留原值
+      // 只提交用户实际填过的密钥类字段；留空的键省略，主进程会保留原值
       const balanceUrls = Object.fromEntries(
         Object.entries(balanceUrlDrafts).filter(([, url]) => url !== undefined && url !== '')
       )
+      const apiKeys = Object.fromEntries(
+        Object.entries(apiKeyDrafts).filter(([, key]) => key !== undefined && key !== '')
+      )
+      const hasSecretEdits =
+        Boolean(downstreamApiKey.trim()) ||
+        Object.keys(balanceUrls).length > 0 ||
+        Object.keys(apiKeys).length > 0
       const result = await window.api.kskHunterUpdateConfig(
         configDraft,
-        downstreamApiKey.trim() || Object.keys(balanceUrls).length > 0
+        hasSecretEdits
           ? {
               ...(downstreamApiKey.trim() ? { downstreamApiKey: downstreamApiKey.trim() } : {}),
-              ...(Object.keys(balanceUrls).length > 0 ? { balanceUrls } : {})
+              ...(Object.keys(balanceUrls).length > 0 ? { balanceUrls } : {}),
+              ...(Object.keys(apiKeys).length > 0 ? { apiKeys } : {})
             }
           : undefined
       )
@@ -300,7 +329,7 @@ export function HunterPage(): React.ReactNode {
       <PageHeader
         eyebrow="KSK HUNTER"
         title="抢号监控"
-        description={`每 ${KSK_HUNTER_POLL_INTERVAL_SECONDS} 秒并行查一遍商品聚合站点，开货即提醒或自动下单推送下游。`}
+        description={`每 ${KSK_HUNTER_POLL_INTERVAL_SECONDS} 秒并行查一遍商品聚合站点（部分渠道按站点要求放慢），开货即提醒或自动下单推送下游。`}
         icon={Crosshair}
         accent="violet"
         badges={
@@ -743,6 +772,27 @@ export function HunterPage(): React.ReactNode {
                           />
                         </div>
                       </div>
+                      {KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[channel] && (
+                        <div>
+                          <Label className="text-2xs">
+                            API Key（该渠道走请求头鉴权，列表、下单、余额共用）
+                          </Label>
+                          <Input
+                            type="password"
+                            value={apiKeyDrafts[channel] ?? ''}
+                            onChange={(event) =>
+                              setApiKeyDrafts({ ...apiKeyDrafts, [channel]: event.target.value })
+                            }
+                            placeholder={
+                              snapshot?.config.apiKeyHints?.[channel]
+                                ? `${snapshot.config.apiKeyHints[channel]} · 留空保持`
+                                : '在卖家站点的「账户」页查看'
+                            }
+                            spellCheck={false}
+                            className="font-mono text-xs"
+                          />
+                        </div>
+                      )}
                       {configDraft.balanceCheckEnabled && (
                         <div>
                           <Label className="text-2xs">余额查询地址</Label>
@@ -758,7 +808,7 @@ export function HunterPage(): React.ReactNode {
                             placeholder={
                               snapshot?.config.balanceUrlHints?.[channel]
                                 ? `${snapshot.config.balanceUrlHints[channel]} · 留空保持`
-                                : 'https://.../api/balance?token=...'
+                                : BALANCE_URL_PLACEHOLDER[channel]
                             }
                             spellCheck={false}
                             className="font-mono text-xs"

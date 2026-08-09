@@ -62,6 +62,38 @@ export const KSK_HUNTER_CHANNEL_LABEL: Record<KskHunterChannel, string> = {
 }
 
 /**
+ * 渠道级最小查询间隔（秒）。
+ *
+ * 全局轮询是 KSK_HUNTER_POLL_INTERVAL_SECONDS（3 秒），但有的站点明确要求更长间隔：
+ * Kiro CEO 的对接文档写「间隔不要短于 30 秒」，按 3 秒打会吃 429 甚至被封密钥。
+ * runner 按本表逐链接节流，不动全局轮询——否则一家站点的限制会拖慢所有渠道。
+ *
+ * 穷尽 Record：新渠道漏填报 TS2741，强制表态而不是默默按 3 秒打。
+ */
+export const KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS: Record<KskHunterChannel, number> = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: 30,
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: KSK_HUNTER_POLL_INTERVAL_SECONDS
+}
+
+/**
+ * 该渠道是否用请求头鉴权。
+ *
+ * 多数站点把 token 放在 URL query 里（整条 URL 按密钥处理即可），
+ * Kiro CEO 走 `X-API-Key` 请求头，密钥得单独存、单独注入。
+ */
+export const KSK_HUNTER_CHANNEL_REQUIRES_API_KEY: Record<KskHunterChannel, boolean> = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: true,
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: false
+}
+
+/** 渠道请求头鉴权用的头名。 */
+export const KSK_HUNTER_CHANNEL_AUTH_HEADER = 'X-API-Key'
+
+/**
  * 每个渠道的计价单位与换算系数。
  *
  * 站点计价单位各不相同（人民币、积分、CRD 点数），统计要汇总成人民币，
@@ -101,8 +133,9 @@ export const DEFAULT_KSK_HUNTER_BILLING: Record<KskHunterChannel, KskHunterChann
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0
   },
+  // Kiro CEO 按积分计价，实测 /api/public/config：美区 50、欧区 35 积分/个
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
-    unitLabel: 'CRD',
+    unitLabel: '积分',
     cnyPerUnit: 1,
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0
@@ -237,6 +270,12 @@ export interface KskHunterSecretInput {
    * 余额是渠道级而非链接级：同一渠道的多条链接共用一个账户。
    */
   balanceUrls?: Partial<Record<KskHunterChannel, string>>
+  /**
+   * 每渠道的请求头鉴权密钥（见 KSK_HUNTER_CHANNEL_REQUIRES_API_KEY）。
+   * 键为渠道，值省略表示保留、空串表示清除。
+   * 与余额地址同为渠道级：一个密钥同时用于列表、下单、余额三处。
+   */
+  apiKeys?: Partial<Record<KskHunterChannel, string>>
 }
 
 export interface KskHunterConfigView extends KskHunterConfig {
@@ -246,6 +285,8 @@ export interface KskHunterConfigView extends KskHunterConfig {
   downstreamApiKeyTail?: string
   /** 各渠道是否已配置余额地址，以及脱敏后的展示形式。 */
   balanceUrlHints: Record<KskHunterChannel, string | undefined>
+  /** 各渠道请求头密钥的脱敏尾号；未配置为 undefined。 */
+  apiKeyHints: Record<KskHunterChannel, string | undefined>
 }
 
 /** 某个渠道的余额快照。查询失败时 error 有值、amountUnit 为 undefined。 */

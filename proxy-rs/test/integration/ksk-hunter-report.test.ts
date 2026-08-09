@@ -97,7 +97,7 @@ function hunterStore(
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: { ...DEFAULT_KSK_HUNTER_CONFIG, ...config },
-    secrets: { downstreamApiKey: 'downstream-key', balanceUrls: {} },
+    secrets: { downstreamApiKey: 'downstream-key', balanceUrls: {}, apiKeys: {} },
     links,
     deliveries: [],
     spend: []
@@ -412,10 +412,10 @@ describe('runner 记事件的时机', () => {
   it('下单记 ordered 并带上花费与单位', async () => {
     deliveryStore.reset()
     const events: HunterReportEvent[] = []
-    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_CEO })], {
+    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_DROP })], {
       billing: {
         ...DEFAULT_KSK_HUNTER_CONFIG.billing,
-        [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
+        [KSK_HUNTER_CHANNEL.KIRO_DROP]: {
           unitLabel: 'CRD',
           cnyPerUnit: 0.25,
           dailyLimitUnit: 0,
@@ -430,7 +430,7 @@ describe('runner 记事件的时机', () => {
 
     const ordered = events.find((item) => item.type === HUNTER_REPORT_EVENT.ORDERED)
     expect(ordered).toMatchObject({
-      channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
+      channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
       costUnit: 120,
       costCny: 30,
       unitLabel: 'CRD',

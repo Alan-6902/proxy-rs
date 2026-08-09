@@ -106,6 +106,24 @@ function hunterLink(overrides: Partial<PersistedKskHunterLink> = {}): PersistedK
   }
 }
 
+type HunterDeps = ConstructorParameters<typeof KskHunterManager>[0]
+
+/** runner 的依赖桩：默认返回空商品列表，按需覆盖 fetchImpl 等。 */
+function makeDeps(store: PersistedKskHunterStore, overrides: Partial<HunterDeps> = {}): HunterDeps {
+  return {
+    // drain 队列要读到刚落盘的记录，所以 deliveries 走内存 store
+    readStore: async () => ({ ...store, deliveries: deliveryStore.records as never }),
+    fetchImpl: async () => jsonResponse({ code: 0, data: [] }),
+    importCredential: async () => ({ added: true }),
+    notifyInStock: vi.fn(),
+    notifyOrdered: vi.fn(),
+    notifyAccountsChanged: vi.fn(),
+    notifySnapshot: vi.fn(),
+    log: vi.fn(),
+    ...overrides
+  }
+}
+
 function hunterStore(
   links: PersistedKskHunterLink[],
   config: Partial<PersistedKskHunterStore['config']> = {},
@@ -114,7 +132,7 @@ function hunterStore(
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: { ...DEFAULT_KSK_HUNTER_CONFIG, ...config },
-    secrets: { downstreamApiKey: 'admin-key', balanceUrls: {} },
+    secrets: { downstreamApiKey: 'admin-key', balanceUrls: {}, apiKeys: {} },
     links,
     deliveries: [],
     spend
@@ -159,14 +177,70 @@ describe('站点响应解析', () => {
     ])
   })
 
-  it('Kiro CEO：读 remain 与 zone', () => {
+  /**
+   * Kiro CEO 用的是真实响应样例（2026-08 实测 GET https://kiro.ceo/api/my/stock，
+   * 需 X-API-Key 请求头）。这个站点没有商品数组，库存按区域平铺在 zones 里。
+   */
+  it('Kiro CEO：把 zones 数组合成按区域的 offer', () => {
     const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CEO, {
-      code: 0,
-      data: { list: [{ goods_id: 9, goods_name: '欧洲区(eu)', zone: 'eu', remain: 1, price: 35 }] }
+      max: 0,
+      max_purchase: 10,
+      min: 1,
+      quota: 0,
+      reserved: 0,
+      zones: [
+        {
+          zone: 'us',
+          label: '美国区',
+          enabled: true,
+          unit_price: 50,
+          stock: 5,
+          available: 5,
+          max: 0
+        },
+        {
+          zone: 'eu',
+          label: '欧洲区',
+          enabled: true,
+          unit_price: 35,
+          stock: 3,
+          available: 3,
+          max: 0
+        }
+      ]
+    })
+    // goodsId 是区域短码，下单时作为 zone 回传
+    expect(offers).toEqual([
+      { goodsId: 'us', title: '美国区', region: 'us-east-1', stock: 5, price: 50 },
+      { goodsId: 'eu', title: '欧洲区', region: 'eu-central-1', stock: 3, price: 35 }
+    ])
+  })
+
+  /**
+   * 实测样例里 max 为 0 而 stock 为 5：因为账户积分为 0，max 已折入余额与持有上限。
+   * 读 max 会让没积分的用户永远看到「无货」，查不出原因，所以必须读 stock。
+   */
+  it('Kiro CEO：库存读 stock 而不是被余额压过的 max', () => {
+    const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CEO, {
+      zones: [{ zone: 'us', label: '美国区', enabled: true, unit_price: 50, stock: 5, max: 0 }]
+    })
+    expect(offers[0].stock).toBe(5)
+  })
+
+  it('Kiro CEO：下架的区域按无货处理', () => {
+    const offers = parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CEO, {
+      zones: [{ zone: 'eu', label: '欧洲区', enabled: false, unit_price: 35, stock: 3 }]
     })
     expect(offers).toEqual([
-      { goodsId: '9', title: '欧洲区(eu)', region: 'eu-central-1', stock: 1, price: 35 }
+      { goodsId: 'eu', title: '欧洲区', region: 'eu-central-1', stock: 0, price: 35 }
     ])
+  })
+
+  it('Kiro CEO：没有 zones 时抛错而不是装作无货', () => {
+    // 返回空数组等于把接口变动伪装成「查到了但没货」，用户永远等不到通知
+    expect(() => parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CEO, { quota: 0 })).toThrow(
+      'zones 数组'
+    )
   })
 
   it('Kiro Drop：读 stock_count 与 tag 里的完整区域', () => {
@@ -256,10 +330,6 @@ describe('站点响应解析', () => {
       id: 'g1',
       num: 1
     })
-    expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_CEO, offer)).toEqual({
-      goods_id: 'g1',
-      count: 1
-    })
     expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_DROP, offer)).toEqual({
       item_id: 'g1',
       quantity: 1
@@ -268,6 +338,20 @@ describe('站点响应解析', () => {
     expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_APP, { ...offer, goodsId: 'eu' })).toEqual(
       { zone: 'eu', count: 1 }
     )
+  })
+
+  it('Kiro CEO 下单体带 zone 与幂等键', () => {
+    const offer = { goodsId: 'us', title: '美国区', region: 'us-east-1', stock: 5 }
+    expect(
+      buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_CEO, offer, {
+        idempotencyKey: '0123456789abcdef0123456789abcdef'
+      })
+    ).toEqual({ count: 1, zone: 'us', client_order_id: '0123456789abcdef0123456789abcdef' })
+  })
+
+  it('Kiro CEO 缺幂等键时抛错，不发注定 400 的请求', () => {
+    const offer = { goodsId: 'us', title: '美国区', region: 'us-east-1', stock: 5 }
+    expect(() => buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_CEO, offer)).toThrow('幂等键')
   })
 })
 
@@ -303,6 +387,39 @@ describe('下单响应里提取 KSK', () => {
   it('没有 ksk 或区域无法确定时抛错，避免把垃圾推给下游', () => {
     expect(() => parseOrderedCredential({ code: 0, data: {} }, 'eu-central-1')).toThrow('ksk_')
     expect(() => parseOrderedCredential({ code: 0, data: { key: KSK_ONE } }, '')).toThrow('区域')
+  })
+
+  /**
+   * Kiro CEO 提货响应的形状取自站点对接文档（keys 是对象数组，顶层带 zone）。
+   *
+   * 唯一没能实测的是 key 的前缀：账户积分为 0、历史订单为空，不花钱拿不到真实凭据。
+   * 文档示例写的是 `"key": "kiro-xxx"`，而本项目只认 /^ksk_[A-Za-z0-9]+$/。
+   * 若卖家发的真是 kiro- 前缀，这里会抛「没有找到 ksk_ 开头的密钥」——钱已扣但号入不了库。
+   * 所以首次真实下单应手动买一个核对格式，再开自动下单。
+   */
+  it('Kiro CEO 提货响应：从 keys 数组取 key，用顶层 zone 认区域', () => {
+    expect(
+      parseOrderedCredential(
+        {
+          client_order_id: '0123456789abcdef0123456789abcdef',
+          purchased: 1,
+          remaining: 4500,
+          keys: [
+            {
+              key: KSK_ONE,
+              account: 'user@example.com',
+              password: 'secret',
+              issuer_url: 'https://example.com'
+            }
+          ],
+          zone: 'us',
+          unit_price: 50,
+          total_credits: 50,
+          order_id: 'a1b2c3'
+        },
+        ''
+      )
+    ).toEqual({ key: KSK_ONE, region: 'us-east-1' })
   })
 })
 
@@ -800,6 +917,35 @@ describe('余额响应解析', () => {
     expect(parseHunterBalance({ code: 0, msg: 'ok' })).toBeUndefined()
     expect(parseHunterBalance({ code: 200, total: 5, page: 1 })).toBeUndefined()
   })
+
+  /** 实测响应（GET https://kiro.ceo/api/my/profile）：余额在 remaining，此账户为 0。 */
+  it('Kiro CEO 的 /api/my/profile：余额读 remaining', () => {
+    expect(
+      parseHunterBalance({
+        max_purchase: 10,
+        min_purchase: 1,
+        name: 'M.',
+        quota: 0,
+        remaining: 0,
+        used_quota: 0,
+        webhook_url: ''
+      })
+    ).toBe(0)
+  })
+
+  /**
+   * 余额地址填错成 /api/my/stock 的后果：递归会钻进 zones[0] 把 available（可购数量）
+   * 当成余额。这是「填错地址」而不是代码缺陷，写成测试是为了固定住这个已知陷阱——
+   * UI 的占位符因此明确给出 /api/my/profile。
+   */
+  it('Kiro CEO 的 /api/my/stock 不能当余额地址：会把可购数量当成余额', () => {
+    expect(
+      parseHunterBalance({
+        quota: 0,
+        zones: [{ zone: 'us', stock: 5, available: 5, unit_price: 50 }]
+      })
+    ).toBe(5)
+  })
 })
 
 describe('余额查询与缓存', () => {
@@ -911,26 +1057,6 @@ describe('余额查询与缓存', () => {
 })
 
 describe('抢号调度', () => {
-  type HunterDeps = ConstructorParameters<typeof KskHunterManager>[0]
-
-  function makeDeps(
-    store: PersistedKskHunterStore,
-    overrides: Partial<HunterDeps> = {}
-  ): HunterDeps {
-    return {
-      // drain 队列要读到刚落盘的记录，所以 deliveries 走内存 store
-      readStore: async () => ({ ...store, deliveries: deliveryStore.records as never }),
-      fetchImpl: async () => jsonResponse({ code: 0, data: [] }),
-      importCredential: async () => ({ added: true }),
-      notifyInStock: vi.fn(),
-      notifyOrdered: vi.fn(),
-      notifyAccountsChanged: vi.fn(),
-      notifySnapshot: vi.fn(),
-      log: vi.fn(),
-      ...overrides
-    }
-  }
-
   it('无货时只更新链接状态，不下单也不通知', async () => {
     const notifyInStock = vi.fn()
     const store = hunterStore([hunterLink()])
@@ -1185,11 +1311,16 @@ describe('抢号调度', () => {
           })
   }
 
+  /*
+   * 下面几条用 Kiro Drop 只是要一个「非人民币计价」的渠道来验算账与余额逻辑，
+   * 与该站点自身契约无关。刻意不用 Kiro CEO：它要求请求头密钥、按 zones 解析、
+   * 还有 30 秒最小间隔，混进来会让这些测试的失败原因变得难以定位。
+   */
   it('下单后按渠道系数记账，原币与人民币都记上', async () => {
-    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_CEO })], {
+    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_DROP })], {
       billing: {
         ...DEFAULT_KSK_HUNTER_CONFIG.billing,
-        [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
+        [KSK_HUNTER_CHANNEL.KIRO_DROP]: {
           unitLabel: 'CRD',
           cnyPerUnit: 0.5,
           dailyLimitUnit: 0,
@@ -1205,7 +1336,7 @@ describe('抢号调度', () => {
     // 35 CRD × 0.5 = ¥17.5
     expect(deliveryStore.spend).toHaveLength(1)
     expect(deliveryStore.spend[0]).toMatchObject({
-      channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
+      channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
       amountUnit: 35,
       amountCny: 17.5
     })
@@ -1357,11 +1488,11 @@ describe('抢号调度', () => {
 
   it('余额不足时跳过下单，不白跑一次下单请求', async () => {
     const orderCalls: string[] = []
-    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_CEO })], {
+    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_DROP })], {
       balanceCheckEnabled: true,
       billing: {
         ...DEFAULT_KSK_HUNTER_CONFIG.billing,
-        [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
+        [KSK_HUNTER_CHANNEL.KIRO_DROP]: {
           unitLabel: '积分',
           cnyPerUnit: 0.5,
           dailyLimitUnit: 0,
@@ -1370,7 +1501,7 @@ describe('抢号调度', () => {
       }
     })
     store.secrets.balanceUrls = {
-      [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'https://site.example/balance'
+      [KSK_HUNTER_CHANNEL.KIRO_DROP]: 'https://site.example/balance'
     }
     const notifyLowBalance = vi.fn()
     const manager = new KskHunterManager(
@@ -1404,11 +1535,11 @@ describe('抢号调度', () => {
   })
 
   it('余额充足时正常下单', async () => {
-    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_CEO })], {
+    const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_DROP })], {
       balanceCheckEnabled: true,
       billing: {
         ...DEFAULT_KSK_HUNTER_CONFIG.billing,
-        [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
+        [KSK_HUNTER_CHANNEL.KIRO_DROP]: {
           unitLabel: '积分',
           cnyPerUnit: 0.5,
           dailyLimitUnit: 0,
@@ -1417,7 +1548,7 @@ describe('抢号调度', () => {
       }
     })
     store.secrets.balanceUrls = {
-      [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'https://site.example/balance'
+      [KSK_HUNTER_CHANNEL.KIRO_DROP]: 'https://site.example/balance'
     }
     const manager = new KskHunterManager(
       makeDeps(store, {
@@ -1498,5 +1629,142 @@ describe('抢号调度', () => {
 
     expect(balanceCalls).toHaveLength(0)
     expect(deliveryStore.records).toHaveLength(1)
+  })
+})
+
+/**
+ * Kiro CEO 渠道的三条硬约束：请求头鉴权、渠道级最小间隔、缺密钥不发请求。
+ * 这三条都在 runner 层，解析器测不到。
+ */
+describe('Kiro CEO 渠道约束', () => {
+  const CEO_LIST_URL = 'https://kiro.ceo/api/my/stock'
+  const CEO_ORDER_URL = 'https://kiro.ceo/api/my/purchase'
+  const CEO_KEY = 'ceo-test-key'
+
+  function ceoLink(): PersistedKskHunterLink {
+    return hunterLink({
+      id: 'link-ceo',
+      name: 'Kiro CEO · us',
+      channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
+      regions: ['us-east-1'],
+      secrets: { listUrl: CEO_LIST_URL, orderUrl: CEO_ORDER_URL }
+    })
+  }
+
+  function ceoStore(withKey = true): PersistedKskHunterStore {
+    const store = hunterStore([ceoLink()])
+    if (withKey) store.secrets.apiKeys = { [KSK_HUNTER_CHANNEL.KIRO_CEO]: CEO_KEY }
+    return store
+  }
+
+  /** 真实形状的库存响应：us 有 5 个、单价 50。 */
+  function stockPayload(): unknown {
+    return {
+      max: 0,
+      zones: [
+        { zone: 'us', label: '美国区', enabled: true, unit_price: 50, stock: 5, available: 5 },
+        { zone: 'eu', label: '欧洲区', enabled: true, unit_price: 35, stock: 0, available: 0 }
+      ]
+    }
+  }
+
+  function purchasePayload(): unknown {
+    return {
+      client_order_id: '0123456789abcdef0123456789abcdef',
+      purchased: 1,
+      remaining: 4450,
+      keys: [{ key: KSK_ONE, account: 'a@example.com', password: 'p' }],
+      zone: 'us',
+      unit_price: 50,
+      total_credits: 50
+    }
+  }
+
+  it('列表与下单都带 X-API-Key 请求头', async () => {
+    const seen: { url: string; apiKey?: string; body?: string }[] = []
+    const manager = new KskHunterManager(
+      makeDeps(ceoStore(), {
+        fetchImpl: async (url, init) => {
+          const headers = init.headers as Record<string, string> | undefined
+          seen.push({
+            url,
+            apiKey: headers?.['X-API-Key'],
+            body: typeof init.body === 'string' ? init.body : undefined
+          })
+          return jsonResponse(init.method === 'POST' ? purchasePayload() : stockPayload())
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(seen).toHaveLength(2)
+    expect(seen.every((call) => call.apiKey === CEO_KEY)).toBe(true)
+    // 下单体按站点契约：zone 用商品的区域短码，幂等键 32 位十六进制
+    const ordered = JSON.parse(seen[1].body ?? '{}')
+    expect(ordered).toMatchObject({ count: 1, zone: 'us' })
+    expect(ordered.client_order_id).toMatch(/^[0-9a-f]{32}$/)
+    expect(deliveryStore.records).toHaveLength(1)
+  })
+
+  it('未配置 API Key 时不发请求，链接上给出可读原因', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(stockPayload()))
+    const manager = new KskHunterManager(makeDeps(ceoStore(false), { fetchImpl }))
+
+    const status = await manager.runNow()
+    manager.stop()
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(manager.linkRuntimeOf('link-ceo').lastError).toContain('API Key')
+    // 配置缺失算查询失败，状态要如实降级而不是假装健康
+    expect(status.state).toBe(KSK_HUNTER_STATE.DEGRADED)
+  })
+
+  it('渠道最小间隔内的第二轮直接跳过，不重复打站点', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init: { method: string }) =>
+      jsonResponse(init.method === 'POST' ? purchasePayload() : stockPayload())
+    )
+    const manager = new KskHunterManager(makeDeps(ceoStore(), { fetchImpl }))
+
+    await manager.runNow()
+    const callsAfterFirst = fetchImpl.mock.calls.length
+    await manager.runNow()
+    manager.stop()
+
+    // 30 秒内的第二轮一个请求都不该发
+    expect(fetchImpl.mock.calls.length).toBe(callsAfterFirst)
+    // 跳过不算失败：状态不能因为节流被判成 DEGRADED
+    expect(manager.snapshotStatus().state).toBe(KSK_HUNTER_STATE.HEALTHY)
+  })
+
+  it('最小间隔只约束本渠道，不拖慢其它渠道', async () => {
+    const urls: string[] = []
+    const store = hunterStore([ceoLink(), hunterLink()])
+    store.secrets.apiKeys = { [KSK_HUNTER_CHANNEL.KIRO_CEO]: CEO_KEY }
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url, init) => {
+          urls.push(url)
+          if (init.method === 'POST') {
+            return url.includes('kiro.ceo')
+              ? jsonResponse(purchasePayload())
+              : jsonResponse({ code: 0, data: { key: KSK_TWO, region: 'eu-central-1' } })
+          }
+          return url.includes('kiro.ceo')
+            ? jsonResponse(stockPayload())
+            : jsonResponse({ code: 0, data: [{ id: 'g1', tag: '#key-eu', stock: 1, price: 20 }] })
+        }
+      })
+    )
+
+    await manager.runNow()
+    urls.length = 0
+    await manager.runNow()
+    manager.stop()
+
+    // 第二轮：CEO 被节流，Kiro Market 照常查
+    expect(urls.some((url) => url.includes('kiro.ceo'))).toBe(false)
+    expect(urls.some((url) => url.includes(LIST_URL))).toBe(true)
   })
 })

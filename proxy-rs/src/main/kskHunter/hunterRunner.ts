@@ -8,11 +8,15 @@
  * - 下单前先问下游要不要号：避免下游不缺号时白买。
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   DEFAULT_KSK_HUNTER_CHANNEL_BILLING,
   KSK_HUNTER_BUDGET_BLOCK,
   KSK_HUNTER_CHANNEL,
+  KSK_HUNTER_CHANNEL_AUTH_HEADER,
+  KSK_HUNTER_CHANNEL_LABEL,
+  KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS,
+  KSK_HUNTER_CHANNEL_REQUIRES_API_KEY,
   KSK_HUNTER_DELIVERY_MAX_ATTEMPTS,
   KSK_HUNTER_DELIVERY_STATE,
   KSK_HUNTER_MODE,
@@ -341,16 +345,51 @@ export class KskHunterManager {
   ): Promise<boolean> {
     // 上轮还没回来就跳过，别给站点叠并发，也别重复下单
     if (this.inFlightLinks.has(link.id)) return true
+
+    /*
+     * 有的站点要求比全局轮询更长的间隔（如 Kiro CEO 的 30 秒），对这些渠道逐链接节流。
+     *
+     * 只对**严于全局间隔**的渠道生效：等于全局间隔的渠道不加这道门，否则手动「立即查询」
+     * 撞上刚跑完的定时轮询就会静默什么都不做，用户以为按钮坏了。
+     * 严格渠道则连手动查询也照样节流——绕过它就是去吃 429。
+     *
+     * 跳过不算失败：按站点限制节流是正常行为，算失败会把整体状态误判成 DEGRADED。
+     */
+    const minIntervalMs = KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS[link.channel] * 1000
+    if (minIntervalMs > KSK_HUNTER_POLL_INTERVAL_SECONDS * 1000) {
+      const lastCheckedAt = this.linkRuntimeOf(link.id).lastCheckedAt
+      if (lastCheckedAt !== undefined && Date.now() - lastCheckedAt < minIntervalMs) return true
+    }
+
+    // 要求请求头鉴权的渠道没配密钥就别发请求：必然 401，还会把密钥错误伪装成站点故障。
+    // 刻意不在 IPC 层硬拦——用户常先加链接再填密钥，硬拦会让人卡在表单上。
+    const apiKey = this.channelApiKey(link.channel, store)
+    if (KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[link.channel] && !apiKey) {
+      this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
+        lastInStock: false,
+        lastError: `${KSK_HUNTER_CHANNEL_LABEL[link.channel]} 渠道需要在设置里填写 API Key`
+      })
+      return false
+    }
+
     this.inFlightLinks.add(link.id)
     try {
-      const payload = await this.fetchJson(link.secrets.listUrl, store.config.requestTimeoutSeconds)
+      const payload = await this.fetchJson(
+        link.secrets.listUrl,
+        store.config.requestTimeoutSeconds,
+        { method: 'GET', apiKey }
+      )
       const offers = parseChannelOffers(link.channel, payload).filter(
         (offer) => offer.stock > 0 && matchesHunterRegions(link.regions, offer.region)
       )
       // 放货只记「无货 → 有货」这一刻：一批货会被连着几十轮都发现，逐轮记会把
       // 事件流刷爆，也会让「放货次数」这个指标失去意义
       const wasInStock = this.linkRuntimeOf(link.id).lastInStock
+      // 展开原有 runtime：pendingOrder 必须跨轮保留，整体替换会让下单重试换掉幂等键，
+      // 变成第二笔订单（重复扣费）
       this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
         lastInStock: offers.length > 0,
         lastCheckedAt: Date.now(),
         lastError: undefined
@@ -371,7 +410,9 @@ export class KskHunterManager {
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // 同上：保留 pendingOrder。下单失败正是要复用幂等键的场景
       this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
         lastInStock: false,
         lastCheckedAt: Date.now(),
         lastError: message
@@ -455,7 +496,8 @@ export class KskHunterManager {
       channel,
       url,
       timeoutSeconds: store.config.requestTimeoutSeconds,
-      fetchImpl: this.deps.fetchImpl
+      fetchImpl: this.deps.fetchImpl,
+      apiKey: this.channelApiKey(channel, store)
     })
     if (snapshot.error) {
       this.log(`渠道 ${channel} 余额查询失败：${snapshot.error}`)
@@ -583,11 +625,18 @@ export class KskHunterManager {
     store: PersistedKskHunterStore,
     budget: { costCny: number; costUnit?: number }
   ): Promise<void> {
+    const idempotencyKey = this.resolveIdempotencyKey(link.id, offer.goodsId)
     const orderPayload = await this.fetchJson(
       link.secrets.orderUrl,
       store.config.requestTimeoutSeconds,
-      { method: 'POST', body: buildOrderRequestBody(link.channel, offer) }
+      {
+        method: 'POST',
+        body: buildOrderRequestBody(link.channel, offer, { idempotencyKey }),
+        apiKey: this.channelApiKey(link.channel, store)
+      }
     )
+    // 请求成功即弃用这个幂等键：留着会让下一单被服务端当成本单的重放而不发货
+    this.clearIdempotencyKey(link.id)
     const credential = parseOrderedCredential(orderPayload, offer.region)
     if (!isUsableHunterCredential(credential)) {
       throw new Error('下单返回的 KSK 或区域不合法')
@@ -660,10 +709,48 @@ export class KskHunterManager {
     this.scheduleDeliveryDrain(0)
   }
 
+  /**
+   * 取（或生成）这条链接当前的下单幂等键。
+   *
+   * 32 位十六进制：Kiro CEO 要求这个格式，randomUUID() 带横线共 36 位，过不了它的校验。
+   *
+   * 键在**下单请求成功之前**一直保留，超时或 5xx 重试时复用同一个——服务端会把它识别成
+   * 同一笔订单原样返回，不会重复扣费、重复发货。换 zone 则必须换键：同一个键配不同的
+   * zone 会被服务端当成另一笔订单的重放，拿回来的号区域可能不是你要的。
+   *
+   * **只存在内存里**：进程重启后重试会变成第二笔订单（一次约 50 积分）。要修得在每次
+   * 下单尝试前写盘，代价与这个风险不成比例——重启恰好卡在下单请求中间才会碰上。
+   */
+  private resolveIdempotencyKey(linkId: string, goodsId: string): string {
+    const pending = this.linkRuntimeOf(linkId).pendingOrder
+    if (pending && pending.goodsId === goodsId) return pending.key
+    const key = randomBytes(16).toString('hex')
+    this.linkRuntime.set(linkId, {
+      ...this.linkRuntimeOf(linkId),
+      pendingOrder: { goodsId, key }
+    })
+    return key
+  }
+
+  private clearIdempotencyKey(linkId: string): void {
+    const runtime = this.linkRuntimeOf(linkId)
+    if (!runtime.pendingOrder) return
+    this.linkRuntime.set(linkId, { ...runtime, pendingOrder: undefined })
+  }
+
+  /** 该渠道的请求头密钥；未配置或不需要时为 undefined。 */
+  private channelApiKey(
+    channel: KskHunterChannel,
+    store: PersistedKskHunterStore
+  ): string | undefined {
+    if (!KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[channel]) return undefined
+    return store.secrets.apiKeys?.[channel] || undefined
+  }
+
   private async fetchJson(
     url: string,
     timeoutSeconds: number,
-    init: { method: string; body?: unknown } = { method: 'GET' }
+    init: { method: string; body?: unknown; apiKey?: string } = { method: 'GET' }
   ): Promise<unknown> {
     const parsed = new URL(url)
     if (parsed.protocol !== 'https:') throw new Error('商品站点接口必须使用 HTTPS')
@@ -674,7 +761,8 @@ export class KskHunterManager {
         method: init.method,
         headers: {
           Accept: 'application/json',
-          ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' })
+          ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(init.apiKey ? { [KSK_HUNTER_CHANNEL_AUTH_HEADER]: init.apiKey } : {})
         },
         body: init.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal

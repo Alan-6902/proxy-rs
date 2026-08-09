@@ -10,7 +10,11 @@
  * 余额只在下单后才会变，缓存过期或下单后主动失效即可。
  */
 
-import { parseHunterBalance, type KskHunterChannel } from '../../shared/kskHunter'
+import {
+  KSK_HUNTER_CHANNEL_AUTH_HEADER,
+  parseHunterBalance,
+  type KskHunterChannel
+} from '../../shared/kskHunter'
 import type { KskHunterFetch } from './downstreamClient'
 
 /**
@@ -39,6 +43,8 @@ export async function fetchChannelBalance(input: {
   url: string
   timeoutSeconds: number
   fetchImpl: KskHunterFetch
+  /** 走请求头鉴权的渠道要带密钥（见 KSK_HUNTER_CHANNEL_REQUIRES_API_KEY）。 */
+  apiKey?: string
 }): Promise<number> {
   const parsed = new URL(input.url)
   if (parsed.protocol !== 'https:') throw new Error('余额查询地址必须使用 HTTPS')
@@ -48,7 +54,10 @@ export async function fetchChannelBalance(input: {
   try {
     const response = await input.fetchImpl(parsed.toString(), {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        ...(input.apiKey ? { [KSK_HUNTER_CHANNEL_AUTH_HEADER]: input.apiKey } : {})
+      },
       signal: controller.signal
     })
     const text = await response.text()
@@ -94,6 +103,7 @@ export class HunterBalanceCache {
     url: string
     timeoutSeconds: number
     fetchImpl: KskHunterFetch
+    apiKey?: string
     now?: number
   }): Promise<HunterBalanceSnapshot> {
     const now = input.now ?? Date.now()
@@ -104,7 +114,8 @@ export class HunterBalanceCache {
       const amountUnit = await fetchChannelBalance({
         url: input.url,
         timeoutSeconds: input.timeoutSeconds,
-        fetchImpl: input.fetchImpl
+        fetchImpl: input.fetchImpl,
+        apiKey: input.apiKey
       })
       const snapshot: HunterBalanceSnapshot = { amountUnit, checkedAt: now }
       this.cache.set(input.channel, snapshot)

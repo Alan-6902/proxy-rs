@@ -141,7 +141,7 @@ function kiroAppStore(config: Partial<KskHunterConfig> = {}): PersistedKskHunter
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: { ...DEFAULT_KSK_HUNTER_CONFIG, ...config },
-    secrets: { downstreamApiKey: DOWNSTREAM_KEY, balanceUrls: {} },
+    secrets: { downstreamApiKey: DOWNSTREAM_KEY, balanceUrls: {}, apiKeys: {} },
     links: [
       {
         id: 'link-kiroapp',

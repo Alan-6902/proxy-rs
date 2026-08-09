@@ -154,7 +154,7 @@ describe('下游契约端到端', () => {
         downstreamEnabled: true,
         downstreamBaseUrl: BASE_URL
       },
-      secrets: { downstreamApiKey: API_KEY, balanceUrls: {} },
+      secrets: { downstreamApiKey: API_KEY, balanceUrls: {}, apiKeys: {} },
       links: [
         {
           id: 'link-e2e',
@@ -230,7 +230,7 @@ describe('下游契约端到端', () => {
         downstreamEnabled: true,
         downstreamBaseUrl: BASE_URL
       },
-      secrets: { downstreamApiKey: API_KEY, balanceUrls: {} },
+      secrets: { downstreamApiKey: API_KEY, balanceUrls: {}, apiKeys: {} },
       links: [
         {
           id: 'link-e2e',

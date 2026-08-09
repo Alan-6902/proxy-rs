@@ -3,6 +3,7 @@ import { Crosshair, Loader2, X } from 'lucide-react'
 import {
   KSK_HUNTER_CHANNEL,
   KSK_HUNTER_CHANNEL_LABEL,
+  KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS,
   KSK_HUNTER_MODE,
   KSK_HUNTER_POLL_INTERVAL_SECONDS,
   type KskHunterChannel,
@@ -70,6 +71,8 @@ export function HunterLinkEditorDialog({
 
   if (!isOpen) return null
 
+  const channelMinInterval = KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS[channel]
+
   const toggleRegion = (region: string): void => {
     setRegions((current) =>
       current.includes(region) ? current.filter((item) => item !== region) : [...current, region]
@@ -108,7 +111,11 @@ export function HunterLinkEditorDialog({
               <div>
                 <CardTitle>{link ? '编辑监控链接' : '新增监控链接'}</CardTitle>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  所有启用链接每 {KSK_HUNTER_POLL_INTERVAL_SECONDS} 秒并行查一次库存。
+                  所有启用链接每 {KSK_HUNTER_POLL_INTERVAL_SECONDS} 秒并行查一次库存
+                  {channelMinInterval > KSK_HUNTER_POLL_INTERVAL_SECONDS
+                    ? `；${KSK_HUNTER_CHANNEL_LABEL[channel]} 按站点要求最快 ${channelMinInterval} 秒一次`
+                    : ''}
+                  。
                 </p>
               </div>
             </div>

@@ -1,7 +1,7 @@
 /**
  * 商品聚合站点适配器。
  *
- * 三家站点（Kiro Market / Kiro CEO / Kiro Drop）的列表与下单响应形状各不相同，
+ * 各站点的列表与下单响应形状各不相同（有的是商品数组，有的按区域平铺），
  * 这里为每家写一对「解析列表」「解析下单结果」，对外只暴露归一化后的 KskHunterOffer
  * 与 HunterKskCredential，让 runner 不用关心站点差异。
  *
@@ -132,19 +132,38 @@ function parseKiroMarketOffers(payload: unknown): KskHunterOffer[] {
   })
 }
 
-/** Kiro CEO：商品项在 data 下，价格用 CRD 计价，库存字段名是 remain。 */
+/**
+ * Kiro CEO：库存按区域平铺在 zones 数组里，不是商品列表。
+ *
+ * 实测响应（2026-08，GET https://kiro.ceo/api/my/stock，需 X-API-Key 请求头）：
+ * {"max":0,"max_purchase":10,"min":1,"quota":0,"reserved":0,
+ *  "zones":[{"zone":"us","label":"美国区","enabled":true,"unit_price":50,"stock":5,"available":5,"max":0},
+ *           {"zone":"eu","label":"欧洲区","enabled":true,"unit_price":35,"stock":3,"available":3,"max":0}]}
+ *
+ * goodsId 用区域短码（下单时作为 zone 回传，见 buildOrderRequestBody 的 KIRO_CEO 分支）。
+ *
+ * **库存刻意读 stock 而不是 max**：`max` 是「你现在能买几个」，已经折入了积分余额与
+ * 持有上限（实测 credits=0 时 stock=5 而 max=0）。用 max 会让没积分的用户永远看到
+ * 「无货」，查不出原因；用 stock 则会走到下单，被余额检查或 402 拦下，
+ * 链接卡片上能看到真实原因。
+ */
 function parseKiroCeoOffers(payload: unknown): KskHunterOffer[] {
-  return readOfferArray(payload).flatMap((item) => {
+  // 刻意不用 readOfferArray：它的候选键里没有 zones，会把正常响应判成故障
+  if (!isRecord(payload) || !Array.isArray(payload.zones)) {
+    throw new Error('Kiro CEO 库存接口未返回 zones 数组')
+  }
+  return payload.zones.flatMap((item) => {
     if (!isRecord(item)) return []
-    const goodsId = readString(item.id ?? item.goods_id ?? item.productId)
+    const goodsId = readString(item.zone)
     if (!goodsId) return []
     return [
       {
         goodsId,
-        title: readString(item.title ?? item.goods_name ?? item.name),
-        region: resolveOfferRegion(item.zone, item.tag, item.title, item.goods_name),
-        stock: resolveStock(item.remain, item.stock, item.quantity),
-        price: readNumber(item.price ?? item.credit ?? item.crd)
+        title: readString(item.label) || `Kiro Key · ${goodsId}`,
+        region: resolveOfferRegion(item.zone, item.label),
+        // 下架的区域按无货处理：站点还会返回 stock，但下单必然失败
+        stock: item.enabled === false ? 0 : resolveStock(item.stock, item.available),
+        price: readNumber(item.unit_price)
       }
     ]
   })
@@ -228,16 +247,28 @@ export function parseChannelOffers(channel: KskHunterChannel, payload: unknown):
   }
 }
 
-/** 下单请求体：各站点参数名不同，其余字段一致。 */
+/**
+ * 下单请求体：各站点参数名不同，其余字段一致。
+ *
+ * idempotencyKey 只有要求幂等键的站点会用（目前只有 Kiro CEO）。它由 runner 生成并在
+ * 重试之间复用，所以不能在这里现造——那样每次重试都会变成一笔新订单。
+ */
 export function buildOrderRequestBody(
   channel: KskHunterChannel,
-  offer: KskHunterOffer
+  offer: KskHunterOffer,
+  options: { idempotencyKey?: string } = {}
 ): Record<string, unknown> {
   switch (channel) {
     case KSK_HUNTER_CHANNEL.KIRO_MARKET:
       return { id: offer.goodsId, num: 1 }
+    /*
+     * Kiro CEO：goodsId 是区域短码（us / eu），不是商品 id。
+     * client_order_id 是站点必填项（32 位十六进制），漏传会 400，
+     * 所以这里宁可抛错也不发一个注定失败的请求。
+     */
     case KSK_HUNTER_CHANNEL.KIRO_CEO:
-      return { goods_id: offer.goodsId, count: 1 }
+      if (!options.idempotencyKey) throw new Error('Kiro CEO 下单缺少幂等键')
+      return { count: 1, zone: offer.goodsId, client_order_id: options.idempotencyKey }
     case KSK_HUNTER_CHANNEL.KIRO_DROP:
       return { item_id: offer.goodsId, quantity: 1 }
     /*

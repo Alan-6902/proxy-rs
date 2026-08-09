@@ -58,6 +58,19 @@ function readOptionalCount(value: unknown): number | undefined {
   return Math.floor(numberValue)
 }
 
+/**
+ * 读一个可缺失的非负小数。
+ *
+ * 与 readOptionalCount 的差别：不取整。积分是小数（上游的
+ * currentUsageWithPrecision，如 8456.31），取整会把零头抹掉。
+ */
+function readOptionalDecimal(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const numberValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numberValue) || numberValue < 0) return undefined
+  return numberValue
+}
+
 /** Admin 的时间字段是 RFC3339 字符串，也可能是秒级时间戳。 */
 function readTimestamp(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -100,6 +113,8 @@ export function toCredentialStats(
     // 旧版 kiro-rs 不返回这两个字段，保持 undefined 以区分「不支持」与「真的是 0」
     inputTokens: readOptionalCount(credential.inputTokens),
     outputTokens: readOptionalCount(credential.outputTokens),
+    // 积分是小数，不能走取整那条
+    usedCredits: readOptionalDecimal(credential.usedCredits),
     lastUsedAt: readTimestamp(credential.lastUsedAt),
     usage,
     alerts: resolveLocalAdminAlerts({ disabled, failureCount, refreshFailureCount, usage })

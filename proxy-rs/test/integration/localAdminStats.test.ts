@@ -20,13 +20,11 @@ import {
   resolveLocalAdminAlerts,
   resolveReportWindow,
   selectExhaustedLocalAdminCredentials,
-  sumLocalAdminTokenScopedTotals,
   toHourStart,
   toLocalDateKey,
   type LocalAdminCredentialStats,
   type LocalAdminHourlyBucket,
-  type LocalAdminHourlyCredentialDelta,
-  type LocalAdminReportRow
+  type LocalAdminHourlyCredentialDelta
 } from '../../src/shared/localAdminStats'
 import {
   fetchLocalAdminCredentialStats,
@@ -174,6 +172,27 @@ describe('反代统计 · 响应解析', () => {
     })
     expect(stats!.inputTokens).toBeUndefined()
     expect(stats!.outputTokens).toBeUndefined()
+  })
+
+  it('解析积分统计时保留小数，不像 token 那样取整', () => {
+    // 上游给的是 currentUsageWithPrecision 口径的差分累计，取整会把零头抹掉
+    const stats = toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: 8_456.31 })
+    expect(stats!.usedCredits).toBe(8_456.31)
+  })
+
+  it('旧版 kiro-rs 不返回积分字段时保持 undefined，而不是 0', () => {
+    const stats = toCredentialStats(REMOTE_CREDENTIAL)
+    expect(stats!.usedCredits).toBeUndefined()
+  })
+
+  it('积分字段为负数或非法值时按缺失处理', () => {
+    expect(
+      toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: -1 })!.usedCredits
+    ).toBeUndefined()
+    expect(
+      toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: 'x' as unknown as number })!
+        .usedCredits
+    ).toBeUndefined()
   })
 })
 
@@ -972,6 +991,7 @@ describe('反代统计 · 报表窗口', () => {
         usageDelta: 0,
         inputTokenDelta: 0,
         outputTokenDelta: 0,
+        creditDelta: 0,
         successDelta: 0,
         failureDelta: 0,
         refreshFailureDelta: 0,
@@ -1041,6 +1061,7 @@ describe('反代统计 · 报表窗口', () => {
               usageDelta: 10,
               inputTokenDelta: 0,
               outputTokenDelta: 0,
+              creditDelta: 0,
               successDelta: 0,
               failureDelta: 0,
               refreshFailureDelta: 0,
@@ -1196,78 +1217,129 @@ describe('反代统计 · token 差分', () => {
   })
 })
 
-describe('反代统计 · token 比值的分母口径', () => {
-  function row(patch: Partial<LocalAdminReportRow> & { id: string }): LocalAdminReportRow {
-    return {
-      maskedKey: `ksk_...${patch.id}`,
-      usageDelta: 0,
-      inputTokenDelta: 0,
-      outputTokenDelta: 0,
-      successDelta: 0,
-      failureDelta: 0,
-      refreshFailureDelta: 0,
-      lastSeenAt: 0,
-      present: true,
-      ...patch
-    }
+describe('反代统计 · 积分差分', () => {
+  const AT = new Date(2026, 7, 8, 10, 30).getTime()
+
+  function credential(patch: Partial<LocalAdminCredentialStats> = {}): LocalAdminCredentialStats {
+    return statsFixture({ maskedKey: 'ksk_...aaaa', ...patch })
   }
 
-  /*
-   * 线上实测的形态：17 个号里只有 #1 有 token 计数，其余是换号前的旧凭据（已从 Admin
-   * 删除、token 恒为 0），但它们的额度与成功次数照样计入合计。拿全部号的合计当分母，
-   * 「每千 token」会从 26.4 虚高到 416.1，「平均每次 token」会从 817 摊薄到 216。
-   */
-  const REAL_ROWS = [
-    row({
-      id: '1',
-      inputTokenDelta: 320_663,
-      outputTokenDelta: 243,
-      usageDelta: 8_456.31,
-      successDelta: 393
-    }),
-    row({ id: '5', usageDelta: 28_075.96, successDelta: 78, present: false }),
-    row({ id: '13', usageDelta: 16_524.21, successDelta: 93, present: false }),
-    row({ id: '4', usageDelta: 15_029.31, successDelta: 76, present: false }),
-    row({ id: '9', usageDelta: 12_823.2, successDelta: 173, present: false }),
-    row({ id: '6', usageDelta: 11_096.53, successDelta: 16, present: false })
-  ]
+  it('两轮观测按差值累加积分，保留小数', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usedCredits: 100.5 })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ usedCredits: 126.94 })],
+      at: AT + 60_000
+    })
 
-  it('只累加有 token 记录的号，忽略 token 为 0 的号', () => {
-    const scoped = sumLocalAdminTokenScopedTotals(REAL_ROWS)
-
-    expect(scoped.credentialCount).toBe(1)
-    expect(scoped.usageDelta).toBeCloseTo(8_456.31, 2)
-    expect(scoped.successDelta).toBe(393)
+    // 积分是小数口径，取整会把零头抹掉
+    expect(second.buckets[0].credentials[0].creditDelta).toBeCloseTo(26.44, 2)
   })
 
-  it('用它当分母算出的比值与该号自身口径一致', () => {
-    const scoped = sumLocalAdminTokenScopedTotals(REAL_ROWS)
-    const tokens = REAL_ROWS.reduce((sum, r) => sum + r.inputTokenDelta + r.outputTokenDelta, 0)
+  it('kiro-rs 重启使积分归零时记 0，不出现负值', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usedCredits: 8_456.31 })],
+      at: AT
+    })
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ usedCredits: 12.5 })],
+      at: AT + 60_000
+    })
 
-    // 每千 token 约 26.4（若误用全部号的额度合计会算成 416.1）
-    expect((scoped.usageDelta / tokens) * 1000).toBeCloseTo(26.4, 1)
-    // 平均每次 817（若误用全部号的成功合计会算成 216）
-    expect(Math.round(tokens / scoped.successDelta)).toBe(817)
+    expect(second.buckets[0].credentials[0].creditDelta).toBe(0)
+    // 新基线要跟上，否则下一轮会把 12.5 之后的增长当成从 8456.31 起跳
+    expect(second.cursors[0].usedCredits).toBe(12.5)
   })
 
-  it('全都有 token 时等于全量合计，不改变原有口径', () => {
-    const rows = [
-      row({ id: '1', inputTokenDelta: 100, usageDelta: 10, successDelta: 2 }),
-      row({ id: '2', outputTokenDelta: 50, usageDelta: 5, successDelta: 3 })
-    ]
-    const scoped = sumLocalAdminTokenScopedTotals(rows)
+  it('kiro-rs 不支持积分时不记增量，也不把基线写成 0', () => {
+    const state = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ usedCredits: undefined })],
+      at: AT
+    })
 
-    expect(scoped.credentialCount).toBe(2)
-    expect(scoped.usageDelta).toBe(15)
-    expect(scoped.successDelta).toBe(5)
+    expect(state.buckets[0].credentials[0].creditDelta).toBe(0)
+    expect(state.cursors[0].usedCredits).toBeUndefined()
   })
 
-  it('没有任何号有 token 时返回全 0，供调用方显示占位而不是除以 0', () => {
-    const scoped = sumLocalAdminTokenScopedTotals([
-      row({ id: '1', usageDelta: 99, successDelta: 9 })
+  it('换号时作废旧基线，不把新号的历史累计算成本轮消耗', () => {
+    const first = accumulateHourlyUsage({
+      buckets: [],
+      cursors: [],
+      credentials: [credential({ maskedKey: 'ksk_...old', usedCredits: 5_000 })],
+      at: AT
+    })
+    // 同一个 id 换成另一个号，新号自己已经消耗了 3000 分
+    const second = accumulateHourlyUsage({
+      buckets: first.buckets,
+      cursors: first.cursors,
+      credentials: [credential({ maskedKey: 'ksk_...new', usedCredits: 3_000 })],
+      at: AT + 60_000
+    })
+
+    expect(second.buckets[0].credentials[0].creditDelta).toBe(0)
+    expect(second.cursors[0].usedCredits).toBe(3_000)
+  })
+
+  it('总览把各凭据的积分相加，缺字段的按 0 计', () => {
+    const totals = aggregateLocalAdminStats([
+      statsFixture({ id: '1', usedCredits: 26.44 }),
+      statsFixture({ id: '2', usedCredits: 3.5 }),
+      statsFixture({ id: '3' })
     ])
 
-    expect(scoped).toEqual({ usageDelta: 0, successDelta: 0, credentialCount: 0 })
+    expect(totals.usedCredits).toBeCloseTo(29.94, 2)
+  })
+
+  it('报表按积分降序排，积分缺失时退回按 token 排', () => {
+    const withCredits = buildLocalAdminReport({
+      buckets: [
+        {
+          hour: toHourStart(AT),
+          credentials: [
+            {
+              id: '1',
+              usageDelta: 0,
+              inputTokenDelta: 900_000,
+              outputTokenDelta: 0,
+              creditDelta: 5,
+              successDelta: 0,
+              failureDelta: 0,
+              refreshFailureDelta: 0,
+              lastSeenAt: AT
+            },
+            {
+              id: '2',
+              usageDelta: 0,
+              inputTokenDelta: 10,
+              outputTokenDelta: 0,
+              creditDelta: 80,
+              successDelta: 0,
+              failureDelta: 0,
+              refreshFailureDelta: 0,
+              lastSeenAt: AT
+            }
+          ]
+        }
+      ],
+      range: { date: toLocalDateKey(AT), hour: new Date(AT).getHours() },
+      now: AT
+    })
+
+    // 积分多的排前面，即使它的 token 少得多
+    expect(withCredits.rows.map((row) => row.id)).toEqual(['2', '1'])
+    expect(withCredits.creditDelta).toBe(85)
   })
 })
 

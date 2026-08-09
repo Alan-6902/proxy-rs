@@ -60,6 +60,8 @@ export interface RemoteCredential {
   /** 经本机反代累计的 tokens，需 kiro-rs 支持；旧版本不返回该字段 */
   inputTokens?: number
   outputTokens?: number
+  /** 经本机反代消耗的 Kiro 积分累计值（估算），需 kiro-rs 支持 */
+  usedCredits?: number
   lastUsedAt?: string | number | null
   expiresAt?: string | number | null
   hasProfileArn?: boolean

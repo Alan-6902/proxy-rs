@@ -111,10 +111,49 @@ describe.runIf(BASE_URL && API_KEY)('反代统计 · 真实 Admin 消耗差分',
       expect(row.usageDelta).toBeGreaterThanOrEqual(0)
       expect(row.successDelta).toBeGreaterThanOrEqual(0)
       expect(row.failureDelta).toBeGreaterThanOrEqual(0)
+      expect(row.inputTokenDelta).toBeGreaterThanOrEqual(0)
+      expect(row.outputTokenDelta).toBeGreaterThanOrEqual(0)
+      expect(row.creditDelta).toBeGreaterThanOrEqual(0)
     }
     expect(report.usageDelta).toBeGreaterThanOrEqual(0)
     expect(report.rows.length).toBe(second.length)
     // 当前仍在 Admin 里的凭据都应标 present
     for (const row of report.rows) expect(row.present).toBe(true)
+  })
+
+  it('真实 Admin 返回 token 统计（需 kiro-rs 支持该字段）', async () => {
+    const credentials = await sampleOnce()
+    expect(credentials.length).toBeGreaterThan(0)
+
+    // 字段存在性是契约的核心：本仓库靠它区分「kiro-rs 不支持」与「确实是 0」。
+    // 若这条失败，说明连的 kiro-rs 版本没有落 token 统计，页面会显示「不支持」。
+    const supported = credentials.some((item) => item.inputTokens !== undefined)
+    expect(supported).toBe(true)
+
+    for (const credential of credentials) {
+      if (credential.inputTokens === undefined) continue
+      expect(Number.isInteger(credential.inputTokens)).toBe(true)
+      expect(credential.inputTokens).toBeGreaterThanOrEqual(0)
+      expect(Number.isInteger(credential.outputTokens ?? 0)).toBe(true)
+      // 被调用过的凭据必须有输入 token，否则说明记账没挂上
+      if (credential.successCount > 0) {
+        expect(credential.inputTokens).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('真实 Admin 返回积分统计（需 kiro-rs 支持该字段）', async () => {
+    const credentials = await sampleOnce()
+    expect(credentials.length).toBeGreaterThan(0)
+
+    // 与 token 同理：字段存在性是契约核心，缺失时页面显示「不支持」
+    const supported = credentials.some((item) => item.usedCredits !== undefined)
+    expect(supported).toBe(true)
+
+    for (const credential of credentials) {
+      if (credential.usedCredits === undefined) continue
+      expect(Number.isFinite(credential.usedCredits)).toBe(true)
+      expect(credential.usedCredits).toBeGreaterThanOrEqual(0)
+    }
   })
 })

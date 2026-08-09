@@ -215,6 +215,9 @@ describe('本机 Admin 地址与同步验活', () => {
           ]
         })
       }
+      if (url.endsWith('/credentials/8/disabled') && init.method === 'POST') {
+        return jsonResponse({})
+      }
       if (url.endsWith('/credentials/8') && init.method === 'DELETE') return jsonResponse({})
       return jsonResponse({}, 404)
     }
@@ -235,6 +238,45 @@ describe('本机 Admin 地址与同步验活', () => {
       prunedMaskedKeys: ['ksk_...1DaC'],
       errors: []
     })
+    // Admin 只收已禁用的凭据，所以启用中的残留必须先禁用再删
+    expect(requests).toEqual([
+      'GET http://127.0.0.1:12888/api/admin/credentials',
+      'POST http://127.0.0.1:12888/api/admin/credentials/8/disabled',
+      'DELETE http://127.0.0.1:12888/api/admin/credentials/8'
+    ])
+  })
+
+  it('残留凭据已禁用时直接删，不重复发禁用请求', async () => {
+    const staleHash = createHash('sha256').update(KSK_TWO).digest('hex')
+    const requests: string[] = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      requests.push(`${init.method} ${url}`)
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({
+          credentials: [
+            {
+              id: 8,
+              apiKeyHash: staleHash,
+              authMethod: 'api_key',
+              maskedApiKey: 'ksk_...1DaC',
+              disabled: true
+            }
+          ]
+        })
+      }
+      if (url.endsWith('/credentials/8') && init.method === 'DELETE') return jsonResponse({})
+      return jsonResponse({}, 404)
+    }
+
+    const result = await syncKskAccountsToLocalAdmin({
+      accounts: [],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(result).toMatchObject({ pruned: 1, errors: [] })
     expect(requests).toEqual([
       'GET http://127.0.0.1:12888/api/admin/credentials',
       'DELETE http://127.0.0.1:12888/api/admin/credentials/8'
@@ -250,6 +292,9 @@ describe('本机 Admin 地址与同步验活', () => {
             { id: 8, apiKeyHash: staleHash, authMethod: 'api_key', maskedApiKey: 'ksk_...1DaC' }
           ]
         })
+      }
+      if (url.endsWith('/credentials/8/disabled') && init.method === 'POST') {
+        return jsonResponse({})
       }
       if (url.endsWith('/credentials/8') && init.method === 'DELETE') {
         return jsonResponse({ error: 'busy' }, 500)
@@ -288,6 +333,9 @@ describe('本机 Admin 地址与同步验活', () => {
           ]
         })
       }
+      if (url.endsWith('/credentials/1/disabled') && init.method === 'POST') {
+        return jsonResponse({})
+      }
       if (url.endsWith('/credentials/1') && init.method === 'DELETE') return jsonResponse({})
       return jsonResponse({}, 404)
     }
@@ -301,6 +349,7 @@ describe('本机 Admin 地址与同步验活', () => {
     })
 
     expect(result).toEqual({ checked: 1, removed: 1, retainedTransient: 0, errors: [] })
+    expect(requests).toContain('POST http://127.0.0.1:12888/api/admin/credentials/1/disabled')
     expect(requests).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/1')
     expect(requests).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/2')
     expect(requests).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/3')
@@ -331,6 +380,7 @@ describe('本机 Admin 地址与同步验活', () => {
           ]
         })
       }
+      if (url.endsWith('/disabled') && init.method === 'POST') return jsonResponse({})
       if (url.endsWith('/credentials/2') && init.method === 'DELETE') return jsonResponse({})
       return jsonResponse({ error: 'boom' }, 500)
     }
@@ -628,7 +678,7 @@ describe('单账号推送到本机 Admin', () => {
    */
   const runPushWithProbe = async (
     probe: (() => Promise<{ verdict: string; error?: string }>) | undefined,
-    options: { deleteFails?: boolean; balanceFails?: boolean } = {}
+    options: { deleteFails?: boolean; balanceFails?: boolean; disableFails?: boolean } = {}
   ): Promise<{ result: LocalAdminPushResult; calls: string[] }> => {
     const calls: string[] = []
     const fetchImpl: KskAutomationFetch = async (url, init) => {
@@ -643,6 +693,10 @@ describe('单账号推送到本机 Admin', () => {
         return options.balanceFails
           ? jsonResponse({ error: 'boom' }, 503)
           : jsonResponse({ balance: 1 })
+      }
+      // 刚建的凭据是启用状态，回滚删除会先走禁用
+      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
+        return options.disableFails ? jsonResponse({ error: 'locked' }, 500) : jsonResponse({})
       }
       if (url.endsWith('/credentials/9') && init.method === 'DELETE') {
         return options.deleteFails ? jsonResponse({ error: 'nope' }, 500) : jsonResponse({})
@@ -663,7 +717,7 @@ describe('单账号推送到本机 Admin', () => {
 
   const expectPushRejection = async (
     probe: (() => Promise<{ verdict: string; error?: string }>) | undefined,
-    options: { deleteFails?: boolean; balanceFails?: boolean },
+    options: { deleteFails?: boolean; balanceFails?: boolean; disableFails?: boolean },
     expected: RegExp
   ): Promise<void> => {
     await expect(runPushWithProbe(probe, options)).rejects.toThrow(expected)
@@ -701,6 +755,9 @@ describe('单账号推送到本机 Admin', () => {
         return jsonResponse({ credentialId: 9 })
       }
       if (url.endsWith('/credentials/9/balance')) return jsonResponse({ balance: 1 })
+      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
+        return jsonResponse({})
+      }
       if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
       return jsonResponse({}, 404)
     }
@@ -715,6 +772,7 @@ describe('单账号推送到本机 Admin', () => {
         probeLiveness: (async () => ({ verdict, error })) as never
       })
     ).rejects.toThrow(new RegExp(`发消息验活未通过.*${error}.*已从 Admin 删除该凭据`))
+    expect(calls).toContain('POST http://127.0.0.1:12888/api/admin/credentials/9/disabled')
     expect(calls).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
   })
 
@@ -730,6 +788,14 @@ describe('单账号推送到本机 Admin', () => {
     await expectPushRejection(
       async () => ({ verdict: 'permanently_invalid', error: '账号已失效' }),
       { deleteFails: true },
+      /删除凭据 #9 失败，需要手动清理/
+    )
+  })
+
+  it('回滚时禁用失败也算删除失败，错误里点明需要手动清理', async () => {
+    await expectPushRejection(
+      async () => ({ verdict: 'permanently_invalid', error: '账号已失效' }),
+      { disableFails: true },
       /删除凭据 #9 失败，需要手动清理/
     )
   })
@@ -1544,6 +1610,9 @@ describe('KSK 自动拉取调度', () => {
             { id: 8, apiKeyHash: staleHash, authMethod: 'api_key', maskedApiKey: 'ksk_...1DaC' }
           ]
         })
+      }
+      if (url.endsWith('/credentials/8/disabled') && init.method === 'POST') {
+        return jsonResponse({})
       }
       if (url.endsWith('/credentials/8') && init.method === 'DELETE') return jsonResponse({})
       if (url.endsWith('/credentials') && init.method === 'POST') {

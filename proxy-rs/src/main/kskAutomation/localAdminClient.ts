@@ -144,6 +144,35 @@ export function remoteCredentialId(credential: RemoteCredential): string | undef
 }
 
 /**
+ * 删除 Admin 上的一条凭据。
+ *
+ * Admin 只收已禁用的凭据（`DELETE` 未禁用的会返回 400「只能删除已禁用的凭据」），
+ * 所以启用中的先 POST /disabled 再删。少了这一步，凡是仍处于启用状态的凭据
+ * 都永远删不掉——本地已经判死或已经删掉的号会一直赖在反代池子里。
+ *
+ * `disabled` 传 Admin 列表里读到的状态；不确定时传 false 走两步，多一个幂等请求而已。
+ */
+async function deleteRemoteCredential(input: {
+  baseUrl: string
+  adminApiKey: string
+  timeoutMs: number
+  credentialId: string
+  disabled: boolean
+  fetchImpl: KskAutomationFetch
+}): Promise<void> {
+  const target = `${input.baseUrl}/credentials/${encodeURIComponent(input.credentialId)}`
+  if (!input.disabled) {
+    await requestJson(input.fetchImpl, `${target}/disabled`, input.adminApiKey, input.timeoutMs, {
+      method: 'POST',
+      body: { disabled: true }
+    })
+  }
+  await requestJson(input.fetchImpl, target, input.adminApiKey, input.timeoutMs, {
+    method: 'DELETE'
+  })
+}
+
+/**
  * 按本地验活结论删除本机 Admin（kiro-rs 反代）上的对应凭据。
  *
  * 判定权全部在本地：这里只负责「本地已经判死的这些 key，在 Admin 上也删掉」。
@@ -194,13 +223,14 @@ export async function deleteLocalAdminCredentialsByKey(input: {
     const credentialId = remoteCredentialId(credential)
     if (!credentialId) continue
     try {
-      await requestJson(
-        input.fetchImpl,
-        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}`,
+      await deleteRemoteCredential({
+        baseUrl,
         adminApiKey,
         timeoutMs,
-        { method: 'DELETE' }
-      )
+        credentialId,
+        disabled: credential.disabled === true,
+        fetchImpl: input.fetchImpl
+      })
       result.removed++
     } catch (error) {
       result.errors.push(error instanceof Error ? error.message : String(error))
@@ -274,13 +304,14 @@ export async function syncKskAccountsToLocalAdmin(input: {
     const credentialId = remoteCredentialId(credential)
     if (!credentialId) continue
     try {
-      await requestJson(
-        input.fetchImpl,
-        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}`,
+      await deleteRemoteCredential({
+        baseUrl,
         adminApiKey,
         timeoutMs,
-        { method: 'DELETE' }
-      )
+        credentialId,
+        disabled: credential.disabled === true,
+        fetchImpl: input.fetchImpl
+      })
       result.pruned++
       result.prunedMaskedKeys.push(credential.maskedApiKey || `#${credentialId}`)
       existingHashes.delete(hash)
@@ -370,13 +401,15 @@ async function verifyOrRollback(
     const detail = error instanceof Error ? error.message : String(error)
     let removed = false
     try {
-      await requestJson(
-        context.fetchImpl,
-        `${context.baseUrl}/credentials/${encodeURIComponent(context.credentialId)}`,
-        context.adminApiKey,
-        context.timeoutMs,
-        { method: 'DELETE' }
-      )
+      // 刚 POST 出来的凭据一定是启用状态，所以这里必须走「先禁用再删」的两步
+      await deleteRemoteCredential({
+        baseUrl: context.baseUrl,
+        adminApiKey: context.adminApiKey,
+        timeoutMs: context.timeoutMs,
+        credentialId: context.credentialId,
+        disabled: false,
+        fetchImpl: context.fetchImpl
+      })
       removed = true
     } catch {
       removed = false

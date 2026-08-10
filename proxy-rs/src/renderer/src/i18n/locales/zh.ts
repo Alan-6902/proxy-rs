@@ -46,6 +46,7 @@ const zh = {
     accounts: '账户管理',
     tasks: '任务管理',
     hunter: '抢号监控',
+    kskLedger: '抢号台账',
     proxyStats: '反代统计',
     proxyPool: '代理池',
     diagnose: '一键诊断',

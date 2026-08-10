@@ -10,7 +10,9 @@ import {
   type KskHunterStatusEvent
 } from '../../shared/kskHunter'
 import type { HunterReport } from '../../shared/hunterReport'
+import type { KskLedgerReport, KskLedgerSort } from '../../shared/kskLedger'
 import { hunterReportStorePath } from './reportStore'
+import { clearKskLedger, kskLedgerStorePath } from './ledgerStore'
 import {
   createKskHunterLink,
   deleteKskHunterDelivery,
@@ -37,6 +39,9 @@ export const KSK_HUNTER_CHANNEL_NAME = {
   deleteDelivery: 'ksk-hunter-delete-delivery',
   report: 'ksk-hunter-report',
   revealReportFile: 'ksk-hunter-reveal-report-file',
+  ledgerReport: 'ksk-hunter-ledger-report',
+  clearLedger: 'ksk-hunter-clear-ledger',
+  revealLedgerFile: 'ksk-hunter-reveal-ledger-file',
   statusEvent: 'ksk-hunter-status-changed'
 } as const
 
@@ -266,6 +271,41 @@ export function registerKskHunterIpcHandlers(deps: KskHunterIpcDeps): void {
       return { success: true, data: path }
     } catch {
       return { success: false, error: '报表历史文件还不存在，抢号产生第一条记录后才会生成' }
+    }
+  })
+
+  // 台账与抢号报表各读一份文件、各自聚合，所以分开两个通道按需拉
+  ipcMain.handle(
+    KSK_HUNTER_CHANNEL_NAME.ledgerReport,
+    async (_event, days?: number, sort?: KskLedgerSort): Promise<IpcResult<KskLedgerReport>> => {
+      try {
+        return { success: true, data: await deps.getManager().ledgerReport(days, sort) }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    KSK_HUNTER_CHANNEL_NAME.clearLedger,
+    async (): Promise<IpcResult<KskLedgerReport>> => {
+      try {
+        await clearKskLedger()
+        return { success: true, data: await deps.getManager().ledgerReport() }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.revealLedgerFile, async (): Promise<IpcResult<string>> => {
+    try {
+      const path = kskLedgerStorePath()
+      await fs.access(path)
+      shell.showItemInFolder(path)
+      return { success: true, data: path }
+    } catch {
+      return { success: false, error: '台账文件还不存在，抢到第一个号后才会生成' }
     }
   })
 }

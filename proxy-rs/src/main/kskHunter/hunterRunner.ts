@@ -47,6 +47,15 @@ import {
 } from '../../shared/hunterReport'
 import { appendHunterReportEvent, loadHunterReportEvents } from './reportStore'
 import {
+  KSK_LEDGER_RETIRE_REASON,
+  summarizeKskLedger,
+  type KskLedgerEntry,
+  type KskLedgerReport,
+  type KskLedgerSort
+} from '../../shared/kskLedger'
+import { loadKskLedger, markKskLedgerRetired, recordKskLedgerPurchase } from './ledgerStore'
+import { sha256Hex } from '../kskAutomation/localAdminClient'
+import {
   appendKskHunterDelivery,
   appendKskHunterSpend,
   patchKskHunterDelivery,
@@ -109,6 +118,18 @@ export interface KskHunterDeps {
   /** 报表事件流的读写；默认落 userData 下的 JSONL，测试里可换成内存实现。 */
   appendReportEvent?: (event: HunterReportEvent) => Promise<void>
   readReportEvents?: () => Promise<HunterReportEvent[]>
+  /**
+   * 台账的读写。默认落 userData 下的 JSON，测试里可换成内存实现。
+   *
+   * 与报表事件流分开注入：事件流只追加，台账要反复更新同一条记录的累计值。
+   */
+  recordLedgerPurchase?: (entry: KskLedgerEntry) => Promise<void>
+  markLedgerRetired?: (input: {
+    keyHash: string
+    at: number
+    reason: (typeof KSK_LEDGER_RETIRE_REASON)[keyof typeof KSK_LEDGER_RETIRE_REASON]
+  }) => Promise<void>
+  readLedger?: () => Promise<KskLedgerEntry[]>
   log?: (message: string) => void
 }
 
@@ -199,6 +220,36 @@ export class KskHunterManager {
       events: await read(),
       billing: source.config.billing,
       days
+    })
+  }
+
+  /** 单号台账报表：成本、存活时长、经本机反代的产出。 */
+  async ledgerReport(days?: number, sort?: KskLedgerSort): Promise<KskLedgerReport> {
+    const read = this.deps.readLedger ?? loadKskLedger
+    return summarizeKskLedger({ entries: await read(), days, sort })
+  }
+
+  /**
+   * 记一笔采购到台账。
+   *
+   * 吞掉写盘错误的理由同 recordReportEvent：台账是观测数据，磁盘满了也不该
+   * 让「号已经买到了」这条主流程失败。
+   */
+  private recordLedgerPurchase(entry: KskLedgerEntry): void {
+    const record = this.deps.recordLedgerPurchase ?? recordKskLedgerPurchase
+    void record(entry).catch((error) => {
+      this.log(`台账写入失败：${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /** 标记台账里某个号下线。同样吞掉写盘错误。 */
+  private markLedgerRetired(
+    keyHash: string,
+    reason: (typeof KSK_LEDGER_RETIRE_REASON)[keyof typeof KSK_LEDGER_RETIRE_REASON]
+  ): void {
+    const mark = this.deps.markLedgerRetired ?? markKskLedgerRetired
+    void mark({ keyHash, at: Date.now(), reason }).catch((error) => {
+      this.log(`台账下线标记失败：${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -683,6 +734,29 @@ export class KskHunterManager {
       unitLabel
     })
 
+    /*
+     * 台账建档。keyHash 用 sha256(明文) —— 与 Admin 的 apiKeyHash 同一算法，
+     * 反代采样时靠它把这条采购和后续消耗焊在一起，台账文件里不留明文。
+     */
+    const keyHash = sha256Hex(credential.key)
+    this.recordLedgerPurchase({
+      keyHash,
+      maskedKey,
+      region: credential.region,
+      channel: link.channel,
+      linkId: link.id,
+      linkName: link.name,
+      purchasedAt: now,
+      costUnit: budget.costUnit,
+      costCny: budget.costCny,
+      unitLabel,
+      usedCredits: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      successCount: 0,
+      failureCount: 0
+    })
+
     if (store.config.notifyOnAutoOrder) {
       this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region })
     }
@@ -701,6 +775,8 @@ export class KskHunterManager {
         lastError: `验活失败：${message}`
       })
       this.recordReportEvent(HUNTER_REPORT_EVENT.DEAD_KEY, link, { region: credential.region })
+      // 钱花了号不能用：台账立即标死，别让它挂在「待确认」等宽限期走完
+      this.markLedgerRetired(keyHash, KSK_LEDGER_RETIRE_REASON.INVALID)
       this.log(`已购 ${maskedKey} 验活失败，不推送下游：${message}`)
       await this.refreshDeliveryCounters()
       return

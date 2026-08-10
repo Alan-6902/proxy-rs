@@ -237,3 +237,18 @@ ui-automation.local.json
 
 # Trae files
 .trae/
+
+# kiro-rs-src（Rust 反代 + admin-ui，从 hank9999/kiro.rs fork 移植进来）
+# 运行时产物与本机配置不进版本控制；Cargo.lock 例外，二进制项目需要锁定依赖
+kiro-rs-src/target/
+kiro-rs-src/config.json
+kiro-rs-src/credentials.*
+kiro-rs-src/test.json
+kiro-rs-src/kiro_balance_cache.json
+kiro-rs-src/kiro_stats.json
+kiro-rs-src/kiro_credit_cursors.json
+kiro-rs-src/admin-ui/node_modules/
+kiro-rs-src/admin-ui/dist/
+kiro-rs-src/admin-ui/tsconfig.tsbuildinfo
+!kiro-rs-src/Cargo.lock
+!kiro-rs-src/credentials.example.*.json

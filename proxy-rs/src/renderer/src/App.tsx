@@ -14,6 +14,7 @@ import {
   LogsPage,
   TaskManagerPage,
   HunterPage,
+  KskLedgerPage,
   ProxyStatsPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
@@ -247,6 +248,8 @@ function App(): React.JSX.Element {
         return <TaskManagerPage />
       case 'hunter':
         return <HunterPage />
+      case 'kskLedger':
+        return <KskLedgerPage />
       case 'proxyStats':
         return <ProxyStatsPage />
       case 'proxyPool':

@@ -24,6 +24,7 @@ import type {
   KskHunterStatusEvent
 } from '../shared/kskHunter'
 import type { HunterReport } from '../shared/hunterReport'
+import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminExhaustedCleanupSummary,
@@ -1226,6 +1227,18 @@ const api = {
 
   kskHunterRevealReportFile: (): Promise<IdcIpcResult<string>> =>
     ipcRenderer.invoke('ksk-hunter-reveal-report-file'),
+
+  kskHunterLedgerReport: (
+    days?: number,
+    sort?: KskLedgerSort
+  ): Promise<IdcIpcResult<KskLedgerReport>> =>
+    ipcRenderer.invoke('ksk-hunter-ledger-report', days, sort),
+
+  kskHunterClearLedger: (): Promise<IdcIpcResult<KskLedgerReport>> =>
+    ipcRenderer.invoke('ksk-hunter-clear-ledger'),
+
+  kskHunterRevealLedgerFile: (): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke('ksk-hunter-reveal-ledger-file'),
 
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: KskHunterStatusEvent): void => {

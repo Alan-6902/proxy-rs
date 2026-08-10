@@ -46,6 +46,7 @@ const en = {
     accounts: 'Accounts',
     tasks: 'Tasks',
     hunter: 'KSK Hunter',
+    kskLedger: 'KSK Ledger',
     proxyStats: 'Proxy Stats',
     proxyPool: 'Proxy Pool',
     diagnose: 'Diagnostics',

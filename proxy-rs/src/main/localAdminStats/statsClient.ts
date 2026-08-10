@@ -100,6 +100,7 @@ export function toCredentialStats(
   return {
     id,
     maskedKey: readOptionalString(credential.maskedApiKey),
+    apiKeyHash: readOptionalString(credential.apiKeyHash),
     authMethod: readOptionalString(credential.authMethod),
     endpoint: readOptionalString(credential.endpoint),
     email: readOptionalString(credential.email),

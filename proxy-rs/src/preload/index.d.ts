@@ -23,6 +23,7 @@ import type {
   KskHunterStatusEvent
 } from '../shared/kskHunter'
 import type { HunterReport } from '../shared/hunterReport'
+import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminExhaustedCleanupSummary,
@@ -953,6 +954,12 @@ interface KiroApi {
   kskHunterDeleteDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
   kskHunterReport: (days?: number) => Promise<IdcIpcResult<HunterReport>>
   kskHunterRevealReportFile: () => Promise<IdcIpcResult<string>>
+  kskHunterLedgerReport: (
+    days?: number,
+    sort?: KskLedgerSort
+  ) => Promise<IdcIpcResult<KskLedgerReport>>
+  kskHunterClearLedger: () => Promise<IdcIpcResult<KskLedgerReport>>
+  kskHunterRevealLedgerFile: () => Promise<IdcIpcResult<string>>
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void) => () => void
   localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>

@@ -93,6 +93,8 @@ import { KskHunterManager } from './kskHunter/hunterRunner'
 import { hunterLocalDateKey, KSK_HUNTER_CHANNEL_LABEL } from '../shared/kskHunter'
 import { loadKskHunterStore } from './kskHunter/configStore'
 import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
+import { KSK_LEDGER_RETIRE_REASON } from '../shared/kskLedger'
+import { markKskLedgerRetired, updateKskLedgerFromCredentials } from './kskHunter/ledgerStore'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
   LocalNotificationService,
@@ -2038,6 +2040,25 @@ async function cleanupExhaustedLocalAdminCredentials(
   const hashes = new Set(
     removal.deleted.map((item) => item.apiKeyHash).filter((hash): hash is string => Boolean(hash))
   )
+
+  /*
+   * 台账标寿终：额度耗尽是号的正常终点，必须与「从 Admin 消失」区分开。
+   * 只标不阻塞——台账是观测数据，写失败不该让清理这条主流程失败。
+   * 放在本地账号清理之前：下面那段可能抛错，顺序反了这一步就常被跳过。
+   */
+  const retiredAt = Date.now()
+  await Promise.all(
+    [...hashes].map((keyHash) =>
+      markKskLedgerRetired({
+        keyHash,
+        at: retiredAt,
+        reason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
+      }).catch((error) => {
+        console.warn('[KskLedger] Failed to mark retired:', error)
+      })
+    )
+  )
+
   try {
     const local = await removeStoredKskAccountsByHash(hashes)
     summary.removedLocalAccounts = local.removedIds.length
@@ -2123,6 +2144,8 @@ const localAdminStatsManager = new LocalAdminStatsManager({
   },
   fetchImpl: localAdminFetchImpl,
   cleanupExhausted: cleanupExhaustedLocalAdminCredentials,
+  // 每轮采样把观测并进抢号台账：号的存活时长与产出全靠这条链路攒
+  updateLedger: updateKskLedgerFromCredentials,
   notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
   log: (message) => console.log(message)
 })

@@ -71,6 +71,12 @@ export interface LocalAdminCredentialStats {
   id: string
   /** Admin 侧的脱敏 Key，形如 ksk_...ibfB */
   maskedKey?: string
+  /**
+   * Admin 侧的 `sha256(ksk 明文)`。抢号台账靠它把「这个号花多少钱买的」
+   * 与「它替我烧了多少积分」对上（见 shared/kskLedger）。
+   * oauth 凭据没有这个字段。
+   */
+  apiKeyHash?: string
   authMethod?: string
   endpoint?: string
   email?: string

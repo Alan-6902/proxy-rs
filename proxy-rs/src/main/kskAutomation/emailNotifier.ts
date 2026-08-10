@@ -61,12 +61,17 @@ export async function sendKskAddedEmail(
     socketTimeout: 30_000
   })
   try {
-    await transporter.sendMail({
-      from: config.from.trim(),
-      to: recipients,
-      subject: 'Proxy RS 新增 KSK',
-      text: credentials.map((credential) => `${credential.key} (${credential.region})`).join('\n')
-    })
+    const text = credentials
+      .map((credential) => `${credential.key} (${credential.region})`)
+      .join('\n')
+    for (const recipient of recipients) {
+      await transporter.sendMail({
+        from: config.from.trim(),
+        to: recipient,
+        subject: 'Proxy RS 新增 KSK',
+        text
+      })
+    }
     return credentials.length
   } finally {
     transporter.close()

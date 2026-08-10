@@ -545,15 +545,22 @@ function isBalanceQueryUnauthorized(detail: string): boolean {
   return detail.includes('权限不足') || detail.includes('User is not authorized to make this call')
 }
 
+const TRANSIENT_BALANCE_FAILURE_PATTERN =
+  /\bHTTP (?:408|425|429|5\d{2})\b|fetch failed|error sending request|network|timed?\s*out|timeout|aborted|aborterror|econnreset|econnrefused|eai_again|enotfound|超时|网络|连接失败/i
+
+function isTransientBalanceQueryFailure(detail: string): boolean {
+  return TRANSIENT_BALANCE_FAILURE_PATTERN.test(detail)
+}
+
 /**
- * 把单个账号推送到本机 Admin，并保证「推成功 = 反代真能用」。
+ * 把单个账号推送到本机 Admin；只有明确永久失效才回滚删除。
  *
  * 与批量同步的差别：不限 credentialKind（social / idc / api_key 都收），
  * 并且 Admin 已有同一凭据时返回 existing 而不是静默跳过——手动点按钮的人
  * 需要知道"没新增"这个结果。
  *
- * 返回 created 即代表两道门禁都过了（Admin 能用这条凭据问到余额 + 真发消息出活）。
- * 任一关不过都会删掉凭据并抛错，绝不返回「推进去了但不确定能不能用」的结果。
+ * 返回 created 代表凭据已保留；verified 与 probeVerdict 分别记录余额和真实消息结果。
+ * 暂时性网络故障不证明账号失效，必须保留；明确永久失效才删除并抛错。
  */
 export async function pushAccountToLocalAdmin(input: {
   candidate: LocalAdminPushCandidate
@@ -607,18 +614,16 @@ export async function pushAccountToLocalAdmin(input: {
   if (!credentialId) throw new Error('本机 Admin 未返回 credentialId')
 
   /*
-   * 两道门禁，任一不过就把刚建的凭据删掉并抛错：调用方要的是「推过去就一定能用」，
-   * 留一条不确定的凭据在池子里，等于把问题推迟到真实请求时才炸。
+   * 两道门禁，只有明确证明凭据不可用时，才把刚建的凭据删掉并抛错：
    *
    * 1) balance：让 Admin 用这条凭据去问余额，验的是 Admin 侧接线
    *    （authMethod 解析对不对、它能不能拿这份凭据刷出 token）。
-   *    例外见 isBalanceQueryUnauthorized：上游拒绝这个身份查额度时，
-   *    这一关证明不了任何事，放过去交给发消息验活定生死。
-   * 2) 发消息：balance 通不代表能出活（超额号 balance 照样通，
-   *    见 credentialCleanup 的注释），所以还要真发一条消息。
+   *    上游拒绝这个身份查额度，或余额请求遇到超时 / 限流 / 5xx 时，
+   *    这一关都证明不了凭据失效；有发消息探针时交给下一关判断。
+   * 2) 发消息：直接用同一份账号真实出活。alive 明确可用；transient 只表示
+   *    暂时无法确认，不能据此删除好号；只有 permanently_invalid 才回滚。
    *
-   * transient（超时 / 限流 / 5xx）在这里也算不通过。它确实可能冤枉好号，
-   * 但「推送失败可以重推」比「推进去了但可能不能用」代价小。
+   * 没有注入发消息探针时，无法替 transient balance 失败兜底，仍按失败回滚。
    */
   let balanceVerified = true
   await verifyOrRollback(
@@ -634,18 +639,28 @@ export async function pushAccountToLocalAdmin(input: {
     },
     (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`,
     (detail) => {
-      if (!isBalanceQueryUnauthorized(detail)) return false
+      if (!input.probeLiveness) return false
+      if (!isBalanceQueryUnauthorized(detail) && !isTransientBalanceQueryFailure(detail)) {
+        return false
+      }
       balanceVerified = false
       return true
     }
   )
 
+  let probeVerdict: LocalAdminPushResult['probeVerdict'] = LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
   if (input.probeLiveness) {
     await verifyOrRollback(
       { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
       async () => {
         const outcome = await input.probeLiveness!(input.candidate)
-        if (outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE) return
+        probeVerdict = outcome.verdict
+        if (
+          outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE ||
+          outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT
+        ) {
+          return
+        }
         throw new Error(outcome.error || describeProbeVerdict(outcome.verdict))
       },
       (detail) => `发消息验活未通过：${detail}`
@@ -656,14 +671,11 @@ export async function pushAccountToLocalAdmin(input: {
     status: 'created',
     credentialId,
     /*
-     * verified 说的是「余额接口调通了」。上游拒绝这个身份查额度时这一关被放过，
-     * 那就不能报 true——此时凭据的可用性是发消息验活背书的，不是余额接口背书的。
+     * verified 说的是「余额接口调通了」。余额失败被发消息验活兜底时如实报 false；
+     * probeVerdict 则独立说明真实发消息是 alive、transient 还是未执行。
      */
     verified: balanceVerified,
     authMethod: payload.authMethod,
-    // 没注入探针时只过了 balance 那一关，别谎报 alive
-    probeVerdict: input.probeLiveness
-      ? LOCAL_ADMIN_PROBE_VERDICT.ALIVE
-      : LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
+    probeVerdict
   }
 }

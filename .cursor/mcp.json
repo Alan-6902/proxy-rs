@@ -15,6 +15,17 @@
         "MESSENGER_KEEPALIVE_PATTERNS": "你好",
         "NODE_NO_WARNINGS": "1"
       }
+    },
+    "serena": {
+      "command": "/Users/ma/.local/bin/serena-guard",
+      "args": [
+        "serve",
+        "--client=cursor"
+      ],
+      "env": {
+        "SERENA_WORKSPACE_ROOT": "${workspaceFolder}",
+        "WORKSPACE_FOLDER_PATHS": "${workspaceFolder}"
+      }
     }
   }
 }

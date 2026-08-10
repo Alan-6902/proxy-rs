@@ -77,7 +77,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
           region: account.credentials.region,
           authMethod: account.credentials.authMethod
         })
-        // 验活不过的凭据已被主进程删掉并抛错，所以走到这里就是"确认可用"
+        // 只有明确永久失效才会回滚并抛错；transient 会保留凭据并作为成功返回
         if (!response.success) throw new Error(response.error)
         const data: LocalAdminPushResult = response.data
         setPushState(data.status === 'existing' ? 'existing' : 'created')
@@ -130,8 +130,8 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     const label = AUTH_METHOD_LABEL[resolved.payload.authMethod]
     const method = isEn ? label.en : label.zh
     return isEn
-      ? `Add to kiro-admin (${method}); only kept if verified usable, otherwise removed and reported as failed`
-      : `添加到 kiro-admin（以 ${method} 凭据创建，验证可用才保留，否则删除并报推送失败）`
+      ? `Add to kiro-admin (${method}); only permanently invalid credentials are removed, transient failures are kept`
+      : `添加到 kiro-admin（以 ${method} 凭据创建；仅明确失效才删除，暂时性故障会保留）`
   }, [resolved, isEn])
 
   return {

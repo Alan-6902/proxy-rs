@@ -819,11 +819,25 @@ describe('单账号推送到本机 Admin', () => {
     ])
   })
 
+  it('发消息验活暂时无法确认时保留已创建凭据并如实返回 transient', async () => {
+    const { result, calls } = await runPushWithProbe(async () => ({
+      verdict: 'transient',
+      error: '发消息验活暂时无法确认（超时 / 限流 / 上游 5xx）'
+    }))
+
+    expect(result).toEqual({
+      status: 'created',
+      credentialId: '9',
+      verified: true,
+      authMethod: 'social',
+      probeVerdict: 'transient'
+    })
+    expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+  })
+
   it.each([
-    ['账号已失效', 'permanently_invalid', '账号已失效'],
-    // transient 也算不通过：宁可推送失败让用户重推，也不把不确定的凭据留在池子里
-    ['暂时无法确认', 'transient', '上游 503']
-  ])('发消息验活不通过就删凭据并抛错：%s', async (_name, verdict, error) => {
+    ['账号已失效', 'permanently_invalid', '账号已失效']
+  ])('发消息验活明确永久失效才删凭据并抛错：%s', async (_name, verdict, error) => {
     const calls: string[] = []
     const fetchImpl: KskAutomationFetch = async (url, init) => {
       calls.push(`${init.method} ${url}`)
@@ -855,11 +869,39 @@ describe('单账号推送到本机 Admin', () => {
     expect(calls).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
   })
 
-  it('Admin 用不了该凭据（余额接口失败）时删凭据并抛错，不再发消息验活', async () => {
+  it('余额接口临时 5xx 但发消息验活成功时仍推送成功并保留凭据', async () => {
+    const probe = vi.fn(async () => ({ verdict: 'alive' }))
+    const { result, calls } = await runPushWithProbe(probe as never, {
+      balanceFailure: {
+        body: {
+          error: {
+            type: 'internal_error',
+            message:
+              '内部错误: error sending request for url (https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST)'
+          }
+        },
+        status: 500
+      }
+    })
+
+    expect(result).toEqual({
+      status: 'created',
+      credentialId: '9',
+      verified: false,
+      authMethod: 'social',
+      probeVerdict: 'alive'
+    })
+    expect(probe).toHaveBeenCalledOnce()
+    expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+  })
+
+  it('余额接口明确拒绝凭据时删凭据并抛错，不再发消息验活', async () => {
     const probe = vi.fn()
-    await expect(runPushWithProbe(probe as never, { balanceFails: true })).rejects.toThrow(
-      /本机 Admin 无法使用该凭据.*已从 Admin 删除该凭据/
-    )
+    await expect(
+      runPushWithProbe(probe as never, {
+        balanceFailure: { body: { error: 'invalid credential' }, status: 400 }
+      })
+    ).rejects.toThrow(/本机 Admin 无法使用该凭据.*已从 Admin 删除该凭据/)
     expect(probe).not.toHaveBeenCalled()
   })
 
@@ -2020,9 +2062,10 @@ describe('KSK 新增邮件收件人', () => {
 
   it('只按收件人列表投递，不再隐式抄送发件邮箱', async () => {
     await sendKskAddedEmail(emailConfig(), credentials)
+    expect(mailer.sendMail).toHaveBeenCalledOnce()
     expect(mailer.sendMail.mock.calls[0][0]).toMatchObject({
       from: 'Proxy RS <bot@example.com>',
-      to: ['owner@example.com']
+      to: 'owner@example.com'
     })
     expect(mailer.sendMail.mock.calls[0][0].cc).toBeUndefined()
   })
@@ -2032,10 +2075,9 @@ describe('KSK 新增邮件收件人', () => {
       emailConfig({ to: 'owner@example.com, Me <bot@example.com>' }),
       credentials
     )
-    expect(mailer.sendMail.mock.calls[0][0].to).toEqual([
-      'owner@example.com',
-      'Me <bot@example.com>'
-    ])
+    expect(mailer.sendMail).toHaveBeenCalledTimes(2)
+    expect(mailer.sendMail.mock.calls[0][0].to).toBe('owner@example.com')
+    expect(mailer.sendMail.mock.calls[1][0].to).toBe('Me <bot@example.com>')
   })
 
   it('同一地址重复填写只投递一次，忽略显示名与大小写', async () => {
@@ -2043,7 +2085,8 @@ describe('KSK 新增邮件收件人', () => {
       emailConfig({ to: 'owner@example.com, Owner <OWNER@example.com>' }),
       credentials
     )
-    expect(mailer.sendMail.mock.calls[0][0].to).toEqual(['owner@example.com'])
+    expect(mailer.sendMail).toHaveBeenCalledOnce()
+    expect(mailer.sendMail.mock.calls[0][0].to).toBe('owner@example.com')
   })
 
   it('收件邮箱只填分隔符时拒绝发送', async () => {

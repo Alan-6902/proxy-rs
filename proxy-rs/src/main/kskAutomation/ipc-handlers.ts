@@ -339,8 +339,8 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
       /*
        * 这条链路必须留日志：失败原因原先只回给渲染进程塞进按钮的 title，
        * 而按钮几秒后就恢复初始态，等于用户根本没有机会读到失败原因。
-       * 两道门禁（Admin 余额 + 发消息验活）任一不过都会回滚删凭据，
-       * 排查时需要知道是哪一步、报了什么。
+       * 余额或发消息若明确证明凭据永久失效会回滚；transient 只记结论并保留，
+       * 排查时仍需要知道是哪一步、报了什么。
        */
       const who = describePushCandidate(candidate)
       logLocalAdminPush(`开始推送账号到本机 Admin：${who}`)
@@ -357,7 +357,7 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
         logLocalAdminPush(
           result.status === 'existing'
             ? `Admin 已有同一凭据，未新建（#${result.credentialId ?? '未知'}）：${who}`
-            : `推送成功并验证可用（#${result.credentialId ?? '未知'}，验活=${result.probeVerdict}）：${who}`
+            : `推送完成并保留凭据（#${result.credentialId ?? '未知'}，验活=${result.probeVerdict}）：${who}`
         )
         return { success: true, data: result }
       } catch (error) {

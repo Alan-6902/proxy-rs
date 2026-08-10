@@ -10,3 +10,6 @@ out
 
 # 编辑器/插件工作区配置
 .cursor/
+
+# mock 上游的自签证书，本机生成、不入库
+kiroapp-mock/.cert/

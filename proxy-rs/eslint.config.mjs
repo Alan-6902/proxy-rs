@@ -29,8 +29,9 @@ export default defineConfig(
     }
   },
   {
-    // 下游参考实现是给用户拿去改的纯 JS 示例，不要求 TS 的显式返回类型标注
-    files: ['downstream-example/**/*.mjs'],
+    // 下游参考实现与 mock 上游都是纯 JS 联调脚本（前者还要给用户拿去改），
+    // 不进安装包也不参与 typecheck，不要求 TS 的显式返回类型标注
+    files: ['downstream-example/**/*.mjs', 'kiroapp-mock/**/*.mjs'],
     rules: {
       '@typescript-eslint/explicit-function-return-type': 'off'
     }

@@ -157,15 +157,15 @@ export interface LocalAdminPushResult {
   /**
    * 新建后余额接口是否调通。existing 时恒为 false。
    *
-   * created 时通常为 true，但有一个例外：上游拒绝该身份查额度（Enterprise 号实测会吃
-   * 403 `User is not authorized to make this call.`）时余额门禁被放过，此时为 false，
-   * 凭据的可用性由发消息验活背书。
+   * created 时通常为 true；上游拒绝该身份查额度或余额请求遇到暂时性故障时为 false，
+   * 此时是否保留由发消息验活的结论决定。
    */
   verified: boolean
   authMethod: LocalAdminAuthMethod
   /**
-   * 发消息验活的结论。created 时为 alive（未注入探针则为 skipped，表示只过了余额门禁），
-   * existing 时为 skipped。验不过的不会返回结果，所以这里永远不会是失败类结论。
+   * 发消息验活的结论。created 时可为 alive、transient（暂时无法确认但不误删）
+   * 或 skipped（未注入探针）；existing 时为 skipped。
+   * permanently_invalid 会回滚并抛错，不会作为成功结果返回。
    */
   probeVerdict: LocalAdminProbeVerdict
 }

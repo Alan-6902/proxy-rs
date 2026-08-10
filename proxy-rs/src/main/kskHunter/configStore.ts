@@ -101,6 +101,9 @@ export interface PersistedKskHunterDelivery {
 export interface PersistedKskHunterSpend {
   id: string
   channel: KskHunterChannel
+  /** 新记录带链接归属；旧记录缺少这些字段仍然合法。 */
+  linkId?: string
+  linkName?: string
   amountUnit: number
   amountCny: number
   at: number
@@ -349,6 +352,8 @@ function normalizeSpend(value: unknown, now: number): PersistedKskHunterSpend | 
   return {
     id,
     channel,
+    linkId: normalizeString(source.linkId) || undefined,
+    linkName: normalizeString(source.linkName) || undefined,
     amountUnit,
     amountCny: roundCny(amountCny),
     at: positiveInt(source.at, now, 0, Number.MAX_SAFE_INTEGER)
@@ -623,6 +628,8 @@ export interface KskHunterLinkRuntime {
   lastInStock: boolean
   lastCheckedAt?: number
   lastError?: string
+  /** 当前链接是否在真实执行查询请求。 */
+  running: boolean
   /**
    * 尚未成交的下单幂等键（仅要求幂等键的渠道有）。
    * 刻意不落盘：见 KskHunterManager.resolveIdempotencyKey 的说明。
@@ -632,7 +639,7 @@ export interface KskHunterLinkRuntime {
 
 export function toKskHunterLinkView(
   link: PersistedKskHunterLink,
-  runtime: KskHunterLinkRuntime = { lastInStock: false }
+  runtime: KskHunterLinkRuntime = { lastInStock: false, running: false }
 ): KskHunterLinkView {
   return {
     id: link.id,
@@ -648,6 +655,7 @@ export function toKskHunterLinkView(
     hasOrderUrl: Boolean(link.secrets.orderUrl),
     orderUrlHint: hunterUrlHint(link.secrets.orderUrl),
     lastInStock: runtime.lastInStock,
+    running: runtime.running,
     lastCheckedAt: runtime.lastCheckedAt,
     lastError: runtime.lastError
   }
@@ -685,6 +693,8 @@ export function toKskHunterDeliveryView(
 export function toKskHunterSpendEntries(store: PersistedKskHunterStore): KskHunterSpendEntry[] {
   return (store.spend ?? []).map((entry) => ({
     channel: entry.channel,
+    linkId: entry.linkId,
+    linkName: entry.linkName,
     amountUnit: entry.amountUnit,
     amountCny: entry.amountCny,
     at: entry.at

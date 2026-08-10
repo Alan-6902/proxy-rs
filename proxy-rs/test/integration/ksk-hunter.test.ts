@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * Runner 会把抢到的号写进加密 store。测试里换成内存实现，
  * 这样既能断言「先落盘再推送」，又不碰 safeStorage。
  */
-const { deliveryStore } = vi.hoisted(() => ({
+const { deliveryStore, loadStore } = vi.hoisted(() => ({
   deliveryStore: {
     records: [] as Record<string, unknown>[],
     /** 记账账本：mock 掉落盘，但保留内容以便断言花费确实记上了。 */
@@ -13,13 +13,15 @@ const { deliveryStore } = vi.hoisted(() => ({
       this.records = []
       this.spend = []
     }
-  }
+  },
+  loadStore: vi.fn()
 }))
 
 vi.mock('../../src/main/kskHunter/configStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/main/kskHunter/configStore')>()
   return {
     ...actual,
+    loadKskHunterStore: loadStore,
     appendKskHunterDelivery: vi.fn(async (delivery: Record<string, unknown>) => {
       deliveryStore.records.push({ ...delivery })
     }),
@@ -53,7 +55,9 @@ import {
   matchesHunterRegions,
   parseHunterBalance,
   roundCny,
-  summarizeHunterSpend
+  summarizeHunterSpend,
+  type KskHunterRuntimeNotification,
+  type KskHunterStatusEvent
 } from '../../src/shared/kskHunter'
 import {
   buildOrderRequestBody,
@@ -69,10 +73,12 @@ import {
 } from '../../src/main/kskHunter/downstreamClient'
 import {
   normalizeKskHunterStorePayload,
+  toKskHunterSpendEntries,
   type PersistedKskHunterLink,
   type PersistedKskHunterStore
 } from '../../src/main/kskHunter/configStore'
 import { KskHunterManager } from '../../src/main/kskHunter/hunterRunner'
+import { sendKskHunterStatus } from '../../src/main/kskHunter/ipc-handlers'
 import {
   HunterBalanceCache,
   KSK_HUNTER_BALANCE_TTL_MS,
@@ -89,6 +95,17 @@ function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { 'content-type': 'application/json' }
   })
+}
+
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
 }
 
 function hunterLink(overrides: Partial<PersistedKskHunterLink> = {}): PersistedKskHunterLink {
@@ -141,6 +158,7 @@ function hunterStore(
 
 beforeEach(() => {
   deliveryStore.reset()
+  loadStore.mockReset()
 })
 
 describe('站点响应解析', () => {
@@ -619,8 +637,19 @@ describe('汇率换算与日切', () => {
         {
           id: 's1',
           channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
+          linkId: 'link-ceo',
+          linkName: 'CEO · 欧洲',
           amountUnit: 35,
           amountCny: 17.5,
+          at: now
+        },
+        {
+          id: 'invalid-link-fields',
+          channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
+          linkId: 42,
+          linkName: { bad: true },
+          amountUnit: 1,
+          amountCny: 1,
           at: now
         },
         { id: 's2', channel: 'unknown_site', amountUnit: 1, amountCny: 1, at: now },
@@ -636,7 +665,27 @@ describe('汇率换算与日切', () => {
         }
       ]
     })
-    expect(store.spend.map((entry) => entry.id)).toEqual(['s1'])
+    expect(store.spend.map((entry) => entry.id)).toEqual(['s1', 'invalid-link-fields'])
+    expect(store.spend[0]).toMatchObject({ linkId: 'link-ceo', linkName: 'CEO · 欧洲' })
+    expect(store.spend[1].linkId).toBeUndefined()
+    expect(toKskHunterSpendEntries(store)[0]).toMatchObject({
+      linkId: 'link-ceo',
+      linkName: 'CEO · 欧洲'
+    })
+
+    const legacy = normalizeKskHunterStorePayload({
+      version: KSK_HUNTER_STORE_VERSION,
+      spend: [
+        {
+          id: 'legacy',
+          channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+          amountUnit: 1,
+          amountCny: 1,
+          at: now
+        }
+      ]
+    })
+    expect(legacy.spend[0].linkId).toBeUndefined()
   })
 })
 
@@ -668,6 +717,76 @@ describe('花费统计', () => {
     expect(summary.orderCount).toBe(3)
     const ceo = summary.byChannel.find((item) => item.channel === KSK_HUNTER_CHANNEL.KIRO_CEO)
     expect(ceo).toMatchObject({ amountUnit: 85, amountCny: 42.5, orderCount: 2, unitLabel: 'CRD' })
+  })
+
+  it('按链接聚合多笔订单，多链接独立统计，旧记录只进入总计', () => {
+    const now = Date.now()
+    const summary = summarizeHunterSpend(
+      [
+        {
+          channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+          linkId: 'a',
+          linkName: 'Job A',
+          amountUnit: 10,
+          amountCny: 10,
+          at: now
+        },
+        {
+          channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+          linkId: 'a',
+          linkName: 'Job A',
+          amountUnit: 12,
+          amountCny: 12,
+          at: now
+        },
+        {
+          channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+          linkId: 'b',
+          linkName: 'Job B',
+          amountUnit: 5,
+          amountCny: 5,
+          at: now
+        },
+        { channel: KSK_HUNTER_CHANNEL.KIRO_DROP, amountUnit: 99, amountCny: 99, at: now }
+      ],
+      billingConfig
+    )
+    expect(summary.totalCny).toBe(126)
+    expect(summary.orderCount).toBe(4)
+    expect(summary.byLink).toEqual([
+      {
+        linkId: 'a',
+        linkName: 'Job A',
+        channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+        amountUnit: 22,
+        unitLabel: 'CNY',
+        amountCny: 22,
+        orderCount: 2
+      },
+      {
+        linkId: 'b',
+        linkName: 'Job B',
+        channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+        amountUnit: 5,
+        unitLabel: 'CNY',
+        amountCny: 5,
+        orderCount: 1
+      }
+    ])
+    const yesterday = summarizeHunterSpend(
+      [
+        {
+          channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+          linkId: 'a',
+          linkName: 'Job A',
+          amountUnit: 77,
+          amountCny: 77,
+          at: now - 24 * 60 * 60_000
+        }
+      ],
+      billingConfig
+    )
+    expect(yesterday.byLink).toEqual([])
   })
 
   it('只统计当天，昨天的花费不计入', () => {
@@ -1077,6 +1196,152 @@ describe('抢号调度', () => {
     expect(manager.linkRuntimeOf('link-1').lastInStock).toBe(false)
   })
 
+  it('一轮多链接只发起 start/final 两次快照通知', async () => {
+    const linkIds = ['link-1', 'link-2']
+    const runningStates: boolean[][] = []
+    const store = hunterStore([
+      hunterLink({ mode: KSK_HUNTER_MODE.NOTIFY }),
+      hunterLink({ id: 'link-2', name: 'Kiro Market · us', mode: KSK_HUNTER_MODE.NOTIFY })
+    ])
+    let manager!: KskHunterManager
+    manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async () => jsonResponse({ code: 0, data: [] }),
+        notifySnapshot: () => {
+          runningStates.push(linkIds.map((linkId) => manager.linkRuntimeOf(linkId).running))
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(runningStates).toEqual([
+      [true, true],
+      [false, false]
+    ])
+    expect(manager.linkRuntimeOf('link-1').running).toBe(false)
+    expect(manager.linkRuntimeOf('link-2').running).toBe(false)
+  })
+
+  it('异步 IPC 补齐期间仍按入队运行态保持 start/final 顺序', async () => {
+    const store = hunterStore([
+      hunterLink({ mode: KSK_HUNTER_MODE.NOTIFY }),
+      hunterLink({ id: 'link-2', name: 'Kiro Market · us', mode: KSK_HUNTER_MODE.NOTIFY })
+    ])
+    const firstLoadStarted = deferred<void>()
+    const releaseFirstLoad = deferred<void>()
+    let loadCount = 0
+    loadStore.mockImplementation(async () => {
+      loadCount += 1
+      if (loadCount === 1) {
+        firstLoadStarted.resolve()
+        await releaseFirstLoad.promise
+      }
+      return store
+    })
+
+    const events: KskHunterStatusEvent[] = []
+    const mainWindow = {
+      isDestroyed: () => false,
+      webContents: {
+        send: (_channel: string, event: KskHunterStatusEvent) => {
+          events.push(event)
+        }
+      }
+    } as unknown as import('electron').BrowserWindow
+
+    let manager!: KskHunterManager
+    let sendQueue = Promise.resolve()
+    const notifications: KskHunterRuntimeNotification[] = []
+    manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async () => jsonResponse({ code: 0, data: [] }),
+        notifySnapshot: (runtime) => {
+          notifications.push(runtime)
+          sendQueue = sendQueue.then(() => sendKskHunterStatus(() => mainWindow, manager, runtime))
+        }
+      })
+    )
+
+    const round = manager.runNow()
+    await firstLoadStarted.promise
+    await round
+    manager.stop()
+
+    expect(notifications).toHaveLength(2)
+    expect(Object.isFrozen(notifications[0])).toBe(true)
+    expect(Object.isFrozen(notifications[0].status)).toBe(true)
+    expect(Object.isFrozen(notifications[0].runningLinkIds)).toBe(true)
+    expect(notifications[0].status.running).toBe(true)
+    expect(notifications[0].runningLinkIds).toEqual(['link-1', 'link-2'])
+    expect(notifications[1].status.running).toBe(false)
+    expect(notifications[1].runningLinkIds).toEqual([])
+
+    // start 的 load 仍被卡住时，manager 已经完成 final；释放后 IPC 仍按入队顺序发送。
+    releaseFirstLoad.resolve(undefined)
+    await sendQueue
+
+    expect(events).toHaveLength(2)
+    expect(events.map((event) => event.status.running)).toEqual([true, false])
+    expect(events[0].links.map((link) => link.running)).toEqual([true, true])
+    expect(events[1].links.map((link) => link.running)).toEqual([false, false])
+  })
+
+  it('通知同步抛错不影响查询并允许下一轮执行', async () => {
+    let throwNotificationError = true
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ code: 0, data: [{ id: 'g1', tag: '#key-eu', stock: 0 }] })
+    )
+    const log = vi.fn()
+    const store = hunterStore([hunterLink({ mode: KSK_HUNTER_MODE.NOTIFY })])
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl,
+        notifySnapshot: () => {
+          if (throwNotificationError) throw new Error('snapshot boom')
+        },
+        log
+      })
+    )
+
+    const firstStatus = await manager.runNow()
+    manager.stop()
+    expect(firstStatus.state).toBe(KSK_HUNTER_STATE.HEALTHY)
+    expect(manager.linkRuntimeOf('link-1').running).toBe(false)
+
+    throwNotificationError = false
+    const secondStatus = await manager.runNow()
+    manager.stop()
+
+    expect(secondStatus.state).toBe(KSK_HUNTER_STATE.HEALTHY)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(manager.linkRuntimeOf('link-1').running).toBe(false)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('快照通知失败'))
+  })
+
+  it('异常查询的整轮通知也在结束后清理链接运行中状态', async () => {
+    const runningStates: boolean[][] = []
+    const store = hunterStore([hunterLink({ mode: KSK_HUNTER_MODE.NOTIFY })])
+    let manager!: KskHunterManager
+    manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async () => new Response('boom', { status: 503 }),
+        notifySnapshot: () => {
+          runningStates.push([manager.linkRuntimeOf('link-1').running])
+        }
+      })
+    )
+
+    const status = await manager.runNow()
+    manager.stop()
+
+    expect(runningStates).toEqual([[true], [false]])
+    expect(status.state).toBe(KSK_HUNTER_STATE.DEGRADED)
+    expect(manager.linkRuntimeOf('link-1').running).toBe(false)
+    expect(manager.linkRuntimeOf('link-1').lastError).toContain('503')
+  })
+
   it('区域不在白名单内的有货商品被忽略', async () => {
     const notifyInStock = vi.fn()
     const store = hunterStore([hunterLink({ regions: ['eu-central-1'] })])
@@ -1283,6 +1548,7 @@ describe('抢号调度', () => {
     expect(status.state).toBe(KSK_HUNTER_STATE.DEGRADED)
     expect(manager.linkRuntimeOf('bad').lastError).toContain('500')
     expect(manager.linkRuntimeOf('ok').lastInStock).toBe(true)
+    expect(manager.linkRuntimeOf('ok').running).toBe(false)
   })
 
   it('拒绝非 HTTPS 的商品站点地址', async () => {
@@ -1337,6 +1603,8 @@ describe('抢号调度', () => {
     expect(deliveryStore.spend).toHaveLength(1)
     expect(deliveryStore.spend[0]).toMatchObject({
       channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
+      linkId: 'link-1',
+      linkName: 'Kiro Market · eu',
       amountUnit: 35,
       amountCny: 17.5
     })

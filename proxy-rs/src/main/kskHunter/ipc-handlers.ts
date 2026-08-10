@@ -5,6 +5,7 @@ import {
   KSK_HUNTER_MODE,
   type KskHunterConfig,
   type KskHunterLinkInput,
+  type KskHunterRuntimeNotification,
   type KskHunterSecretInput,
   type KskHunterSnapshot,
   type KskHunterStatusEvent
@@ -76,14 +77,20 @@ async function buildSnapshot(manager: KskHunterManager): Promise<KskHunterSnapsh
 /** 推送轻量事件（不含 config）给渲染进程。 */
 export async function sendKskHunterStatus(
   getMainWindow: () => BrowserWindow | null,
-  manager: KskHunterManager
+  manager: KskHunterManager,
+  runtime?: KskHunterRuntimeNotification
 ): Promise<void> {
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return
   const store = await loadKskHunterStore()
-  const { links, deliveries } = buildKskHunterSnapshotParts(store, manager)
+  const { links, deliveries } = buildKskHunterSnapshotParts(store, manager, runtime)
   const event: KskHunterStatusEvent = {
-    status: manager.snapshotStatus(),
+    status: runtime
+      ? {
+          ...runtime.status,
+          budgetBlockedChannels: [...runtime.status.budgetBlockedChannels]
+        }
+      : manager.snapshotStatus(),
     links,
     deliveries,
     spend: await manager.spendSummary(store),

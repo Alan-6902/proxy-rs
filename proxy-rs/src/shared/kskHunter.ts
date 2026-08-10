@@ -225,6 +225,8 @@ export interface KskHunterLinkView extends KskHunterLink {
   orderUrlHint?: string
   /** 上轮该链接是否发现有货。 */
   lastInStock: boolean
+  /** 当前是否正在查询该链接；由 runner 的真实 in-flight 集合派生。 */
+  running: boolean
   lastCheckedAt?: number
   lastError?: string
 }
@@ -327,6 +329,17 @@ export interface KskHunterChannelSpend {
   remainingUnit?: number
 }
 
+/** 按链接聚合的当日花费。无 linkId 的旧记录不会出现在这里。 */
+export interface KskHunterLinkSpend {
+  linkId: string
+  linkName: string
+  channel: KskHunterChannel
+  amountUnit: number
+  unitLabel: string
+  amountCny: number
+  orderCount: number
+}
+
 /** 当日花费统计。日切以本地自然日 00:00 为界。 */
 export interface KskHunterSpendSummary {
   /** 统计所属的本地日期，格式 YYYY-MM-DD。 */
@@ -338,6 +351,8 @@ export interface KskHunterSpendSummary {
   /** 全局上限的剩余额度；不限时为 undefined。 */
   remainingCny?: number
   byChannel: KskHunterChannelSpend[]
+  /** 同一链接的多笔订单已聚合；旧记录缺 linkId 时不归属任何链接。 */
+  byLink: KskHunterLinkSpend[]
 }
 
 export interface KskHunterStatus {
@@ -361,6 +376,16 @@ export interface KskHunterStatus {
   budgetBlock: KskHunterBudgetBlock
   /** 被熔断的渠道；budgetBlock 为 channel 时有值。 */
   budgetBlockedChannels: KskHunterChannel[]
+}
+
+export type KskHunterRuntimeStatus = Omit<Readonly<KskHunterStatus>, 'budgetBlockedChannels'> & {
+  readonly budgetBlockedChannels: readonly KskHunterChannel[]
+}
+
+/** 主进程状态通知入队时冻结的运行态；异步补齐持久化快照时不得回读 manager。 */
+export interface KskHunterRuntimeNotification {
+  readonly status: KskHunterRuntimeStatus
+  readonly runningLinkIds: readonly string[]
 }
 
 /** 一次抢号结果的落库记录；key 只以脱敏形式暴露给渲染进程。 */
@@ -502,6 +527,9 @@ export function hunterUnitToCny(amountUnit: number, cnyPerUnit: number): number 
 /** 单条花费记录：主进程账本与统计汇总共用的最小形状。 */
 export interface KskHunterSpendEntry {
   channel: KskHunterChannel
+  /** 可选：旧账本记录缺少链接归属时仍参与总计与渠道统计。 */
+  linkId?: string
+  linkName?: string
   amountUnit: number
   amountCny: number
   at: number
@@ -535,6 +563,27 @@ export function summarizeHunterSpend(
           : undefined
     }
   })
+  const byLink = new Map<string, KskHunterLinkSpend>()
+  for (const entry of today) {
+    if (!entry.linkId) continue
+    const billing = config.billing[entry.channel] ?? DEFAULT_KSK_HUNTER_CHANNEL_BILLING
+    const existing = byLink.get(entry.linkId)
+    if (existing) {
+      existing.amountUnit = roundCny(existing.amountUnit + entry.amountUnit)
+      existing.amountCny = roundCny(existing.amountCny + entry.amountCny)
+      existing.orderCount += 1
+      continue
+    }
+    byLink.set(entry.linkId, {
+      linkId: entry.linkId,
+      linkName: entry.linkName?.trim() || '未命名链接',
+      channel: entry.channel,
+      amountUnit: roundCny(entry.amountUnit),
+      unitLabel: billing.unitLabel,
+      amountCny: roundCny(entry.amountCny),
+      orderCount: 1
+    })
+  }
   const totalCny = roundCny(today.reduce((sum, entry) => sum + entry.amountCny, 0))
   return {
     date,
@@ -543,7 +592,8 @@ export function summarizeHunterSpend(
     dailyLimitCny: config.dailyLimitCny,
     remainingCny:
       config.dailyLimitCny > 0 ? roundCny(Math.max(0, config.dailyLimitCny - totalCny)) : undefined,
-    byChannel
+    byChannel,
+    byLink: Array.from(byLink.values()).sort((a, b) => a.linkName.localeCompare(b.linkName))
   }
 }
 

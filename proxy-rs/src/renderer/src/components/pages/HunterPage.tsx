@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   CirclePause,
   CirclePlay,
@@ -12,63 +12,31 @@ import {
   RefreshCw,
   RotateCcw,
   Send,
-  ServerCog,
+  Settings2,
   Trash2,
   TriangleAlert,
   Wallet
 } from 'lucide-react'
 import {
-  DEFAULT_KSK_HUNTER_CONFIG,
   KSK_HUNTER_BUDGET_BLOCK,
-  KSK_HUNTER_CHANNEL,
   KSK_HUNTER_CHANNEL_LABEL,
-  KSK_HUNTER_CHANNEL_REQUIRES_API_KEY,
   KSK_HUNTER_DELIVERY_STATE,
   KSK_HUNTER_MODE,
   KSK_HUNTER_POLL_INTERVAL_SECONDS,
   KSK_HUNTER_STATE,
-  type KskHunterChannel,
   type KskHunterConfig,
+  type KskHunterDeliveryState,
   type KskHunterDeliveryView,
   type KskHunterLinkInput,
   type KskHunterLinkView,
+  type KskHunterSecretInput,
   type KskHunterSnapshot
 } from '../../../../shared/kskHunter'
 import type { IdcIpcResult } from '../../../../shared/idcSeats'
-import { useAccountsStore } from '../../store/accounts'
+import { HunterConfigDialog } from '../automation/HunterConfigDialog'
 import { HunterLinkEditorDialog } from '../automation/HunterLinkEditorDialog'
 import { HunterReportCard } from '../automation/HunterReportCard'
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  Input,
-  Label,
-  PageHeader,
-  Select,
-  Switch,
-  askConfirm
-} from '../ui'
-
-const UNGROUPED_OPTION = '__ungrouped__'
-
-/** 通用余额地址占位符：站点契约未知的渠道用它。 */
-const GENERIC_BALANCE_URL_PLACEHOLDER = 'https://.../api/balance?token=...'
-
-/**
- * 各渠道余额查询地址的占位提示。
- *
- * Kiro CEO 必须填 /api/my/profile（余额在 remaining 字段）。**不能填 /api/my/stock**：
- * 那个响应里 parseHunterBalance 会递归到 zones[0].available，把「可购数量」当成余额，
- * 于是余额判断彻底跑偏（有 5 个可买就以为有 5 积分）。
- */
-const BALANCE_URL_PLACEHOLDER: Record<KskHunterChannel, string> = {
-  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: GENERIC_BALANCE_URL_PLACEHOLDER,
-  [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'https://kiro.ceo/api/my/profile',
-  [KSK_HUNTER_CHANNEL.KIRO_DROP]: GENERIC_BALANCE_URL_PLACEHOLDER,
-  [KSK_HUNTER_CHANNEL.KIRO_APP]: GENERIC_BALANCE_URL_PLACEHOLDER
-}
+import { Badge, Button, Card, CardContent, PageHeader, askConfirm } from '../ui'
 
 type LinkAction = 'toggle' | 'delete'
 type BusyKey = { id: string; action: LinkAction | 'delivery' } | null
@@ -104,7 +72,7 @@ function stateTone(snapshot: KskHunterSnapshot | null): string {
   return 'border-border bg-muted/40 text-muted-foreground'
 }
 
-const DELIVERY_LABEL: Record<string, { text: string; tone: string }> = {
+const DELIVERY_LABEL: Record<KskHunterDeliveryState, { text: string; tone: string }> = {
   [KSK_HUNTER_DELIVERY_STATE.PENDING]: {
     text: '待推送',
     tone: 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-300'
@@ -124,39 +92,17 @@ const DELIVERY_LABEL: Record<string, { text: string; tone: string }> = {
 }
 
 export function HunterPage(): React.ReactNode {
-  const groups = useAccountsStore((state) => state.groups)
   const [snapshot, setSnapshot] = useState<KskHunterSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<BusyKey>(null)
-  const [savingConfig, setSavingConfig] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [configOpen, setConfigOpen] = useState(false)
   const [editingLink, setEditingLink] = useState<KskHunterLinkView | undefined>()
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  // 配置表单本地态：避免每次输入都打一次 IPC
-  const [configDraft, setConfigDraft] = useState<KskHunterConfig>(DEFAULT_KSK_HUNTER_CONFIG)
-  const [downstreamApiKey, setDownstreamApiKey] = useState('')
-  /** 余额地址是密钥类字段：不回填明文，留空表示保持原值。 */
-  const [balanceUrlDrafts, setBalanceUrlDrafts] = useState<Partial<Record<string, string>>>({})
-  /** 渠道 API Key 同样是密钥类字段：不回填明文，留空表示保持原值。 */
-  const [apiKeyDrafts, setApiKeyDrafts] = useState<Partial<Record<string, string>>>({})
-
   const applySnapshot = useCallback((next: KskHunterSnapshot): void => {
     setSnapshot(next)
-    setConfigDraft({
-      targetGroupId: next.config.targetGroupId,
-      requestTimeoutSeconds: next.config.requestTimeoutSeconds,
-      notifyOnAutoOrder: next.config.notifyOnAutoOrder,
-      downstreamEnabled: next.config.downstreamEnabled,
-      downstreamBaseUrl: next.config.downstreamBaseUrl,
-      dailyLimitCny: next.config.dailyLimitCny,
-      billing: next.config.billing,
-      allowUnknownPriceOrder: next.config.allowUnknownPriceOrder,
-      balanceCheckEnabled: next.config.balanceCheckEnabled
-    })
-    setBalanceUrlDrafts({})
-    setApiKeyDrafts({})
   }, [])
 
   const load = useCallback(async (): Promise<void> => {
@@ -184,28 +130,26 @@ export function HunterPage(): React.ReactNode {
               status: event.status,
               links: event.links,
               deliveries: event.deliveries,
-              spend: event.spend
+              spend: event.spend,
+              balances: event.balances
             }
           : current
       )
     })
   }, [load])
 
-  const groupOptions = useMemo(
-    () => [
-      { value: UNGROUPED_OPTION, label: '默认（未分组）' },
-      ...Array.from(groups.values())
-        .slice()
-        .sort((a, b) => a.order - b.order)
-        .map((group) => ({ value: group.id, label: group.name }))
-    ],
-    [groups]
-  )
-
   const links = snapshot?.links ?? []
   const deliveries = snapshot?.deliveries ?? []
   const enabledCount = links.filter((link) => link.enabled).length
   const inStockCount = links.filter((link) => link.enabled && link.lastInStock).length
+  const pendingCount = deliveries.filter(
+    (delivery) => delivery.state === KSK_HUNTER_DELIVERY_STATE.PENDING
+  ).length
+  const failedCount = deliveries.filter(
+    (delivery) =>
+      delivery.state === KSK_HUNTER_DELIVERY_STATE.FAILED ||
+      delivery.state === KSK_HUNTER_DELIVERY_STATE.DEAD_KEY
+  ).length
   const budgetBlocked =
     snapshot !== null &&
     (snapshot.status.budgetBlock === KSK_HUNTER_BUDGET_BLOCK.GLOBAL ||
@@ -215,6 +159,13 @@ export function HunterPage(): React.ReactNode {
   const blockedChannelNames = (snapshot?.status.budgetBlockedChannels ?? [])
     .map((channel) => KSK_HUNTER_CHANNEL_LABEL[channel])
     .join('、')
+  const spendHint = snapshot
+    ? `${snapshot.spend.orderCount} 单 · ${
+        snapshot.spend.dailyLimitCny > 0
+          ? `上限 ¥${snapshot.spend.dailyLimitCny} · 剩余 ¥${snapshot.spend.remainingCny ?? 0}`
+          : '不限额'
+      }`
+    : '0 单 · 等待快照'
 
   const runAction = async (
     key: BusyKey,
@@ -247,6 +198,18 @@ export function HunterPage(): React.ReactNode {
     setNotice(editingLink ? '链接已更新。' : '链接已加入监控。')
   }
 
+  const handleSaveConfig = async (
+    config: Partial<KskHunterConfig>,
+    secrets?: KskHunterSecretInput
+  ): Promise<void> => {
+    setError('')
+    setNotice('')
+    const result = await window.api.kskHunterUpdateConfig(config, secrets)
+    if (!result.success) throw new Error(result.error || '保存配置失败')
+    applySnapshot(result.data)
+    setNotice('全局配置已保存。')
+  }
+
   const handleDeleteLink = async (link: KskHunterLinkView): Promise<void> => {
     const confirmed = await askConfirm({
       title: `删除链接“${link.name}”？`,
@@ -262,43 +225,6 @@ export function HunterPage(): React.ReactNode {
       () => window.api.kskHunterDeleteLink(link.id),
       `已删除“${link.name}”。`
     )
-  }
-
-  const handleSaveConfig = async (): Promise<void> => {
-    setSavingConfig(true)
-    setError('')
-    setNotice('')
-    try {
-      // 只提交用户实际填过的密钥类字段；留空的键省略，主进程会保留原值
-      const balanceUrls = Object.fromEntries(
-        Object.entries(balanceUrlDrafts).filter(([, url]) => url !== undefined && url !== '')
-      )
-      const apiKeys = Object.fromEntries(
-        Object.entries(apiKeyDrafts).filter(([, key]) => key !== undefined && key !== '')
-      )
-      const hasSecretEdits =
-        Boolean(downstreamApiKey.trim()) ||
-        Object.keys(balanceUrls).length > 0 ||
-        Object.keys(apiKeys).length > 0
-      const result = await window.api.kskHunterUpdateConfig(
-        configDraft,
-        hasSecretEdits
-          ? {
-              ...(downstreamApiKey.trim() ? { downstreamApiKey: downstreamApiKey.trim() } : {}),
-              ...(Object.keys(balanceUrls).length > 0 ? { balanceUrls } : {}),
-              ...(Object.keys(apiKeys).length > 0 ? { apiKeys } : {})
-            }
-          : undefined
-      )
-      if (!result.success) throw new Error(result.error || '保存配置失败')
-      applySnapshot(result.data)
-      setDownstreamApiKey('')
-      setNotice('抢号配置已保存。')
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : String(saveError))
-    } finally {
-      setSavingConfig(false)
-    }
   }
 
   const handleDeleteDelivery = async (delivery: KskHunterDeliveryView): Promise<void> => {
@@ -341,7 +267,7 @@ export function HunterPage(): React.ReactNode {
           </>
         }
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <Button variant="outline" onClick={load} disabled={loading}>
               <RefreshCw className={`mr-1.5 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               刷新
@@ -355,6 +281,10 @@ export function HunterPage(): React.ReactNode {
             >
               <Play className="mr-1.5 h-4 w-4" />
               立即查一轮
+            </Button>
+            <Button variant="outline" onClick={() => setConfigOpen(true)} disabled={!snapshot}>
+              <Settings2 className="mr-1.5 h-4 w-4" />
+              全局配置
             </Button>
             <Button
               onClick={() => {
@@ -370,26 +300,39 @@ export function HunterPage(): React.ReactNode {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <h2 className="text-sm font-semibold tracking-wide">全部 Job</h2>
+          <span className="text-xs text-muted-foreground">汇总当前所有配置链接</span>
+        </div>
         <div className="mb-5 grid gap-3 sm:grid-cols-4">
           {[
-            { label: '监控中', value: enabledCount, icon: Link2, tone: 'text-violet-500' },
+            {
+              label: '全部 Job · 启用 / 总数',
+              value: `${enabledCount} / ${links.length}`,
+              icon: Link2,
+              tone: 'text-violet-500',
+              hint: undefined
+            },
             {
               label: '当前有货',
               value: inStockCount,
               icon: PackageCheck,
-              tone: 'text-emerald-500'
+              tone: 'text-emerald-500',
+              hint: undefined
             },
             {
               label: '今日花费',
               value: `¥${snapshot?.spend.totalCny ?? 0}`,
               icon: Wallet,
-              tone: budgetBlocked ? 'text-red-500' : 'text-sky-500'
+              tone: budgetBlocked ? 'text-red-500' : 'text-sky-500',
+              hint: spendHint
             },
             {
               label: '待推送 / 待处理',
-              value: `${snapshot?.status.pendingDeliveries ?? 0} / ${snapshot?.status.failedDeliveries ?? 0}`,
+              value: `${pendingCount} / ${failedCount}`,
               icon: TriangleAlert,
-              tone: 'text-amber-500'
+              tone: 'text-amber-500',
+              hint: undefined
             }
           ].map((metric) => (
             <Card key={metric.label} className="border-border/70 bg-card/70">
@@ -399,6 +342,11 @@ export function HunterPage(): React.ReactNode {
                     {metric.label}
                   </p>
                   <p className="mt-1 text-2xl font-semibold tabular-nums">{metric.value}</p>
+                  {metric.hint && (
+                    <p className="mt-0.5 text-2xs tabular-nums text-muted-foreground">
+                      {metric.hint}
+                    </p>
+                  )}
                 </div>
                 <metric.icon className={`h-5 w-5 ${metric.tone}`} />
               </CardContent>
@@ -451,403 +399,8 @@ export function HunterPage(): React.ReactNode {
           </div>
         )}
 
-        {/* 今日花费分渠道明细 */}
-        {snapshot && (
-          <Card className="mb-5 border-border/70 bg-card/70">
-            <CardContent className="p-5">
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <Wallet className="h-4 w-4 text-sky-500" />
-                <h3 className="text-sm font-semibold">今日花费</h3>
-                <span className="text-xs text-muted-foreground">{snapshot.spend.date}</span>
-                <div className="ml-auto flex items-baseline gap-1.5">
-                  <span className="text-lg font-semibold tabular-nums">
-                    ¥{snapshot.spend.totalCny}
-                  </span>
-                  {snapshot.spend.dailyLimitCny > 0 && (
-                    <span className="text-xs text-muted-foreground">
-                      / ¥{snapshot.spend.dailyLimitCny} · 剩 ¥{snapshot.spend.remainingCny ?? 0}
-                    </span>
-                  )}
-                  <span className="ml-1.5 text-xs text-muted-foreground">
-                    共 {snapshot.spend.orderCount} 单
-                  </span>
-                </div>
-              </div>
-
-              {snapshot.spend.dailyLimitCny > 0 && (
-                <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      budgetBlocked ? 'bg-red-500' : 'bg-sky-500'
-                    }`}
-                    style={{
-                      width: `${Math.min(100, (snapshot.spend.totalCny / snapshot.spend.dailyLimitCny) * 100)}%`
-                    }}
-                  />
-                </div>
-              )}
-
-              <div className="grid gap-2 sm:grid-cols-3">
-                {snapshot.spend.byChannel.map((item) => {
-                  const exhausted =
-                    item.dailyLimitUnit > 0 && item.amountUnit >= item.dailyLimitUnit
-                  const balance = snapshot.balances.find((entry) => entry.channel === item.channel)
-                  return (
-                    <div
-                      key={item.channel}
-                      className={`rounded-xl border p-3 ${
-                        exhausted
-                          ? 'border-red-500/30 bg-red-500/[0.06]'
-                          : 'border-border/60 bg-muted/15'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="truncate text-xs font-medium">
-                          {KSK_HUNTER_CHANNEL_LABEL[item.channel]}
-                        </p>
-                        {exhausted && (
-                          <Badge
-                            variant="outline"
-                            className="border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
-                          >
-                            已用尽
-                          </Badge>
-                        )}
-                      </div>
-                      {/* 原币是记账口径，人民币只用于跨渠道对比，所以原币放大字 */}
-                      <p className="mt-1 text-lg font-semibold tabular-nums">
-                        {item.amountUnit}
-                        <span className="ml-1 text-xs font-normal text-muted-foreground">
-                          {item.unitLabel}
-                        </span>
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {item.unitLabel !== 'CNY' && <>≈ ¥{item.amountCny} · </>}
-                        {item.orderCount} 单
-                        {item.dailyLimitUnit > 0
-                          ? ` · 上限 ${item.dailyLimitUnit}（剩 ${item.remainingUnit ?? 0}）`
-                          : ''}
-                      </p>
-                      {balance?.amountUnit !== undefined && (
-                        <p
-                          className={`mt-1 border-t border-border/40 pt-1 text-xs ${
-                            balance.isLow
-                              ? 'text-red-600 dark:text-red-300'
-                              : 'text-muted-foreground'
-                          }`}
-                        >
-                          余额 {balance.amountUnit} {balance.unitLabel}
-                          {balance.isLow ? ' · 偏低，请充值' : ''}
-                        </p>
-                      )}
-                      {balance?.error && (
-                        <p className="mt-1 border-t border-border/40 pt-1 text-xs text-amber-700 dark:text-amber-300">
-                          余额查询失败
-                        </p>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
         {/* 历史报表：数据来自独立的事件流文件，按需拉取而非跟着状态事件刷 */}
         <HunterReportCard />
-
-        {/* 全局配置 */}
-        <Card className="mb-5 border-border/70 bg-card/70">
-          <CardContent className="space-y-4 p-5">
-            <div className="flex items-center gap-2">
-              <ServerCog className="h-4 w-4 text-emerald-500" />
-              <h3 className="text-sm font-semibold">抢到号之后</h3>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div>
-                <Label>写入账号分组</Label>
-                <Select
-                  value={configDraft.targetGroupId ?? UNGROUPED_OPTION}
-                  options={groupOptions}
-                  onChange={(value) =>
-                    setConfigDraft({
-                      ...configDraft,
-                      targetGroupId: value === UNGROUPED_OPTION ? undefined : value
-                    })
-                  }
-                />
-              </div>
-              <div>
-                <Label>请求超时（秒）</Label>
-                <Input
-                  type="number"
-                  min={3}
-                  max={120}
-                  value={configDraft.requestTimeoutSeconds}
-                  onChange={(event) =>
-                    setConfigDraft({
-                      ...configDraft,
-                      requestTimeoutSeconds: Number(event.target.value)
-                    })
-                  }
-                />
-              </div>
-              <div className="flex items-end pb-2">
-                <Switch
-                  checked={configDraft.notifyOnAutoOrder}
-                  onCheckedChange={(notifyOnAutoOrder) =>
-                    setConfigDraft({ ...configDraft, notifyOnAutoOrder })
-                  }
-                />
-                <span className="ml-2 text-xs">自动下单也弹通知</span>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/20 px-3 py-2.5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium">推送给下游</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    下单前先 GET /need-account 问下游要不要号；验活通过后 POST /ksk
-                    推送。推送失败会自动重试。
-                  </p>
-                </div>
-                <Switch
-                  checked={configDraft.downstreamEnabled}
-                  onCheckedChange={(downstreamEnabled) =>
-                    setConfigDraft({ ...configDraft, downstreamEnabled })
-                  }
-                  className="mt-0.5"
-                />
-              </div>
-            </div>
-
-            {configDraft.downstreamEnabled && (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <Label>下游地址</Label>
-                  <Input
-                    value={configDraft.downstreamBaseUrl}
-                    onChange={(event) =>
-                      setConfigDraft({ ...configDraft, downstreamBaseUrl: event.target.value })
-                    }
-                    className="font-mono text-xs"
-                    placeholder="http://127.0.0.1:12889"
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    明文 HTTP 只允许 loopback；远程地址必须用 HTTPS。
-                  </p>
-                </div>
-                <div>
-                  <Label>下游 API Key</Label>
-                  <Input
-                    type="password"
-                    value={downstreamApiKey}
-                    onChange={(event) => setDownstreamApiKey(event.target.value)}
-                    placeholder={
-                      snapshot?.config.hasDownstreamApiKey
-                        ? `${snapshot.config.downstreamApiKeyTail} · 留空保持`
-                        : '作为 x-api-key 头发送'
-                    }
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-3 rounded-xl border border-border/60 bg-muted/10 p-3">
-              <div className="flex items-center gap-2">
-                <Wallet className="h-4 w-4 text-sky-500" />
-                <h4 className="text-sm font-medium">每日花费上限与汇率</h4>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <Label>全局每日上限（元）</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={configDraft.dailyLimitCny}
-                    onChange={(event) =>
-                      setConfigDraft({ ...configDraft, dailyLimitCny: Number(event.target.value) })
-                    }
-                    placeholder="0 = 不限"
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    跨渠道汇总只能用统一货币，所以这一层是人民币；单渠道上限按各自原币填。 填 0
-                    不限，本地 00:00 归零。
-                  </p>
-                </div>
-                <div className="flex items-start pt-6">
-                  <Switch
-                    checked={configDraft.allowUnknownPriceOrder}
-                    onCheckedChange={(allowUnknownPriceOrder) =>
-                      setConfigDraft({ ...configDraft, allowUnknownPriceOrder })
-                    }
-                  />
-                  <div className="ml-2">
-                    <span className="text-xs">商品无价格时仍然下单</span>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      关闭更安全：算不出花费就不花钱，也不会漏记账。
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">
-                  各渠道计价单位不同（人民币、积分、点数），上限按**原币**填； 「1 单位 = ?
-                  元」只用于跨渠道汇总展示。人民币计价的渠道填 1。
-                </p>
-                {(Object.values(KSK_HUNTER_CHANNEL) as KskHunterChannel[]).map((channel) => {
-                  const billing =
-                    configDraft.billing[channel] ?? DEFAULT_KSK_HUNTER_CONFIG.billing[channel]
-                  const patchBilling = (patch: Partial<typeof billing>): void =>
-                    setConfigDraft({
-                      ...configDraft,
-                      billing: {
-                        ...configDraft.billing,
-                        [channel]: { ...billing, ...patch }
-                      }
-                    })
-                  return (
-                    <div
-                      key={channel}
-                      className="space-y-2 rounded-lg border border-border/50 bg-background/40 p-2.5"
-                    >
-                      <div className="grid items-end gap-2 sm:grid-cols-[1fr_80px_90px_1fr_1fr]">
-                        <p className="pb-2 text-xs font-medium">
-                          {KSK_HUNTER_CHANNEL_LABEL[channel]}
-                        </p>
-                        <div>
-                          <Label className="text-2xs">单位</Label>
-                          <Input
-                            value={billing.unitLabel}
-                            onChange={(event) => patchBilling({ unitLabel: event.target.value })}
-                            placeholder="积分"
-                            className="font-mono text-xs"
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-2xs">1 单位 = ? 元</Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            step="0.0001"
-                            value={billing.cnyPerUnit}
-                            onChange={(event) =>
-                              patchBilling({ cnyPerUnit: Number(event.target.value) })
-                            }
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-2xs">
-                            每日上限（{billing.unitLabel || '原币'}）
-                          </Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            step="1"
-                            value={billing.dailyLimitUnit}
-                            onChange={(event) =>
-                              patchBilling({ dailyLimitUnit: Number(event.target.value) })
-                            }
-                            placeholder="0 = 不限"
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-2xs">余额低于此值提醒</Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            step="1"
-                            value={billing.lowBalanceThresholdUnit}
-                            onChange={(event) =>
-                              patchBilling({
-                                lowBalanceThresholdUnit: Number(event.target.value)
-                              })
-                            }
-                            placeholder="0 = 不提醒"
-                          />
-                        </div>
-                      </div>
-                      {KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[channel] && (
-                        <div>
-                          <Label className="text-2xs">
-                            API Key（该渠道走请求头鉴权，列表、下单、余额共用）
-                          </Label>
-                          <Input
-                            type="password"
-                            value={apiKeyDrafts[channel] ?? ''}
-                            onChange={(event) =>
-                              setApiKeyDrafts({ ...apiKeyDrafts, [channel]: event.target.value })
-                            }
-                            placeholder={
-                              snapshot?.config.apiKeyHints?.[channel]
-                                ? `${snapshot.config.apiKeyHints[channel]} · 留空保持`
-                                : '在卖家站点的「账户」页查看'
-                            }
-                            spellCheck={false}
-                            className="font-mono text-xs"
-                          />
-                        </div>
-                      )}
-                      {configDraft.balanceCheckEnabled && (
-                        <div>
-                          <Label className="text-2xs">余额查询地址</Label>
-                          <Input
-                            type="password"
-                            value={balanceUrlDrafts[channel] ?? ''}
-                            onChange={(event) =>
-                              setBalanceUrlDrafts({
-                                ...balanceUrlDrafts,
-                                [channel]: event.target.value
-                              })
-                            }
-                            placeholder={
-                              snapshot?.config.balanceUrlHints?.[channel]
-                                ? `${snapshot.config.balanceUrlHints[channel]} · 留空保持`
-                                : BALANCE_URL_PLACEHOLDER[channel]
-                            }
-                            spellCheck={false}
-                            className="font-mono text-xs"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="rounded-xl border border-border/60 bg-muted/20 px-3 py-2.5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium">查询余额并按余额拦单</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      余额不够付这一单就跳过，不白跑一次下单；低于阈值时提醒充值。 余额缓存 60
-                      秒，下单后立即失效。
-                    </p>
-                  </div>
-                  <Switch
-                    checked={configDraft.balanceCheckEnabled}
-                    onCheckedChange={(balanceCheckEnabled) =>
-                      setConfigDraft({ ...configDraft, balanceCheckEnabled })
-                    }
-                    className="mt-0.5"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="flex justify-end border-t border-border/60 pt-3">
-              <Button onClick={handleSaveConfig} disabled={savingConfig}>
-                {savingConfig && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-                保存配置
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
 
         {/* 链接列表 */}
         {loading && links.length === 0 ? (
@@ -877,61 +430,127 @@ export function HunterPage(): React.ReactNode {
             </CardContent>
           </Card>
         ) : (
-          <div className="mb-5 grid gap-3 xl:grid-cols-2">
-            {links.map((link) => (
-              <Card
-                key={link.id}
-                className={`overflow-hidden border-border/70 transition-colors ${
-                  link.enabled ? 'bg-card/80' : 'bg-muted/20 opacity-80'
-                }`}
-              >
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <h3 className="truncate font-semibold">{link.name}</h3>
-                        {link.enabled && link.lastInStock && (
-                          <Badge
-                            variant="outline"
-                            className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
-                          >
-                            有货
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                        {link.listUrlHint || '列表地址未配置'}
-                      </p>
+          <div className="mb-5 overflow-hidden rounded-xl border border-border/70 bg-card/70">
+            <div className="hidden border-b border-border/60 bg-muted/20 px-4 py-2 text-2xs uppercase tracking-[0.16em] text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.4fr)_minmax(150px,1fr)_minmax(120px,0.7fr)_minmax(150px,1fr)_auto] lg:items-center lg:gap-4">
+              <span>Job / 渠道</span>
+              <span>模式 / 区域</span>
+              <span>库存 / 状态</span>
+              <span>花费 / 队列 / 最近检查</span>
+              <span>操作</span>
+            </div>
+            {links.map((link) => {
+              const linkSpend = snapshot?.spend.byLink.find((item) => item.linkId === link.id)
+              const linkDeliveries = deliveries.filter((delivery) => delivery.linkId === link.id)
+              const linkPending = linkDeliveries.filter(
+                (delivery) => delivery.state === KSK_HUNTER_DELIVERY_STATE.PENDING
+              ).length
+              const linkFailed = linkDeliveries.filter(
+                (delivery) =>
+                  delivery.state === KSK_HUNTER_DELIVERY_STATE.FAILED ||
+                  delivery.state === KSK_HUNTER_DELIVERY_STATE.DEAD_KEY
+              ).length
+              const statusLabel = !link.enabled
+                ? '已暂停'
+                : link.lastError
+                  ? '异常'
+                  : link.running
+                    ? '运行中'
+                    : '等待轮询'
+              const statusTone = !link.enabled
+                ? 'border-border bg-muted/50 text-muted-foreground'
+                : link.lastError
+                  ? 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300'
+                  : link.running
+                    ? 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-300'
+                    : 'border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-300'
+              const stockLabel = !link.enabled
+                ? link.lastInStock
+                  ? '上次有货'
+                  : '已暂停'
+                : link.lastInStock
+                  ? '有货'
+                  : link.lastCheckedAt
+                    ? '无货'
+                    : '未检查'
+              const stockTone = !link.enabled
+                ? 'text-muted-foreground'
+                : link.lastInStock
+                  ? 'text-emerald-500'
+                  : link.lastCheckedAt
+                    ? 'text-muted-foreground'
+                    : 'text-amber-500'
+              return (
+                <div
+                  key={link.id}
+                  className={`grid gap-3 border-b border-border/60 p-4 last:border-b-0 lg:grid-cols-[minmax(220px,1.4fr)_minmax(150px,1fr)_minmax(120px,0.7fr)_minmax(150px,1fr)_auto] lg:items-center lg:gap-4 ${link.enabled ? 'bg-card/60' : 'bg-muted/15'}`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="truncate font-semibold">{link.name}</h3>
+                      <Badge variant="outline" className={statusTone}>
+                        {statusLabel}
+                      </Badge>
                     </div>
-                    <Badge variant="outline">{KSK_HUNTER_CHANNEL_LABEL[link.channel]}</Badge>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {KSK_HUNTER_CHANNEL_LABEL[link.channel]} ·{' '}
+                      {link.listUrlHint || '列表地址未配置'}
+                    </p>
                   </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-border/60 bg-muted/15 p-2.5 text-xs">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
-                      <p className="text-muted-foreground">处置方式</p>
+                      <p className="text-muted-foreground">模式</p>
                       <p className="mt-0.5 font-medium">
                         {link.mode === KSK_HUNTER_MODE.AUTO_ORDER ? '自动下单' : '仅提醒'}
                       </p>
                     </div>
-                    <div>
-                      <p className="text-muted-foreground">区域限制</p>
+                    <div className="min-w-0">
+                      <p className="text-muted-foreground">区域</p>
                       <p className="mt-0.5 truncate font-mono font-medium">
                         {link.regions.length > 0 ? link.regions.join(', ') : '不限'}
                       </p>
                     </div>
-                    <div className="col-span-2">
-                      <p className="text-muted-foreground">最近查询</p>
-                      <p className="mt-0.5 font-medium">{formatTime(link.lastCheckedAt)}</p>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs">
+                    <div>
+                      <p className="text-muted-foreground">库存</p>
+                      <p className={`mt-0.5 font-semibold ${stockTone}`}>{stockLabel}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">队列</p>
+                      <p className="mt-0.5 font-medium tabular-nums">{linkPending} 待推送</p>
+                      <p className="font-medium tabular-nums">{linkFailed} 待处理</p>
                     </div>
                   </div>
-
-                  {link.lastError && (
-                    <div className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-                      {link.lastError}
+                  <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                    <div>
+                      <p className="text-muted-foreground">今日花费</p>
+                      <p className="mt-0.5 font-semibold tabular-nums">
+                        ¥{linkSpend?.amountCny ?? 0}
+                      </p>
+                      <p className="text-2xs tabular-nums text-muted-foreground">
+                        {linkSpend?.orderCount ?? 0} 单
+                      </p>
+                      {linkSpend && linkSpend.unitLabel !== 'CNY' && (
+                        <p className="text-2xs text-muted-foreground">
+                          {linkSpend.amountUnit} {linkSpend.unitLabel}
+                        </p>
+                      )}
                     </div>
-                  )}
-
-                  <div className="mt-3 flex flex-wrap gap-2 border-t border-border/60 pt-3">
+                    <div>
+                      <p className="text-muted-foreground">最近检查</p>
+                      <p className="mt-0.5 font-medium">{formatTime(link.lastCheckedAt)}</p>
+                    </div>
+                    <div className="col-span-2 sm:col-span-1">
+                      <p className="text-muted-foreground">最近错误</p>
+                      <p
+                        className="mt-0.5 truncate font-medium text-amber-600 dark:text-amber-300"
+                        title={link.lastError}
+                      >
+                        {link.lastError || '—'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 lg:justify-end">
                     <Button
                       size="sm"
                       variant={link.enabled ? 'outline' : 'default'}
@@ -963,12 +582,12 @@ export function HunterPage(): React.ReactNode {
                       disabled={busy !== null}
                     >
                       <Edit3 className="mr-1.5 h-3.5 w-3.5" />
-                      编辑
+                      配置
                     </Button>
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="ml-auto text-red-500 hover:bg-red-500/10 hover:text-red-500"
+                      className="text-red-500 hover:bg-red-500/10 hover:text-red-500"
                       onClick={() => handleDeleteLink(link)}
                       disabled={busy !== null}
                     >
@@ -980,9 +599,9 @@ export function HunterPage(): React.ReactNode {
                       删除
                     </Button>
                   </div>
-                </CardContent>
-              </Card>
-            ))}
+                </div>
+              )
+            })}
           </div>
         )}
 
@@ -1079,6 +698,12 @@ export function HunterPage(): React.ReactNode {
         )}
       </div>
 
+      <HunterConfigDialog
+        isOpen={configOpen}
+        snapshot={snapshot}
+        onClose={() => setConfigOpen(false)}
+        onSave={handleSaveConfig}
+      />
       <HunterLinkEditorDialog
         isOpen={editorOpen}
         link={editingLink}

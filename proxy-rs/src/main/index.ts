@@ -90,7 +90,11 @@ import {
   sendLocalAdminStatsSnapshot
 } from './localAdminStats/ipc-handlers'
 import { KskHunterManager } from './kskHunter/hunterRunner'
-import { hunterLocalDateKey, KSK_HUNTER_CHANNEL_LABEL } from '../shared/kskHunter'
+import {
+  hunterLocalDateKey,
+  KSK_HUNTER_CHANNEL_LABEL,
+  type KskHunterRuntimeNotification
+} from '../shared/kskHunter'
 import { loadKskHunterStore } from './kskHunter/configStore'
 import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
 import { KSK_LEDGER_RETIRE_REASON, resolveLedgerState } from '../shared/kskLedger'
@@ -2232,6 +2236,18 @@ const localAdminStatsManager = new LocalAdminStatsManager({
  * 通过才落库），避免再写一份 KSK 落库逻辑。抢号器不带自己的验活参数，
  * 走默认口径：自动挑最便宜的模型 + 内置测试消息。
  */
+let kskHunterSnapshotQueue: Promise<void> = Promise.resolve()
+
+// manager 的通知钩子是同步触发的；串行化异步 IPC，避免 start/final 乱序，失败后继续接下一条。
+function queueKskHunterSnapshot(runtime: KskHunterRuntimeNotification): void {
+  const send = (): Promise<void> => sendKskHunterStatus(() => mainWindow, kskHunterManager, runtime)
+  const next = kskHunterSnapshotQueue.then(send, send)
+  kskHunterSnapshotQueue = next.catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    console.log(`[KskHunter] 快照推送失败：${message}`)
+  })
+}
+
 const kskHunterManager = new KskHunterManager({
   readStore: loadKskHunterStore,
   fetchImpl: (url, init) =>
@@ -2295,10 +2311,8 @@ const kskHunterManager = new KskHunterManager({
       bodyOverride: `${KSK_HUNTER_CHANNEL_LABEL[channel]} 余额仅剩 ${balanceUnit} ${unitLabel}（阈值 ${thresholdUnit}），请及时充值。`
     })
   },
-  notifySnapshot: () => {
-    void sendKskHunterStatus(() => mainWindow, kskHunterManager).catch(() => {
-      /* 快照推送失败不能影响抢号主流程 */
-    })
+  notifySnapshot: (runtime) => {
+    queueKskHunterSnapshot(runtime)
   },
   log: (message) => console.log(message)
 })

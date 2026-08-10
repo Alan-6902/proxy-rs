@@ -34,6 +34,7 @@ import {
   type KskHunterChannel,
   type KskHunterChannelBalance,
   type KskHunterOffer,
+  type KskHunterRuntimeNotification,
   type KskHunterSpendSummary,
   type KskHunterStatus
 } from '../../shared/kskHunter'
@@ -125,8 +126,8 @@ export interface KskHunterDeps {
   }) => void
   /** 账号库变更后让渲染进程刷新。 */
   notifyAccountsChanged: () => void
-  /** 推送状态快照给渲染进程。 */
-  notifySnapshot: () => void
+  /** 入队一份已冻结运行态，供异步快照补齐持久化字段。 */
+  notifySnapshot: (runtime: KskHunterRuntimeNotification) => void
   /** 报表事件流的读写；默认落 userData 下的 JSONL，测试里可换成内存实现。 */
   appendReportEvent?: (event: HunterReportEvent) => Promise<void>
   readReportEvents?: () => Promise<HunterReportEvent[]>
@@ -310,7 +311,8 @@ export class KskHunterManager {
   }
 
   linkRuntimeOf(linkId: string): KskHunterLinkRuntime {
-    return this.linkRuntime.get(linkId) ?? { lastInStock: false }
+    const runtime = this.linkRuntime.get(linkId) ?? { lastInStock: false, running: false }
+    return { ...runtime, running: this.inFlightLinks.has(linkId) }
   }
 
   async start(): Promise<void> {
@@ -320,7 +322,7 @@ export class KskHunterManager {
     if (store.links.some((link) => link.enabled)) this.scheduleNext(0)
     else this.status = { ...this.status, state: KSK_HUNTER_STATE.IDLE, running: false }
     this.scheduleDeliveryDrain(0)
-    this.deps.notifySnapshot()
+    this.notifySnapshotSafely()
   }
 
   stop(): void {
@@ -407,13 +409,16 @@ export class KskHunterManager {
     try {
       const store = await this.deps.readStore()
       const activeLinks = store.links.filter((link) => link.enabled && link.secrets.listUrl)
+      // async checkLink 会先同步建立 inFlight，再在首个 await 处挂起；统一通知可观察到整轮真实 Set。
+      const checks = activeLinks.map((link) => this.checkLink(link, store))
+      this.notifySnapshotSafely()
       if (activeLinks.length === 0) {
         this.status = { ...this.status, state: KSK_HUNTER_STATE.IDLE, running: false }
         return
       }
 
       // 并行查所有链接；单链接失败不影响其它链接
-      const results = await Promise.all(activeLinks.map((link) => this.checkLink(link, store)))
+      const results = await Promise.all(checks)
       const failedCount = results.filter((ok) => !ok).length
 
       this.status = {
@@ -436,7 +441,7 @@ export class KskHunterManager {
       }
       this.log(`轮询失败：${message}`)
     } finally {
-      this.deps.notifySnapshot()
+      this.notifySnapshotSafely()
       if (!this.stopped) this.scheduleNext(KSK_HUNTER_POLL_INTERVAL_SECONDS * 1000)
     }
   }
@@ -776,6 +781,8 @@ export class KskHunterManager {
     await appendKskHunterSpend({
       id: randomUUID(),
       channel: link.channel,
+      linkId: link.id,
+      linkName: link.name,
       amountUnit: budget.costUnit ?? 0,
       amountCny: budget.costCny,
       at: now
@@ -964,7 +971,7 @@ export class KskHunterManager {
     } catch (error) {
       this.log(`推送队列处理失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
-      this.deps.notifySnapshot()
+      this.notifySnapshotSafely()
       await this.rescheduleDeliveryDrain()
     }
   }
@@ -1094,6 +1101,31 @@ export class KskHunterManager {
     return summarizeHunterSpend(toKskHunterSpendEntries(source), source.config)
   }
 
+  private snapshotRuntimeNotification(): KskHunterRuntimeNotification {
+    const status = this.snapshotStatus()
+    const frozenStatus = Object.freeze({
+      ...status,
+      budgetBlockedChannels: Object.freeze([...status.budgetBlockedChannels])
+    })
+    return Object.freeze({
+      status: frozenStatus,
+      runningLinkIds: Object.freeze(Array.from(this.inFlightLinks))
+    })
+  }
+
+  private notifySnapshotSafely(): void {
+    try {
+      this.deps.notifySnapshot(this.snapshotRuntimeNotification())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      try {
+        this.log(`快照通知失败：${message}`)
+      } catch {
+        // 通知与日志都不能影响轮询主流程
+      }
+    }
+  }
+
   private log(message: string): void {
     ;(this.deps.log ?? ((text) => console.log(text)))(`[KskHunter] ${message}`)
   }
@@ -1102,13 +1134,21 @@ export class KskHunterManager {
 /** 组装完整快照，IPC 与事件推送共用。 */
 export function buildKskHunterSnapshotParts(
   store: PersistedKskHunterStore,
-  manager: KskHunterManager
+  manager: KskHunterManager,
+  runtime?: KskHunterRuntimeNotification
 ): {
   links: ReturnType<typeof toKskHunterLinkView>[]
   deliveries: ReturnType<typeof toKskHunterDeliveryView>[]
 } {
+  const runningLinkIds = runtime ? new Set(runtime.runningLinkIds) : undefined
   return {
-    links: store.links.map((link) => toKskHunterLinkView(link, manager.linkRuntimeOf(link.id))),
+    links: store.links.map((link) => {
+      const linkRuntime = manager.linkRuntimeOf(link.id)
+      const capturedRuntime = runningLinkIds
+        ? { ...linkRuntime, running: runningLinkIds.has(link.id) }
+        : linkRuntime
+      return toKskHunterLinkView(link, capturedRuntime)
+    }),
     deliveries: [...store.deliveries]
       .sort((a, b) => b.createdAt - a.createdAt)
       .map(toKskHunterDeliveryView)

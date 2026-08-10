@@ -1,74 +1,66 @@
 /**
  * 抢号台账的共享契约：主进程记账、渲染进程出报表，口径只有这一份。
  *
- * 要回答的问题：**这个号花多少钱买的、活了多长时间、替我烧了多少积分**。
+ * 要回答的问题：**这个号花多少钱买的、活了多长时间、下游拿它烧了多少积分**。
  * 现有两份报表都答不了：
  * - 抢号报表（`hunterReport`）只到渠道/链接维度，成本落不到具体号上；
- * - 反代报表（`localAdminStats`）按小时差分，桶只留 7 天，号一删就查无对证。
+ * - 反代报表（`localAdminStats`）只统计走**本机反代**的请求，而这些号是交给
+ *   下游去用的，本机反代根本看不见它们的消耗。
  *
- * 关联键是 `sha256(ksk 明文)`：Admin 的 `GET /credentials` 只回这个哈希（不回明文），
- * 而抢号下单时本地手里就是明文。两边用同一个算法碰一下就能把「买入成本」与
- * 「反代消耗」焊到同一个号上，台账文件里也就不需要出现任何明文。
+ * ## 消耗从哪来
  *
- * 只收抢号买来的号：手动推送与自动同步进反代的号没有采购记录，算不出成本与
- * ROI，硬塞进来只会得到一堆空列。所以 `applyLedgerObservation` 只更新已有条目，
- * 不为陌生哈希建档。
+ * 号买来是独占给下游的，所以「这个号的全部额度消耗」就等于「下游烧的量」。
+ * 该数据不经反代 Admin，直接来自上游 `GetUsageLimits`（`kiro_api_key` 可直接调，
+ * 见 main/index.ts 的 getUsageAndLimits）：
+ * - 入库时已经拉过一次，那个值就是**买入时的额度基线**（二手号买来可能已经
+ *   烧掉一部分，记进基线才不会把前主的消耗算到你账上）；
+ * - 账号页默认开启 5 分钟一轮的自动刷新，会持续更新每个账号的 `usage.current`。
+ *
+ * 于是「下游烧了多少」= 当前 `usage.current` − 买入时基线。
+ *
+ * ## 关联键
+ *
+ * 用本地账号库的账号 id。曾经用过 `sha256(ksk 明文)`（为了跟 Admin 的 apiKeyHash
+ * 对碰），但消耗数据换成本地 usage 之后就不需要绕哈希了——本地账号库里有明文，
+ * 直接按 id 关联更直接。台账里仍然只存脱敏 key，不存明文。
+ *
+ * 只收抢号买来的号：手动推送与自动同步进来的号没有采购记录，算不出成本与 ROI。
+ * 所以 `applyLedgerObservation` 只更新已有条目，不为陌生账号建档。
  */
 
-import { diffLocalAdminCounter, type LocalAdminCredentialStats } from './localAdminStats'
 import type { KskHunterChannel } from './kskHunter'
 
 /** 一小时的毫秒数，存活时长与每小时产出共用。 */
 export const KSK_LEDGER_HOUR_MS = 3_600_000
 
-/** 台账状态：按「买到了吗 → 进池了吗 → 还在池里吗」三段判。 */
+/** 台账状态：号还在服役，还是已经下线了。 */
 export const KSK_LEDGER_STATE = {
-  /** 还在反代池子里服役。 */
+  /** 还在账号库里服役。 */
   ALIVE: 'alive',
-  /** 曾经在池里，现在没了（被清理、被删、或反代换了一批）。 */
+  /** 已经从账号库消失（被清理、被删）。 */
   RETIRED: 'retired',
-  /** 买到但发消息验活没过：钱花了，号从没进池。 */
-  DEAD_ON_ARRIVAL: 'dead_on_arrival',
-  /**
-   * 买到了、验活也过了，但反代里一直没观测到。
-   *
-   * 常见原因是抢号的下游反代与统计监控的本机 Admin 不是同一个实例
-   * （`downstreamBaseUrl` 与 Admin 地址各配一处），此时消耗数据天然拿不到。
-   */
-  NEVER_POOLED: 'never_pooled',
-  /** 刚买到，还在等下一轮采样确认进池（见 KSK_LEDGER_POOL_GRACE_MS）。 */
-  PENDING: 'pending'
+  /** 买到但发消息验活没过：钱花了，号从没用上。 */
+  DEAD_ON_ARRIVAL: 'dead_on_arrival'
 } as const
 
 export type KskLedgerState = (typeof KSK_LEDGER_STATE)[keyof typeof KSK_LEDGER_STATE]
 
 export const KSK_LEDGER_STATE_LABEL: Record<KskLedgerState, string> = {
-  [KSK_LEDGER_STATE.ALIVE]: '在池',
+  [KSK_LEDGER_STATE.ALIVE]: '在用',
   [KSK_LEDGER_STATE.RETIRED]: '已下线',
-  [KSK_LEDGER_STATE.DEAD_ON_ARRIVAL]: '买到即废',
-  [KSK_LEDGER_STATE.NEVER_POOLED]: '未进池',
-  [KSK_LEDGER_STATE.PENDING]: '待确认'
+  [KSK_LEDGER_STATE.DEAD_ON_ARRIVAL]: '买到即废'
 }
 
-/**
- * 买到之后允许多久还没被观测到，仍算「待确认」而不是「未进池」。
- *
- * 取 10 分钟：反代统计每 60 秒采一轮，正常情况下一分钟内就能看到新号；
- * 但推送本身有指数退避重试（最长约 160 秒一轮、共 6 次），加上采样错峰，
- * 给到 10 分钟才不会把还在重试队列里的号早早标成「白买了」。
- */
-export const KSK_LEDGER_POOL_GRACE_MS = 10 * 60_000
-
-/** 号退出池子的原因，用来区分「烧干了」和「白买了」。 */
+/** 号下线的原因，用来区分「烧干了」和「白买了」。 */
 export const KSK_LEDGER_RETIRE_REASON = {
   /** 额度耗尽被自动/手动清理。这是号的正常寿终。 */
   EXHAUSTED: 'exhausted',
   /** 发消息验活判永久失效（封号、认证失败）。 */
   INVALID: 'invalid',
   /**
-   * 在 Admin 里消失了但没人报告过原因。
+   * 从账号库消失了但没人报告过原因。
    *
-   * 用户手动删了凭据、或换了一个空的 Admin 实例都会走到这里。
+   * 用户手动删了账号、或换了一份账号库都会走到这里。
    */
   VANISHED: 'vanished'
 } as const
@@ -79,7 +71,7 @@ export type KskLedgerRetireReason =
 export const KSK_LEDGER_RETIRE_REASON_LABEL: Record<KskLedgerRetireReason, string> = {
   [KSK_LEDGER_RETIRE_REASON.EXHAUSTED]: '额度耗尽',
   [KSK_LEDGER_RETIRE_REASON.INVALID]: '验活判死',
-  [KSK_LEDGER_RETIRE_REASON.VANISHED]: '已从反代消失'
+  [KSK_LEDGER_RETIRE_REASON.VANISHED]: '已从账号库删除'
 }
 
 /** 台账保留条数上限。一条约 300 字节，5000 条约 1.5MB，够记一年多的采购。 */
@@ -94,12 +86,12 @@ export const KSK_LEDGER_DEFAULT_WINDOW_DAYS = 30
 /**
  * 一条台账记录：一个买来的号，从下单到下线的全过程。
  *
- * 刻意不含 ksk 明文，只留 `keyHash` 与 `maskedKey`——这份文件是明文 JSON，
+ * 刻意不含 ksk 明文，只留 `maskedKey`——这份文件是明文 JSON，
  * 存了明文就等于把已购的号裸奔在磁盘上。
  */
 export interface KskLedgerEntry {
-  /** sha256(ksk 明文)。与 Admin 的 apiKeyHash 同算法，是这条记录的主键。 */
-  keyHash: string
+  /** 本地账号库的账号 id，这条记录的主键。 */
+  accountId: string
   /** 展示用脱敏 key（`ksk_...abcd`），下单时本地算好存下来。 */
   maskedKey: string
   region: string
@@ -108,6 +100,13 @@ export interface KskLedgerEntry {
   channel: KskHunterChannel
   linkId: string
   linkName: string
+  /**
+   * 抢到时落进的账号分组 id（抢号配置里的 targetGroupId）；未分组时为 undefined。
+   *
+   * 记下来是因为不同分组通常对应不同下游，按它汇总才看得出「哪一路的号更划算」。
+   * 存 id 而不是名字：分组可以改名，名字在出报表时按当前分组表现查。
+   */
+  groupId?: string
   /** 下单成功的时刻，也是存活时长的起点。 */
   purchasedAt: number
   /** 该单原币金额；商品未给价格时为 undefined。 */
@@ -117,87 +116,108 @@ export interface KskLedgerEntry {
   unitLabel?: string
 
   /* ---- 生命周期 ---- */
-  /** 首次在反代 Admin 里观测到的时刻；没进池时为 undefined。 */
-  firstSeenAt?: number
-  /** 最后一次在 Admin 里观测到的时刻。 */
+  /** 最后一次在账号库里观测到的时刻。 */
   lastSeenAt?: number
-  /** 从 Admin 消失（或被判死）的时刻；仍在池里时为 undefined。 */
+  /** 从账号库消失（或被判死）的时刻；仍在用时为 undefined。 */
   retiredAt?: number
   retireReason?: KskLedgerRetireReason
-  /** 观测到的最后一个 Admin 凭据 id，便于和反代报表对照。 */
-  credentialId?: string
 
-  /* ---- 产出（累计差分，只统计走本机反代的量） ---- */
-  /** 经本机反代消耗的 Kiro 积分累计（估算）。 */
+  /* ---- 消耗 ---- */
+  /**
+   * 当前计费周期的额度基线（上游累计 `usage.current`）。
+   *
+   * 二手号买来时可能已经烧掉一部分，记住这个基线才不会把前主的消耗
+   * 算成下游的产出。入库时拉的那次 usage 就是它的初值。
+   *
+   * 额度按月重置时这个基线会跟着降到新值，同时把本周期已烧的量结转进
+   * `carriedCredits`，见 applyLedgerObservation。
+   */
+  baselineUsage?: number
+  /** 最后一次观测到的累计额度消耗。 */
+  currentUsage?: number
+  /** 该号的额度上限，用来显示水位。 */
+  usageLimit?: number
+  /**
+   * 已结转的历史消耗：额度重置之前那些周期烧掉的量之和。
+   *
+   * 单独存是因为重置会把上游的 `usage.current` 打回 0，只靠「当前 − 基线」
+   * 算不出重置前的那部分，而那是真花出去的钱，不能抹掉。
+   */
+  carriedCredits?: number
+  /**
+   * 下游总共烧掉的积分 = `carriedCredits + (currentUsage − baselineUsage)`。
+   *
+   * 存成字段而不是每次现算：号被删掉之后 `currentUsage` 就再也拉不到了，
+   * 但这个数得留在账上。
+   */
   usedCredits: number
-  inputTokens: number
-  outputTokens: number
-  successCount: number
-  failureCount: number
-
-  /* ---- 差分基线：上一次观测到的累计值 ---- */
-  cursor?: KskLedgerCursor
 }
 
 /**
- * 上一次观测到的累计值。
+ * 一轮观测里的单个账号，取自本地账号库。
  *
- * 与 `LocalAdminCumulativeCursor` 的差别：那份按 Admin 的凭据 id 存，id 会被复用
- * （删掉 #1 再建一条还是 #1），所以它得额外拿 maskedKey 判换号。这里按 keyHash 存，
- * 哈希天然唯一，不存在换号问题；代价是它只覆盖抢号买来的号。
+ * 只要 usage：token 与成功次数是反代口径的东西，号交给下游用之后本地拿不到，
+ * 硬留字段只会在页面上显示成 0 误导人。
  */
-export interface KskLedgerCursor {
-  usedCredits?: number
-  inputTokens?: number
-  outputTokens?: number
-  successCount?: number
-  failureCount?: number
-  at: number
-}
-
-/** 一轮观测里的单条凭据，取自反代统计的凭据视图。 */
 export interface KskLedgerObservation {
-  /** Admin 回的 apiKeyHash。缺失（oauth 凭据）的条目由调用方过滤。 */
-  keyHash: string
-  credentialId?: string
-  usedCredits?: number
-  inputTokens?: number
-  outputTokens?: number
-  successCount: number
-  failureCount: number
+  accountId: string
+  /** 上游累计已用额度（`account.usage.current`）。 */
+  currentUsage?: number
+  usageLimit?: number
 }
 
 /** 报表里的一行：台账记录 + 算出来的派生量。 */
-export interface KskLedgerRow extends Omit<KskLedgerEntry, 'cursor'> {
+export interface KskLedgerRow extends KskLedgerEntry {
   state: KskLedgerState
-  /** 存活毫秒数：进池到下线（仍在池时算到 now）。没进池的为 0。 */
+  /** 存活毫秒数：买入到下线（仍在用时算到 now）。 */
   aliveMs: number
   /** 每积分成本（人民币元）；没花钱或没产出时为 undefined。 */
   cnyPerCredit?: number
   /** 每小时产出的积分；存活不足一分钟或没产出时为 undefined。 */
   creditsPerHour?: number
+  /** 额度用掉的比例（0-1）；拿不到上限时为 undefined。 */
+  usagePercent?: number
+  /** 分组展示名，出报表时按当前分组表查得；分组已删或未分组时为 undefined。 */
+  groupName?: string
 }
 
 export interface KskLedgerTotals {
   entries: number
   alive: number
   retired: number
-  /** 买到即废 + 未进池：花了钱但拿不到产出的号。 */
+  /** 买到即废：钱花了但号从没用上。 */
   wasted: number
   spendCny: number
   /** 有价格记录的订单数，均价的分母。 */
   pricedOrders: number
   usedCredits: number
-  inputTokens: number
-  outputTokens: number
-  successCount: number
-  failureCount: number
-  /** 已下线号的平均存活时长（毫秒）；没有下线记录时为 undefined。 */
+  /**
+   * 全部号的平均存活时长（毫秒）。
+   *
+   * 分母是所有号，不是只算已下线的：抢到的号默认不删，一直留在账号库里，
+   * 只统计已下线的会让这个值长期是 undefined。在用的号按「到现在」计时，
+   * 所以这个数会随时间自然增长，读作「这批号平均已经服役多久」。
+   */
   avgAliveMs?: number
   /** 整体每积分成本（人民币元）；没产出时为 undefined。 */
   cnyPerCredit?: number
   /** 单号平均花费（人民币元）；没有带价订单时为 undefined。 */
   avgCostCny?: number
+}
+
+/** 按分组汇总的一行。不同分组通常对应不同下游，用它对比哪一路更划算。 */
+export interface KskLedgerGroupRow {
+  /** 分组 id；未分组的号归到 undefined 这一档。 */
+  groupId?: string
+  groupName: string
+  entries: number
+  alive: number
+  spendCny: number
+  usedCredits: number
+  /** 每积分成本（人民币元）；没产出时为 undefined。 */
+  cnyPerCredit?: number
+  /** 该组号的平均存活时长（毫秒）。 */
+  avgAliveMs?: number
 }
 
 export interface KskLedgerReport {
@@ -207,6 +227,8 @@ export interface KskLedgerReport {
   from: number
   rows: KskLedgerRow[]
   totals: KskLedgerTotals
+  /** 按分组汇总，按花费从多到少排。 */
+  byGroup: KskLedgerGroupRow[]
   /** 台账总条数（不受窗口限制），用来说明历史攒了多久。 */
   totalEntryCount: number
   /** 台账里最早一条采购的时间。 */
@@ -220,11 +242,7 @@ export const EMPTY_KSK_LEDGER_TOTALS: KskLedgerTotals = {
   wasted: 0,
   spendCny: 0,
   pricedOrders: 0,
-  usedCredits: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  successCount: 0,
-  failureCount: 0
+  usedCredits: 0
 }
 
 /** 报表行的排序维度。 */
@@ -241,44 +259,34 @@ export type KskLedgerSort = (typeof KSK_LEDGER_SORT)[keyof typeof KSK_LEDGER_SOR
 /**
  * 判定一条记录当前处于哪个状态。
  *
- * 顺序有讲究：先看有没有下线时刻（终态最确定），再看有没有进过池，
- * 最后才用「买了多久还没见到」来区分待确认与未进池。
+ * 验活判死单独成一档「买到即废」：那是钱花了号从没用上，与「用到额度耗尽」
+ * 是两种完全不同的结果，混在「已下线」里会让白买的号看不出来。
  */
-export function resolveLedgerState(entry: KskLedgerEntry, now: number): KskLedgerState {
-  if (entry.retiredAt !== undefined) {
-    return entry.retireReason === KSK_LEDGER_RETIRE_REASON.INVALID &&
-      entry.firstSeenAt === undefined
-      ? KSK_LEDGER_STATE.DEAD_ON_ARRIVAL
-      : KSK_LEDGER_STATE.RETIRED
-  }
-  if (entry.firstSeenAt !== undefined) return KSK_LEDGER_STATE.ALIVE
-  return now - entry.purchasedAt <= KSK_LEDGER_POOL_GRACE_MS
-    ? KSK_LEDGER_STATE.PENDING
-    : KSK_LEDGER_STATE.NEVER_POOLED
+export function resolveLedgerState(entry: KskLedgerEntry): KskLedgerState {
+  if (entry.retiredAt === undefined) return KSK_LEDGER_STATE.ALIVE
+  return entry.retireReason === KSK_LEDGER_RETIRE_REASON.INVALID
+    ? KSK_LEDGER_STATE.DEAD_ON_ARRIVAL
+    : KSK_LEDGER_STATE.RETIRED
 }
 
 /**
- * 存活时长：进池到下线，仍在池时算到 now。
+ * 存活时长：买入到下线，仍在用时算到 now。
  *
- * 起点用 `firstSeenAt` 而不是 `purchasedAt`：用户要的是「这个号在池里干了多久活」，
- * 买来放着没推进去的那段时间不该算进服役时长。没进池的一律 0。
+ * 起点用 `purchasedAt`：号是买来交给下游用的，从付钱那一刻就开始计寿命，
+ * 「什么时候被下游真正拿去用」本地观测不到（下游是独立服务）。
  */
 export function resolveLedgerAliveMs(entry: KskLedgerEntry, now: number): number {
-  if (entry.firstSeenAt === undefined) return 0
-  const end = entry.retiredAt ?? Math.max(entry.lastSeenAt ?? now, now)
-  return Math.max(0, end - entry.firstSeenAt)
+  const end = entry.retiredAt ?? now
+  return Math.max(0, end - entry.purchasedAt)
 }
 
 /** 台账条目转报表行，补上派生量。 */
 export function toKskLedgerRow(entry: KskLedgerEntry, now: number): KskLedgerRow {
-  // cursor 是差分内部状态，不该出现在报表里；显式剔掉而不是解构丢弃
-  const rest: Omit<KskLedgerEntry, 'cursor'> & { cursor?: never } = { ...entry, cursor: undefined }
-  delete rest.cursor
   const aliveMs = resolveLedgerAliveMs(entry, now)
   const aliveHours = aliveMs / KSK_LEDGER_HOUR_MS
   return {
-    ...rest,
-    state: resolveLedgerState(entry, now),
+    ...entry,
+    state: resolveLedgerState(entry),
     aliveMs,
     // 分母是产出，产出为 0 时「每积分成本」是无穷大，报 undefined 让 UI 显示「—」
     cnyPerCredit:
@@ -287,7 +295,11 @@ export function toKskLedgerRow(entry: KskLedgerEntry, now: number): KskLedgerRow
         : undefined,
     // 存活不足一分钟时样本太少，算出来的时均没有意义
     creditsPerHour:
-      aliveMs >= 60_000 && entry.usedCredits > 0 ? entry.usedCredits / aliveHours : undefined
+      aliveMs >= 60_000 && entry.usedCredits > 0 ? entry.usedCredits / aliveHours : undefined,
+    usagePercent:
+      entry.usageLimit !== undefined && entry.usageLimit > 0 && entry.currentUsage !== undefined
+        ? entry.currentUsage / entry.usageLimit
+        : undefined
   }
 }
 
@@ -318,30 +330,20 @@ export function compareKskLedgerRows(
 /** 汇总总览。全部由行算出，避免两处口径不一致。 */
 export function aggregateKskLedger(rows: readonly KskLedgerRow[]): KskLedgerTotals {
   const totals: KskLedgerTotals = { ...EMPTY_KSK_LEDGER_TOTALS }
-  let retiredAliveMs = 0
+  let aliveMsSum = 0
   for (const row of rows) {
     totals.entries++
     if (row.state === KSK_LEDGER_STATE.ALIVE) totals.alive++
-    if (row.state === KSK_LEDGER_STATE.RETIRED) {
-      totals.retired++
-      retiredAliveMs += row.aliveMs
-    }
-    if (
-      row.state === KSK_LEDGER_STATE.DEAD_ON_ARRIVAL ||
-      row.state === KSK_LEDGER_STATE.NEVER_POOLED
-    ) {
-      totals.wasted++
-    }
+    if (row.state === KSK_LEDGER_STATE.RETIRED) totals.retired++
+    if (row.state === KSK_LEDGER_STATE.DEAD_ON_ARRIVAL) totals.wasted++
+    // 分母是所有号：抢到的号默认不删，只算已下线的会让这个值长期算不出来
+    aliveMsSum += row.aliveMs
     totals.spendCny += row.costCny ?? 0
     if (row.costUnit !== undefined) totals.pricedOrders++
     totals.usedCredits += row.usedCredits
-    totals.inputTokens += row.inputTokens
-    totals.outputTokens += row.outputTokens
-    totals.successCount += row.successCount
-    totals.failureCount += row.failureCount
   }
   totals.spendCny = Math.round(totals.spendCny * 100) / 100
-  totals.avgAliveMs = totals.retired > 0 ? retiredAliveMs / totals.retired : undefined
+  totals.avgAliveMs = totals.entries > 0 ? aliveMsSum / totals.entries : undefined
   totals.cnyPerCredit =
     totals.usedCredits > 0 && totals.spendCny > 0 ? totals.spendCny / totals.usedCredits : undefined
   totals.avgCostCny =
@@ -349,6 +351,56 @@ export function aggregateKskLedger(rows: readonly KskLedgerRow[]): KskLedgerTota
       ? Math.round((totals.spendCny / totals.pricedOrders) * 100) / 100
       : undefined
   return totals
+}
+
+/**
+ * 按分组汇总。
+ *
+ * 分组名由调用方给的 `groupNames` 查得（分组可以改名，台账只存 id）。
+ * 查不到的分组说明已被删掉，标注出来而不是显示成空白——那样看不出这批号
+ * 到底属于哪儿。
+ */
+export function aggregateKskLedgerByGroup(
+  rows: readonly KskLedgerRow[],
+  groupNames: Readonly<Record<string, string>> = {}
+): KskLedgerGroupRow[] {
+  const byGroup = new Map<string, { row: KskLedgerGroupRow; aliveMsSum: number }>()
+  for (const row of rows) {
+    // Map 的键不能是 undefined，未分组统一用空串占位，输出时再还原
+    const key = row.groupId ?? ''
+    let bucket = byGroup.get(key)
+    if (!bucket) {
+      bucket = {
+        row: {
+          groupId: row.groupId,
+          groupName: row.groupId
+            ? (groupNames[row.groupId] ?? `已删除的分组（${row.groupId.slice(0, 8)}）`)
+            : '未分组',
+          entries: 0,
+          alive: 0,
+          spendCny: 0,
+          usedCredits: 0
+        },
+        aliveMsSum: 0
+      }
+      byGroup.set(key, bucket)
+    }
+    bucket.row.entries++
+    if (row.state === KSK_LEDGER_STATE.ALIVE) bucket.row.alive++
+    bucket.row.spendCny += row.costCny ?? 0
+    bucket.row.usedCredits += row.usedCredits
+    bucket.aliveMsSum += row.aliveMs
+  }
+
+  return [...byGroup.values()]
+    .map(({ row, aliveMsSum }) => ({
+      ...row,
+      spendCny: Math.round(row.spendCny * 100) / 100,
+      cnyPerCredit:
+        row.usedCredits > 0 && row.spendCny > 0 ? row.spendCny / row.usedCredits : undefined,
+      avgAliveMs: row.entries > 0 ? aliveMsSum / row.entries : undefined
+    }))
+    .sort((a, b) => b.spendCny - a.spendCny || b.entries - a.entries)
 }
 
 /**
@@ -362,6 +414,8 @@ export function summarizeKskLedger(input: {
   entries: readonly KskLedgerEntry[]
   days?: number
   sort?: KskLedgerSort
+  /** 分组 id → 名字。台账只存 id（分组可改名），出报表时按当前分组表查。 */
+  groupNames?: Readonly<Record<string, string>>
   now?: number
 }): KskLedgerReport {
   const now = input.now ?? Date.now()
@@ -372,9 +426,13 @@ export function summarizeKskLedger(input: {
   fromDate.setDate(fromDate.getDate() - (days - 1))
   const from = fromDate.getTime()
 
+  const groupNames = input.groupNames ?? {}
   const rows = input.entries
     .filter((entry) => entry.purchasedAt >= from)
-    .map((entry) => toKskLedgerRow(entry, now))
+    .map((entry) => ({
+      ...toKskLedgerRow(entry, now),
+      groupName: entry.groupId ? groupNames[entry.groupId] : undefined
+    }))
     .sort((a, b) => compareKskLedgerRows(a, b, input.sort ?? KSK_LEDGER_SORT.PURCHASED))
 
   return {
@@ -383,6 +441,7 @@ export function summarizeKskLedger(input: {
     from,
     rows,
     totals: aggregateKskLedger(rows),
+    byGroup: aggregateKskLedgerByGroup(rows, groupNames),
     totalEntryCount: input.entries.length,
     earliestPurchasedAt:
       input.entries.length > 0
@@ -392,40 +451,38 @@ export function summarizeKskLedger(input: {
 }
 
 /**
- * 把一轮反代观测并入台账。
+ * 把一轮账号库观测并入台账。
  *
- * 纯函数：主进程每轮采样调它，测试直接喂序列验差分口径。返回新的条目数组
- * （不改原数组），以及本轮真正有变化的哈希集合——没变化就不必落盘。
+ * 纯函数：主进程每次账号刷新后调它，测试直接喂序列验口径。返回新的条目数组
+ * （不改原数组），以及本轮是否有变化——没变化就不必落盘。
  *
- * 三件事：
- * 1. 首次见到一条记录时只写基线（增量 0），否则会把它入池前的历史累计算成产出；
- * 2. 累计值回落记 0（kiro-rs 重启后计数从 0 起），交给 `diffLocalAdminCounter`；
- * 3. 本轮没观测到、但之前在池里的记录标下线。
+ * 消耗口径是 **当前额度 − 买入基线**，不是逐轮差分累加：
+ * - 上游的 `usage.current` 本身就是单调累计值，直接减基线就是这个号被用掉的量，
+ *   比逐轮累加少一层误差，也不怕漏采几轮；
+ * - 基线缺失时（老记录、或入库时没拉到 usage）用首次观测值补上，那一轮记 0。
  *
- * 只更新已有条目：陌生哈希（手动推送、自动同步进反代的号）没有采购记录，
+ * 额度按月重置会让 `usage.current` 回落到 0。此时把基线跟着降到新值、并把已经
+ * 攒下的 `usedCredits` 留住：重置前烧掉的量是真花出去的，不能因为上游清零就抹掉。
+ *
+ * 只更新已有条目：陌生账号（手动导入、自动同步进来的号）没有采购记录，
  * 建档只会得到一堆空成本列，见文件头说明。
  */
 export function applyLedgerObservation(input: {
   entries: readonly KskLedgerEntry[]
   observations: readonly KskLedgerObservation[]
   at: number
-  /** 观测集合是否可信到能据此判下线。抓取失败那轮传 false，否则会把全池标成消失。 */
+  /** 观测集合是否可信到能据此判下线。读账号库失败那轮传 false，否则会把全部标成删除。 */
   canRetire?: boolean
 }): { entries: KskLedgerEntry[]; changed: boolean } {
-  const seen = new Map(input.observations.map((item) => [item.keyHash, item]))
+  const seen = new Map(input.observations.map((item) => [item.accountId, item]))
   let changed = false
 
   const entries = input.entries.map((entry) => {
-    const observation = seen.get(entry.keyHash)
+    const observation = seen.get(entry.accountId)
 
     if (!observation) {
-      /*
-       * 没观测到就下线，但只对「进过池且还没下线」的记录动手。
-       * 未进池的记录留在原状：它的状态由 resolveLedgerState 按宽限期算，
-       * 在这里给它盖个 retiredAt 会把「还在重试推送」误报成「已下线」。
-       */
-      if (!input.canRetire) return entry
-      if (entry.firstSeenAt === undefined || entry.retiredAt !== undefined) return entry
+      // 已经下线的不重复标；读取失败那轮一律不动
+      if (!input.canRetire || entry.retiredAt !== undefined) return entry
       changed = true
       return {
         ...entry,
@@ -434,65 +491,47 @@ export function applyLedgerObservation(input: {
       }
     }
 
-    const cursor = entry.cursor
+    const current = observation.currentUsage
+    // 入库时没拉到 usage 的老记录，用首次观测值当基线（那一轮消耗记 0）
+    let baseline = entry.baselineUsage ?? current
+    let carried = entry.carriedCredits ?? 0
+
+    /*
+     * 额度按月重置：上游把 usage.current 打回 0（或一个更小的值）。
+     * 把本周期已烧的量结转进 carried，再把基线降到新值——这样重置前的
+     * 消耗留在账上，重置后的新增也能从 0 正常累加。
+     *
+     * 判据是「相对上一次观测值回落」，不是「低于基线」：`usage.current` 在
+     * 同一周期内单调递增，任何回落都只可能是重置。拿基线当判据会漏掉
+     * 「基线本就是 0、重置后又回到 0」这种情形（0 < 0 为假），那一轮
+     * inPeriod 归零，本周期已烧的量会凭空消失。
+     */
+    const previous = entry.currentUsage
+    if (current !== undefined && previous !== undefined && current < previous) {
+      carried += Math.max(0, previous - (baseline ?? previous))
+      baseline = current
+    }
+
+    const inPeriod =
+      current !== undefined && baseline !== undefined ? Math.max(0, current - baseline) : 0
+
     const next: KskLedgerEntry = {
       ...entry,
-      credentialId: observation.credentialId ?? entry.credentialId,
-      firstSeenAt: entry.firstSeenAt ?? input.at,
       lastSeenAt: input.at,
-      // 号回到池里（重新推送、或用户又建了同一条凭据）就清掉下线标记
+      // 号回到账号库（重新导入同一个号）就清掉下线标记
       retiredAt: undefined,
       retireReason: undefined,
-      successCount:
-        entry.successCount + diffLocalAdminCounter(cursor?.successCount, observation.successCount),
-      failureCount:
-        entry.failureCount + diffLocalAdminCounter(cursor?.failureCount, observation.failureCount),
-      cursor: {
-        // 这一轮没拿到某个字段时保留旧基线，否则下一轮会把整段累计当成新增
-        usedCredits: observation.usedCredits ?? cursor?.usedCredits,
-        inputTokens: observation.inputTokens ?? cursor?.inputTokens,
-        outputTokens: observation.outputTokens ?? cursor?.outputTokens,
-        successCount: observation.successCount,
-        failureCount: observation.failureCount,
-        at: input.at
-      }
-    }
-    if (observation.usedCredits !== undefined) {
-      next.usedCredits += diffLocalAdminCounter(cursor?.usedCredits, observation.usedCredits)
-    }
-    if (observation.inputTokens !== undefined) {
-      next.inputTokens += diffLocalAdminCounter(cursor?.inputTokens, observation.inputTokens)
-    }
-    if (observation.outputTokens !== undefined) {
-      next.outputTokens += diffLocalAdminCounter(cursor?.outputTokens, observation.outputTokens)
+      baselineUsage: baseline,
+      currentUsage: current ?? entry.currentUsage,
+      usageLimit: observation.usageLimit ?? entry.usageLimit,
+      carriedCredits: carried,
+      usedCredits: carried + inPeriod
     }
     changed = true
     return next
   })
 
   return { entries, changed }
-}
-
-/**
- * 把反代统计的凭据视图转成台账观测。
- *
- * 没有 apiKeyHash 的条目（oauth 凭据）一律丢掉：台账只认 ksk，而且没有哈希
- * 就无从与采购记录关联。
- */
-export function toLedgerObservations(
-  credentials: readonly LocalAdminCredentialStats[]
-): KskLedgerObservation[] {
-  return credentials
-    .filter((credential) => Boolean(credential.apiKeyHash))
-    .map((credential) => ({
-      keyHash: credential.apiKeyHash as string,
-      credentialId: credential.id,
-      usedCredits: credential.usedCredits,
-      inputTokens: credential.inputTokens,
-      outputTokens: credential.outputTokens,
-      successCount: credential.successCount,
-      failureCount: credential.failureCount
-    }))
 }
 
 /** 存活时长的人话表达。天/小时/分钟三档，够看不啰嗦。 */

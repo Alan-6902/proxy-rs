@@ -4,12 +4,12 @@
  * 为什么独立于 ksk-hunter.enc：那份加密 store 里 deliveries 只留 200 条、spend 只留
  * 14 天，都会被裁掉，撑不起「这个号一生花了多少钱、产出多少」的长期账。
  *
- * 为什么可以明文落盘：台账里没有 ksk 明文，只有 `sha256(明文)` 与脱敏 key
- * （见 `KskLedgerEntry` 的说明）。哈希不可逆，脱敏 key 只剩首尾，都不构成凭据泄露。
+ * 为什么可以明文落盘：台账里没有 ksk 明文，只有账号 id 与脱敏 key
+ * （见 `KskLedgerEntry` 的说明）。脱敏 key 只剩首尾，不构成凭据泄露。
  * 明文 JSON 反而让用户能直接拿去做别的分析。
  *
  * 为什么不复用 ksk-hunter-report.jsonl：那是只追加的事件流，而台账条目要被反复更新
- * （每轮采样都改累计值），追加式文件重放一年的更新代价太大。
+ * （每次账号刷新都改消耗），追加式文件重放一年的更新代价太大。
  */
 
 import { app } from 'electron'
@@ -19,13 +19,11 @@ import {
   KSK_LEDGER_MAX_ENTRIES,
   KSK_LEDGER_RETIRE_REASON,
   applyLedgerObservation,
-  toLedgerObservations,
-  type KskLedgerCursor,
   type KskLedgerEntry,
+  type KskLedgerObservation,
   type KskLedgerRetireReason
 } from '../../shared/kskLedger'
 import { KSK_HUNTER_CHANNEL, type KskHunterChannel } from '../../shared/kskHunter'
-import type { LocalAdminCredentialStats } from '../../shared/localAdminStats'
 
 const STORE_FILE = 'ksk-hunter-ledger.json'
 
@@ -72,58 +70,41 @@ function readRetireReason(value: unknown): KskLedgerRetireReason | undefined {
   return reasons.includes(text) ? (text as KskLedgerRetireReason) : undefined
 }
 
-function readCursor(value: unknown): KskLedgerCursor | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  const source = value as Record<string, unknown>
-  const at = readOptionalNumber(source.at)
-  if (at === undefined || at <= 0) return undefined
-  return {
-    usedCredits: readOptionalNumber(source.usedCredits),
-    inputTokens: readOptionalNumber(source.inputTokens),
-    outputTokens: readOptionalNumber(source.outputTokens),
-    successCount: readOptionalNumber(source.successCount),
-    failureCount: readOptionalNumber(source.failureCount),
-    at: Math.floor(at)
-  }
-}
-
-/** 纯函数便于测试：keyHash 或 purchasedAt 缺失的条目直接丢，它们没法参与任何聚合。 */
+/** 纯函数便于测试：accountId 或 purchasedAt 缺失的条目直接丢，它们没法参与任何聚合。 */
 export function normalizeKskLedgerEntry(value: unknown): KskLedgerEntry | null {
   if (!value || typeof value !== 'object') return null
   const source = value as Record<string, unknown>
-  const keyHash = readString(source.keyHash)
+  const accountId = readString(source.accountId)
   const purchasedAt = readOptionalNumber(source.purchasedAt)
-  if (!keyHash || purchasedAt === undefined || purchasedAt <= 0) return null
+  if (!accountId || purchasedAt === undefined || purchasedAt <= 0) return null
   return {
-    keyHash,
+    accountId,
     maskedKey: readString(source.maskedKey) || 'ksk_...',
     region: readString(source.region),
     channel: readChannel(source.channel),
     linkId: readString(source.linkId),
     linkName: readString(source.linkName) || '未命名链接',
+    groupId: readOptionalString(source.groupId),
     purchasedAt: Math.floor(purchasedAt),
     costUnit: readOptionalNumber(source.costUnit),
     costCny: readOptionalNumber(source.costCny),
     unitLabel: readOptionalString(source.unitLabel),
-    firstSeenAt: readOptionalNumber(source.firstSeenAt),
     lastSeenAt: readOptionalNumber(source.lastSeenAt),
     retiredAt: readOptionalNumber(source.retiredAt),
     retireReason: readRetireReason(source.retireReason),
-    credentialId: readOptionalString(source.credentialId),
-    usedCredits: readCount(source.usedCredits),
-    inputTokens: readCount(source.inputTokens),
-    outputTokens: readCount(source.outputTokens),
-    successCount: readCount(source.successCount),
-    failureCount: readCount(source.failureCount),
-    cursor: readCursor(source.cursor)
+    baselineUsage: readOptionalNumber(source.baselineUsage),
+    currentUsage: readOptionalNumber(source.currentUsage),
+    usageLimit: readOptionalNumber(source.usageLimit),
+    carriedCredits: readCount(source.carriedCredits),
+    usedCredits: readCount(source.usedCredits)
   }
 }
 
 /**
- * 清洗整份台账：丢掉坏条目、按 keyHash 去重、按采购时间排序、裁到上限。
+ * 清洗整份台账：丢掉坏条目、按 accountId 去重、按采购时间排序、裁到上限。
  *
- * 同一 keyHash 出现两次时保留采购更晚的那条：同一个号被重复买到时（幂等键失效、
- * 或者同一个号在不同站点上架）后一次的记录更接近当前状态。
+ * 同一 accountId 出现两次时保留采购更晚的那条：账号 id 本该唯一，重复只会
+ * 出现在文件被外部改坏的情况，取更晚的更接近当前状态。
  */
 export function normalizeKskLedgerPayload(payload: unknown): KskLedgerEntry[] {
   const source =
@@ -131,15 +112,15 @@ export function normalizeKskLedgerPayload(payload: unknown): KskLedgerEntry[] {
       ? (payload as Partial<PersistedLedger>).entries
       : undefined
   if (!Array.isArray(source)) return []
-  const byHash = new Map<string, KskLedgerEntry>()
+  const byId = new Map<string, KskLedgerEntry>()
   for (const item of source) {
     const entry = normalizeKskLedgerEntry(item)
     if (!entry) continue
-    const existing = byHash.get(entry.keyHash)
+    const existing = byId.get(entry.accountId)
     if (existing && existing.purchasedAt >= entry.purchasedAt) continue
-    byHash.set(entry.keyHash, entry)
+    byId.set(entry.accountId, entry)
   }
-  return [...byHash.values()]
+  return [...byId.values()]
     .sort((a, b) => a.purchasedAt - b.purchasedAt)
     .slice(-KSK_LEDGER_MAX_ENTRIES)
 }
@@ -198,38 +179,36 @@ export async function mutateKskLedger<T>(
 /**
  * 记一笔采购。
  *
- * 同一 keyHash 已在账上时覆盖采购信息、保留已攒的产出：同一个号被重复买到
- * （站点重复上架）时，产出是这个号的，不该因为重新记账被清零。
+ * 同一 accountId 已在账上时覆盖采购信息、保留已攒的消耗：正常不会发生
+ * （账号 id 唯一），但真撞上时消耗是这个号的，不该因为重新记账被清零。
  */
 export async function recordKskLedgerPurchase(entry: KskLedgerEntry): Promise<void> {
   return mutateKskLedger((entries) => {
-    const index = entries.findIndex((item) => item.keyHash === entry.keyHash)
+    const index = entries.findIndex((item) => item.accountId === entry.accountId)
     if (index < 0) return { entries: [...entries, entry], result: undefined }
     const previous = entries[index]
     const next = [...entries]
     next[index] = {
       ...entry,
+      baselineUsage: previous.baselineUsage ?? entry.baselineUsage,
+      currentUsage: previous.currentUsage,
+      usageLimit: previous.usageLimit ?? entry.usageLimit,
+      carriedCredits: previous.carriedCredits,
       usedCredits: previous.usedCredits,
-      inputTokens: previous.inputTokens,
-      outputTokens: previous.outputTokens,
-      successCount: previous.successCount,
-      failureCount: previous.failureCount,
-      firstSeenAt: previous.firstSeenAt,
-      lastSeenAt: previous.lastSeenAt,
-      cursor: previous.cursor
+      lastSeenAt: previous.lastSeenAt
     }
     return { entries: next, result: undefined }
   })
 }
 
-/** 标记一个号下线（验活判死、额度耗尽被清理）。不在账上的哈希静默忽略。 */
+/** 标记一个号下线（验活判死、额度耗尽被清理）。不在账上的 id 静默忽略。 */
 export async function markKskLedgerRetired(input: {
-  keyHash: string
+  accountId: string
   at: number
   reason: KskLedgerRetireReason
 }): Promise<void> {
   return mutateKskLedger((entries) => {
-    const index = entries.findIndex((item) => item.keyHash === input.keyHash)
+    const index = entries.findIndex((item) => item.accountId === input.accountId)
     if (index < 0) return { entries, result: undefined, dirty: false }
     const next = [...entries]
     next[index] = { ...next[index], retiredAt: input.at, retireReason: input.reason }
@@ -238,22 +217,21 @@ export async function markKskLedgerRetired(input: {
 }
 
 /**
- * 把一轮反代观测并入台账。供 LocalAdminStatsManager 每轮采样后调用。
+ * 把一轮账号库观测并入台账。
  *
- * `canRetire` 传 true：调用方只在采集成功后才调这里，凭据列表是可信的完整快照，
- * 缺席就代表号真的不在池里了。
+ * `canRetire` 传 true：调用方只在成功读到账号库时才调这里，account 列表是
+ * 可信的完整快照，缺席就代表号真被删了。
  */
-export async function updateKskLedgerFromCredentials(input: {
-  credentials: readonly LocalAdminCredentialStats[]
+export async function updateKskLedgerFromAccounts(input: {
+  observations: readonly KskLedgerObservation[]
   at: number
 }): Promise<void> {
-  const observations = toLedgerObservations(input.credentials)
   return mutateKskLedger((entries) => {
     // 台账为空时（还没抢到过号）直接跳过，省掉一次无意义的写盘
     if (entries.length === 0) return { entries, result: undefined, dirty: false }
     const applied = applyLedgerObservation({
       entries,
-      observations,
+      observations: input.observations,
       at: input.at,
       canRetire: true
     })

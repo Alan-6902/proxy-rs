@@ -94,7 +94,7 @@ import { hunterLocalDateKey, KSK_HUNTER_CHANNEL_LABEL } from '../shared/kskHunte
 import { loadKskHunterStore } from './kskHunter/configStore'
 import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
 import { KSK_LEDGER_RETIRE_REASON } from '../shared/kskLedger'
-import { markKskLedgerRetired, updateKskLedgerFromCredentials } from './kskHunter/ledgerStore'
+import { markKskLedgerRetired, updateKskLedgerFromAccounts } from './kskHunter/ledgerStore'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
   LocalNotificationService,
@@ -1605,7 +1605,21 @@ function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boole
  */
 async function importProviderKskCredential(
   input: ProviderKskCredential & { groupId?: string; liveness?: KskLivenessOptions }
-): Promise<ProviderKskCredential & { added: boolean; rejected?: boolean }> {
+): Promise<
+  ProviderKskCredential & {
+    added: boolean
+    rejected?: boolean
+    /**
+     * 新建的账号 id 与入库时的额度快照，供抢号台账建档。
+     *
+     * 只在真的新建了账号时才有：added=false（重复号）与 rejected（验活判死）
+     * 两种情况都没有新账号可记。
+     */
+    accountId?: string
+    usageCurrent?: number
+    usageLimit?: number
+  }
+> {
   const duplicate = await accountStoreCoordinator.runExclusive(async () => {
     await initStore()
     const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
@@ -1725,7 +1739,14 @@ async function importProviderKskCredential(
     store!.set('accountData', next)
     lastSavedData = next
     await createBackup(next)
-    return { ...input, added: true }
+    // 带回 id 与额度快照：抢号台账要用它们建档并记下买入基线
+    return {
+      ...input,
+      added: true,
+      accountId: account.id,
+      usageCurrent: totalCurrent,
+      usageLimit: totalLimit
+    }
   })
 }
 
@@ -1954,6 +1975,20 @@ async function cleanupInvalidStoredKskAccounts(
     return removedIds
   })
 
+  // 台账标「验活判死」：与额度耗尽区分开，前者是号废了，后者是号用完了
+  const retiredAt = Date.now()
+  await Promise.all(
+    removedIds.map((accountId) =>
+      markKskLedgerRetired({
+        accountId,
+        at: retiredAt,
+        reason: KSK_LEDGER_RETIRE_REASON.INVALID
+      }).catch((error) => {
+        console.warn('[KskLedger] Failed to mark retired:', error)
+      })
+    )
+  )
+
   result.removed = removedIds.length
   result.removedKeys = removedIds
     .map((accountId) => permanentlyInvalid.get(accountId)?.key)
@@ -2041,27 +2076,29 @@ async function cleanupExhaustedLocalAdminCredentials(
     removal.deleted.map((item) => item.apiKeyHash).filter((hash): hash is string => Boolean(hash))
   )
 
-  /*
-   * 台账标寿终：额度耗尽是号的正常终点，必须与「从 Admin 消失」区分开。
-   * 只标不阻塞——台账是观测数据，写失败不该让清理这条主流程失败。
-   * 放在本地账号清理之前：下面那段可能抛错，顺序反了这一步就常被跳过。
-   */
-  const retiredAt = Date.now()
-  await Promise.all(
-    [...hashes].map((keyHash) =>
-      markKskLedgerRetired({
-        keyHash,
-        at: retiredAt,
-        reason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
-      }).catch((error) => {
-        console.warn('[KskLedger] Failed to mark retired:', error)
-      })
-    )
-  )
-
   try {
     const local = await removeStoredKskAccountsByHash(hashes)
     summary.removedLocalAccounts = local.removedIds.length
+    /*
+     * 台账标寿终：额度耗尽是号的正常终点，必须与「被手动删掉」区分开，
+     * 否则报表里分不清「烧干了」和「不知道为什么没了」。
+     *
+     * 必须放在这里而不是提前：台账按账号 id 关联，而账号 id 只有本地清理
+     * （removeStoredKskAccountsByHash）才知道——Admin 那边只有哈希。
+     * 只标不阻塞：台账是观测数据，写失败不该让清理主流程失败。
+     */
+    const retiredAt = Date.now()
+    await Promise.all(
+      local.removedIds.map((accountId) =>
+        markKskLedgerRetired({
+          accountId,
+          at: retiredAt,
+          reason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
+        }).catch((error) => {
+          console.warn('[KskLedger] Failed to mark retired:', error)
+        })
+      )
+    )
     // 拉黑明文，否则下一轮 Provider 拉取会把同一个号重新入库并推回 Admin
     kskAutomationManager.blacklistKeys(local.removedKeys)
     if (local.removedIds.length > 0) sendKskAutomationAccountsChanged(() => mainWindow)
@@ -2075,6 +2112,36 @@ async function cleanupExhaustedLocalAdminCredentials(
     )
   }
   return summary
+}
+
+/**
+ * 把当前账号库的用量快照并进抢号台账。
+ *
+ * 挂在 save-accounts 之后：那是所有账号变更的汇合点，账号页默认 5 分钟一轮的
+ * 自动刷新（autoRefreshInterval，带 syncInfo）拉完 usage 也会落到那里，
+ * 所以台账不需要自己再开一条轮询。
+ *
+ * 只读账号库、不打网络：usage 是别人已经拉好的，这里只做差分记账。
+ * 台账为空（还没抢到过号）时 updateKskLedgerFromAccounts 会直接跳过写盘。
+ */
+async function syncKskLedgerFromAccounts(): Promise<void> {
+  try {
+    const observations = await accountStoreCoordinator.runExclusive(async () => {
+      await initStore()
+      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
+        accounts?: Record<string, { usage?: { current?: number; limit?: number } }>
+      }
+      return Object.entries(data.accounts ?? {}).map(([accountId, account]) => ({
+        accountId,
+        currentUsage: account.usage?.current,
+        usageLimit: account.usage?.limit
+      }))
+    })
+    await updateKskLedgerFromAccounts({ observations, at: Date.now() })
+  } catch (error) {
+    // 台账是观测数据，更新失败不该影响账号保存这条主流程
+    console.warn('[KskLedger] Failed to sync from accounts:', error)
+  }
 }
 
 async function readKskAccountsForLocalAdmin(
@@ -2144,8 +2211,6 @@ const localAdminStatsManager = new LocalAdminStatsManager({
   },
   fetchImpl: localAdminFetchImpl,
   cleanupExhausted: cleanupExhaustedLocalAdminCredentials,
-  // 每轮采样把观测并进抢号台账：号的存活时长与产出全靠这条链路攒
-  updateLedger: updateKskLedgerFromCredentials,
   notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
   log: (message) => console.log(message)
 })
@@ -2172,7 +2237,13 @@ const kskHunterManager = new KskHunterManager({
     const result = await importProviderKskCredential(input)
     // 验活判死的号必须抛错：抢号器据此把记录标 dead_key 并拒绝推给下游
     if (result.rejected) throw new Error('发消息验活未通过，该号已不可用')
-    return { added: result.added }
+    // accountId 与额度快照透传给台账：前者是关联主键，后者是买入基线
+    return {
+      added: result.added,
+      accountId: result.accountId,
+      usageCurrent: result.usageCurrent,
+      usageLimit: result.usageLimit
+    }
   },
   notifyInStock: ({ linkName, title, region }) => {
     localNotifications.notify(LocalNoticeKind.KskHunterInStock, {
@@ -2186,6 +2257,17 @@ const kskHunterManager = new KskHunterManager({
       bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并推送下游。`
     })
   },
+  // 台账报表要显示分组名；台账只存 id，分组可改名，所以每次现查
+  readGroupNames: async () =>
+    accountStoreCoordinator.runExclusive(async () => {
+      await initStore()
+      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
+        groups?: Record<string, { name?: string }>
+      }
+      return Object.fromEntries(
+        Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
+      )
+    }),
   notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
   notifyBudgetExhausted: ({ scope, channelLabel, spentCny, limitCny }) => {
     // 去重键带本地日期，跨天会再提醒一次。全局是人民币，渠道是原币，所以不硬写 ¥
@@ -3381,6 +3463,8 @@ app.whenReady().then(async () => {
     })
     // 所有账号入口最终都会落到 save-accounts；在锁外合并触发，避免网络请求占住账号存储锁。
     kskAutomationManager.queueLocalAdminSync()
+    // 同理在锁外更新台账：账号页 5 分钟一轮的用量刷新最终也落到这里
+    void syncKskLedgerFromAccounts()
   })
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）

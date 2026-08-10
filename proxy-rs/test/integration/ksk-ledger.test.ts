@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
 /**
- * 抢号台账：观测差分、状态判定、报表聚合，以及 runner 在什么时机记账。
+ * 抢号台账：消耗口径、状态判定、报表聚合，以及 runner 在什么时机记账。
  *
- * runner 侧的落盘走 deps.recordLedgerPurchase / markLedgerRetired 注入内存实现，
+ * runner 侧的落盘走 deps.recordLedgerPurchase 注入内存实现，
  * 既不碰 safeStorage 也不写真实文件。
  */
 
@@ -35,9 +35,7 @@ vi.mock('../../src/main/kskHunter/configStore', async (importOriginal) => {
   }
 })
 
-import { createHash } from 'node:crypto'
 import {
-  KSK_LEDGER_POOL_GRACE_MS,
   KSK_LEDGER_RETIRE_REASON,
   KSK_LEDGER_SORT,
   KSK_LEDGER_STATE,
@@ -46,7 +44,6 @@ import {
   resolveLedgerAliveMs,
   resolveLedgerState,
   summarizeKskLedger,
-  toLedgerObservations,
   type KskLedgerEntry,
   type KskLedgerObservation
 } from '../../src/shared/kskLedger'
@@ -62,7 +59,6 @@ import {
   DEFAULT_KSK_HUNTER_CONFIG,
   type KskHunterConfig
 } from '../../src/shared/kskHunter'
-import type { LocalAdminCredentialStats } from '../../src/shared/localAdminStats'
 import { KskHunterManager } from '../../src/main/kskHunter/hunterRunner'
 import type {
   PersistedKskHunterLink,
@@ -70,15 +66,15 @@ import type {
 } from '../../src/main/kskHunter/configStore'
 
 const KSK_ONE = `ksk_${'a'.repeat(40)}`
-const HASH_ONE = createHash('sha256').update(KSK_ONE).digest('hex')
+const ACCOUNT_ONE = 'acct-1'
 const HOUR = 3_600_000
 
 const NOW = Date.UTC(2026, 6, 15, 12, 0, 0)
 
-/** 一条最小台账记录：买到了、还没进池、没有产出。 */
+/** 一条最小台账记录：买到了、基线已记、还没消耗。 */
 function entry(overrides: Partial<KskLedgerEntry> = {}): KskLedgerEntry {
   return {
-    keyHash: HASH_ONE,
+    accountId: ACCOUNT_ONE,
     maskedKey: 'ksk_...aaaa',
     region: 'us-east-1',
     channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
@@ -88,238 +84,174 @@ function entry(overrides: Partial<KskLedgerEntry> = {}): KskLedgerEntry {
     costUnit: 50,
     costCny: 50,
     unitLabel: '积分',
+    baselineUsage: 0,
+    currentUsage: 0,
+    usageLimit: 10_000,
+    carriedCredits: 0,
     usedCredits: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    successCount: 0,
-    failureCount: 0,
     ...overrides
   }
 }
 
 function observation(overrides: Partial<KskLedgerObservation> = {}): KskLedgerObservation {
-  return {
-    keyHash: HASH_ONE,
-    credentialId: '7',
-    successCount: 0,
-    failureCount: 0,
-    ...overrides
-  }
+  return { accountId: ACCOUNT_ONE, currentUsage: 0, usageLimit: 10_000, ...overrides }
 }
 
-describe('台账 · 观测差分', () => {
-  it('首次观测只建基线，不把入池前的历史累计算成产出', () => {
+describe('台账 · 消耗口径', () => {
+  it('消耗 = 当前额度 − 买入基线，二手号买来已烧的量不算到你账上', () => {
     const { entries, changed } = applyLedgerObservation({
-      entries: [entry()],
-      observations: [observation({ usedCredits: 8456.31, inputTokens: 320_906, successCount: 42 })],
+      // 买来时这个号已经烧了 3000
+      entries: [entry({ baselineUsage: 3_000, currentUsage: 3_000 })],
+      observations: [observation({ currentUsage: 3_450 })],
       at: NOW
     })
     expect(changed).toBe(true)
-    // 关键断言：这个号进池前已经烧了 8456 分，不能算成「我的消耗」
-    expect(entries[0].usedCredits).toBe(0)
-    expect(entries[0].inputTokens).toBe(0)
-    expect(entries[0].successCount).toBe(0)
-    expect(entries[0].firstSeenAt).toBe(NOW)
-    expect(entries[0].cursor?.usedCredits).toBe(8456.31)
-    expect(entries[0].credentialId).toBe('7')
+    // 只算 450，不是 3450
+    expect(entries[0].usedCredits).toBe(450)
+    expect(entries[0].currentUsage).toBe(3_450)
+    expect(entries[0].lastSeenAt).toBe(NOW)
   })
 
-  it('第二轮起按相邻两次观测的差值累加', () => {
+  it('多轮观测按当前值重算，不做逐轮累加（漏采几轮也不丢数）', () => {
     const first = applyLedgerObservation({
       entries: [entry()],
-      observations: [observation({ usedCredits: 100, inputTokens: 1_000, successCount: 5 })],
+      observations: [observation({ currentUsage: 100 })],
       at: NOW
     })
+    // 中间漏了几轮，直接跳到 800
     const second = applyLedgerObservation({
       entries: first.entries,
-      observations: [observation({ usedCredits: 175.5, inputTokens: 4_200, successCount: 9 })],
-      at: NOW + 60_000
+      observations: [observation({ currentUsage: 800 })],
+      at: NOW + 10 * 60_000
     })
-    expect(second.entries[0].usedCredits).toBe(75.5)
-    expect(second.entries[0].inputTokens).toBe(3_200)
-    expect(second.entries[0].successCount).toBe(4)
-    expect(second.entries[0].lastSeenAt).toBe(NOW + 60_000)
+    expect(second.entries[0].usedCredits).toBe(800)
   })
 
-  it('累计值回落记 0 而不是负数（kiro-rs 重启后计数从 0 起）', () => {
-    const first = applyLedgerObservation({
-      entries: [entry()],
-      observations: [observation({ usedCredits: 500, successCount: 30 })],
-      at: NOW
-    })
-    const restarted = applyLedgerObservation({
-      entries: first.entries,
-      observations: [observation({ usedCredits: 0, successCount: 0 })],
-      at: NOW + 60_000
-    })
-    expect(restarted.entries[0].usedCredits).toBe(0)
-    expect(restarted.entries[0].successCount).toBe(0)
-    // 基线跟着降下来，重启后新产生的量下一轮能正常累加
-    expect(restarted.entries[0].cursor?.usedCredits).toBe(0)
-
-    const after = applyLedgerObservation({
-      entries: restarted.entries,
-      observations: [observation({ usedCredits: 12, successCount: 3 })],
-      at: NOW + 120_000
-    })
-    expect(after.entries[0].usedCredits).toBe(12)
-  })
-
-  it('本轮缺某个字段时保留旧基线，不把整段累计当成新增', () => {
-    const first = applyLedgerObservation({
-      entries: [entry()],
-      observations: [observation({ usedCredits: 200 })],
-      at: NOW
-    })
-    // 这一轮没查到用量（balance 拉失败），usedCredits 缺失
-    const missing = applyLedgerObservation({
-      entries: first.entries,
-      observations: [observation({ usedCredits: undefined })],
-      at: NOW + 60_000
-    })
-    expect(missing.entries[0].cursor?.usedCredits).toBe(200)
-
-    const back = applyLedgerObservation({
-      entries: missing.entries,
-      observations: [observation({ usedCredits: 230 })],
-      at: NOW + 120_000
-    })
-    expect(back.entries[0].usedCredits).toBe(30)
-  })
-
-  it('进过池的号本轮没观测到就标下线，未进池的保持原状', () => {
-    const pooled = entry({ firstSeenAt: NOW - 5 * HOUR, lastSeenAt: NOW - 60_000 })
-    const notPooled = entry({ keyHash: 'hash-never' })
+  it('基线缺失的老记录用首次观测值补上，那一轮消耗记 0', () => {
     const { entries } = applyLedgerObservation({
-      entries: [pooled, notPooled],
-      observations: [],
-      at: NOW,
-      canRetire: true
+      entries: [entry({ baselineUsage: undefined, currentUsage: undefined })],
+      observations: [observation({ currentUsage: 5_000 })],
+      at: NOW
     })
-    expect(entries[0].retiredAt).toBe(NOW)
-    expect(entries[0].retireReason).toBe(KSK_LEDGER_RETIRE_REASON.VANISHED)
-    // 还在推送重试队列里的号不能被误报成「已下线」
-    expect(entries[1].retiredAt).toBeUndefined()
+    expect(entries[0].baselineUsage).toBe(5_000)
+    expect(entries[0].usedCredits).toBe(0)
   })
 
-  it('canRetire 为 false 时不判下线（抓取失败那轮凭据列表是空的）', () => {
-    const pooled = entry({ firstSeenAt: NOW - 5 * HOUR })
-    const { entries, changed } = applyLedgerObservation({
-      entries: [pooled],
+  it('额度按月重置时结转已烧的量，重置后从 0 重新累加', () => {
+    // 本周期已烧到 8000
+    const before = applyLedgerObservation({
+      entries: [entry()],
+      observations: [observation({ currentUsage: 8_000 })],
+      at: NOW
+    })
+    expect(before.entries[0].usedCredits).toBe(8_000)
+
+    // 跨月：上游把 current 打回 0
+    const reset = applyLedgerObservation({
+      entries: before.entries,
+      observations: [observation({ currentUsage: 0 })],
+      at: NOW + HOUR
+    })
+    // 重置前烧掉的 8000 是真花出去的，必须留在账上
+    expect(reset.entries[0].carriedCredits).toBe(8_000)
+    expect(reset.entries[0].usedCredits).toBe(8_000)
+    expect(reset.entries[0].baselineUsage).toBe(0)
+
+    // 新周期又烧了 120，要叠加在结转量之上
+    const after = applyLedgerObservation({
+      entries: reset.entries,
+      observations: [observation({ currentUsage: 120 })],
+      at: NOW + 2 * HOUR
+    })
+    expect(after.entries[0].usedCredits).toBe(8_120)
+  })
+
+  it('账号本轮不在库里就标下线，读取失败那轮（canRetire=false）不动', () => {
+    const alive = entry()
+    const stale = applyLedgerObservation({
+      entries: [alive],
       observations: [],
       at: NOW,
       canRetire: false
     })
-    expect(entries[0].retiredAt).toBeUndefined()
+    expect(stale.entries[0].retiredAt).toBeUndefined()
+    expect(stale.changed).toBe(false)
+
+    const gone = applyLedgerObservation({
+      entries: [alive],
+      observations: [],
+      at: NOW,
+      canRetire: true
+    })
+    expect(gone.entries[0].retiredAt).toBe(NOW)
+    expect(gone.entries[0].retireReason).toBe(KSK_LEDGER_RETIRE_REASON.VANISHED)
+  })
+
+  it('已下线的记录不被重复标记，retireReason 保持原值', () => {
+    const retired = entry({
+      retiredAt: NOW - HOUR,
+      retireReason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
+    })
+    const { entries, changed } = applyLedgerObservation({
+      entries: [retired],
+      observations: [],
+      at: NOW,
+      canRetire: true
+    })
+    expect(entries[0].retiredAt).toBe(NOW - HOUR)
+    expect(entries[0].retireReason).toBe(KSK_LEDGER_RETIRE_REASON.EXHAUSTED)
     expect(changed).toBe(false)
   })
 
-  it('号重新回到池里时清掉下线标记', () => {
+  it('号重新回到账号库时清掉下线标记，但保留已攒的消耗', () => {
     const retired = entry({
-      firstSeenAt: NOW - 5 * HOUR,
+      usedCredits: 500,
+      currentUsage: 500,
       retiredAt: NOW - HOUR,
       retireReason: KSK_LEDGER_RETIRE_REASON.VANISHED
     })
     const { entries } = applyLedgerObservation({
       entries: [retired],
-      observations: [observation()],
+      observations: [observation({ currentUsage: 600 })],
       at: NOW,
       canRetire: true
     })
     expect(entries[0].retiredAt).toBeUndefined()
     expect(entries[0].retireReason).toBeUndefined()
-    // 首次进池时刻不该被覆盖，否则存活时长会被重置
-    expect(entries[0].firstSeenAt).toBe(NOW - 5 * HOUR)
+    expect(entries[0].usedCredits).toBe(600)
   })
 
-  it('不为陌生哈希建档（只收抢号买来的号）', () => {
+  it('不为陌生账号建档（只收抢号买来的号）', () => {
     const { entries } = applyLedgerObservation({
       entries: [],
-      observations: [observation({ keyHash: 'hash-of-manually-pushed' })],
+      observations: [observation({ accountId: 'manually-imported' })],
       at: NOW,
       canRetire: true
     })
     expect(entries).toHaveLength(0)
   })
-
-  it('凭据视图转观测时丢掉没有 apiKeyHash 的 oauth 条目', () => {
-    const credentials: LocalAdminCredentialStats[] = [
-      {
-        id: '1',
-        apiKeyHash: HASH_ONE,
-        priority: 0,
-        disabled: false,
-        isCurrent: true,
-        successCount: 3,
-        failureCount: 0,
-        refreshFailureCount: 0,
-        usedCredits: 12.5,
-        alerts: []
-      },
-      {
-        id: '2',
-        priority: 0,
-        disabled: false,
-        isCurrent: false,
-        successCount: 9,
-        failureCount: 1,
-        refreshFailureCount: 0,
-        alerts: []
-      }
-    ]
-    const observations = toLedgerObservations(credentials)
-    expect(observations).toHaveLength(1)
-    expect(observations[0]).toMatchObject({ keyHash: HASH_ONE, credentialId: '1', successCount: 3 })
-  })
 })
 
 describe('台账 · 状态与存活时长', () => {
-  it('刚买到还没被观测到时是「待确认」，超过宽限期才算「未进池」', () => {
-    const fresh = entry({ purchasedAt: NOW - 60_000 })
-    expect(resolveLedgerState(fresh, NOW)).toBe(KSK_LEDGER_STATE.PENDING)
-
-    const stale = entry({ purchasedAt: NOW - KSK_LEDGER_POOL_GRACE_MS - 1 })
-    expect(resolveLedgerState(stale, NOW)).toBe(KSK_LEDGER_STATE.NEVER_POOLED)
+  it('没下线时刻就是「在用」', () => {
+    expect(resolveLedgerState(entry())).toBe(KSK_LEDGER_STATE.ALIVE)
   })
 
-  it('验活判死且从未进池的是「买到即废」，进过池再判死的算「已下线」', () => {
+  it('验活判死单独成一档「买到即废」，额度耗尽算「已下线」', () => {
     const doa = entry({ retiredAt: NOW, retireReason: KSK_LEDGER_RETIRE_REASON.INVALID })
-    expect(resolveLedgerState(doa, NOW)).toBe(KSK_LEDGER_STATE.DEAD_ON_ARRIVAL)
+    expect(resolveLedgerState(doa)).toBe(KSK_LEDGER_STATE.DEAD_ON_ARRIVAL)
 
-    const bannedLater = entry({
-      firstSeenAt: NOW - 5 * HOUR,
-      retiredAt: NOW,
-      retireReason: KSK_LEDGER_RETIRE_REASON.INVALID
-    })
-    expect(resolveLedgerState(bannedLater, NOW)).toBe(KSK_LEDGER_STATE.RETIRED)
+    const exhausted = entry({ retiredAt: NOW, retireReason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED })
+    expect(resolveLedgerState(exhausted)).toBe(KSK_LEDGER_STATE.RETIRED)
   })
 
-  it('额度耗尽被清理的号是「已下线」', () => {
-    const exhausted = entry({
-      firstSeenAt: NOW - 20 * HOUR,
-      retiredAt: NOW,
-      retireReason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
-    })
-    expect(resolveLedgerState(exhausted, NOW)).toBe(KSK_LEDGER_STATE.RETIRED)
+  it('存活时长从买入算到下线', () => {
+    const row = entry({ purchasedAt: NOW - 10 * HOUR, retiredAt: NOW - 2 * HOUR })
+    expect(resolveLedgerAliveMs(row, NOW)).toBe(8 * HOUR)
   })
 
-  it('存活时长从进池算起，不含买来放着没推进去的那段', () => {
-    const row = entry({
-      purchasedAt: NOW - 10 * HOUR,
-      // 买了 10 小时，但 8 小时前才进池
-      firstSeenAt: NOW - 8 * HOUR,
-      retiredAt: NOW - 2 * HOUR
-    })
-    expect(resolveLedgerAliveMs(row, NOW)).toBe(6 * HOUR)
-  })
-
-  it('仍在池的号算到现在', () => {
-    const alive = entry({ firstSeenAt: NOW - 3 * HOUR, lastSeenAt: NOW - 60_000 })
-    expect(resolveLedgerAliveMs(alive, NOW)).toBe(3 * HOUR)
-  })
-
-  it('没进池的号存活时长是 0', () => {
-    expect(resolveLedgerAliveMs(entry(), NOW)).toBe(0)
+  it('仍在用的号算到现在', () => {
+    expect(resolveLedgerAliveMs(entry({ purchasedAt: NOW - 3 * HOUR }), NOW)).toBe(3 * HOUR)
   })
 
   it('时长格式化按分钟/小时/天三档', () => {
@@ -334,20 +266,17 @@ describe('台账 · 报表聚合', () => {
   it('按 purchasedAt 过滤窗口，并算出每积分单价与平均寿命', () => {
     const report = summarizeKskLedger({
       entries: [
-        // 窗口内：买 50 分，烧出 5000 额度，活了 8 小时
+        // 窗口内：买 50 元，下游烧了 5000，活了 8 小时
         entry({
           purchasedAt: NOW - 2 * 24 * HOUR,
           costCny: 50,
           usedCredits: 5_000,
-          firstSeenAt: NOW - 2 * 24 * HOUR,
+          currentUsage: 5_000,
           retiredAt: NOW - 2 * 24 * HOUR + 8 * HOUR,
-          retireReason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED,
-          inputTokens: 120_000,
-          outputTokens: 30_000,
-          successCount: 90
+          retireReason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
         }),
         // 窗口外：60 天前买的，不该进这次汇总
-        entry({ keyHash: 'hash-old', purchasedAt: NOW - 60 * 24 * HOUR, costCny: 999 })
+        entry({ accountId: 'acct-old', purchasedAt: NOW - 60 * 24 * HOUR, costCny: 999 })
       ],
       days: 7,
       now: NOW
@@ -358,19 +287,19 @@ describe('台账 · 报表聚合', () => {
     expect(report.totals.retired).toBe(1)
     expect(report.totals.avgAliveMs).toBe(8 * HOUR)
     expect(report.totals.cnyPerCredit).toBeCloseTo(0.01, 6)
-    expect(report.rows[0].cnyPerCredit).toBeCloseTo(0.01, 6)
     expect(report.rows[0].creditsPerHour).toBeCloseTo(625, 6)
+    expect(report.rows[0].usagePercent).toBeCloseTo(0.5, 6)
     // 全量历史条数不受窗口限制
     expect(report.totalEntryCount).toBe(2)
     expect(report.earliestPurchasedAt).toBe(NOW - 60 * 24 * HOUR)
   })
 
-  it('白买的号计入 wasted，但不污染均价的分母', () => {
+  it('买到即废的号计入 wasted，且照样算进每分单价的分子', () => {
     const report = summarizeKskLedger({
       entries: [
-        entry({ costCny: 50, usedCredits: 1_000, firstSeenAt: NOW - HOUR }),
+        entry({ costCny: 50, usedCredits: 1_000 }),
         entry({
-          keyHash: 'hash-doa',
+          accountId: 'dead:xyz',
           costCny: 50,
           retiredAt: NOW - HOUR,
           retireReason: KSK_LEDGER_RETIRE_REASON.INVALID
@@ -386,7 +315,22 @@ describe('台账 · 报表聚合', () => {
     expect(report.totals.cnyPerCredit).toBeCloseTo(0.1, 6)
   })
 
-  it('没有产出时每积分单价为 undefined 而不是 Infinity', () => {
+  it('平均服役时长的分母是所有号，不是只算已下线的', () => {
+    // 抢到的号默认不删，只算已下线的会让这个值长期是 undefined
+    const report = summarizeKskLedger({
+      entries: [
+        entry({ accountId: 'a-1', purchasedAt: NOW - 10 * HOUR }),
+        entry({ accountId: 'a-2', purchasedAt: NOW - 2 * HOUR })
+      ],
+      days: 7,
+      now: NOW
+    })
+    expect(report.totals.retired).toBe(0)
+    expect(report.totals.alive).toBe(2)
+    expect(report.totals.avgAliveMs).toBe(6 * HOUR)
+  })
+
+  it('没有消耗时每积分单价为 undefined 而不是 Infinity', () => {
     const report = summarizeKskLedger({
       entries: [entry({ costCny: 50, usedCredits: 0 })],
       days: 7,
@@ -399,59 +343,81 @@ describe('台账 · 报表聚合', () => {
   it('按每分单价排序时，算不出单价的号排最后', () => {
     const report = summarizeKskLedger({
       entries: [
-        entry({ keyHash: 'h-none', costCny: 50, usedCredits: 0 }),
-        entry({ keyHash: 'h-cheap', costCny: 50, usedCredits: 10_000 }),
-        entry({ keyHash: 'h-dear', costCny: 50, usedCredits: 1_000 })
+        entry({ accountId: 'a-none', costCny: 50, usedCredits: 0 }),
+        entry({ accountId: 'a-cheap', costCny: 50, usedCredits: 10_000 }),
+        entry({ accountId: 'a-dear', costCny: 50, usedCredits: 1_000 })
       ],
       days: 7,
       sort: KSK_LEDGER_SORT.EFFICIENCY,
       now: NOW
     })
-    expect(report.rows.map((row) => row.keyHash)).toEqual(['h-cheap', 'h-dear', 'h-none'])
+    expect(report.rows.map((row) => row.accountId)).toEqual(['a-cheap', 'a-dear', 'a-none'])
   })
+})
 
-  it('存活不足一分钟时不算产出速率（样本太少没有意义）', () => {
+describe('台账 · 按分组汇总', () => {
+  it('按分组聚合花费与消耗，分组名按当前分组表查，按花费降序', () => {
     const report = summarizeKskLedger({
       entries: [
-        entry({
-          firstSeenAt: NOW - 30_000,
-          usedCredits: 5,
-          costCny: 50
-        })
+        entry({ accountId: 'a-1', groupId: 'g-cheap', costCny: 30, usedCredits: 6_000 }),
+        entry({ accountId: 'a-2', groupId: 'g-cheap', costCny: 30, usedCredits: 4_000 }),
+        entry({ accountId: 'a-3', groupId: 'g-dear', costCny: 100, usedCredits: 2_000 })
       ],
       days: 7,
+      groupNames: { 'g-cheap': '下游 A', 'g-dear': '下游 B' },
       now: NOW
     })
-    expect(report.rows[0].creditsPerHour).toBeUndefined()
+    // 花费多的排前面
+    expect(report.byGroup.map((group) => group.groupName)).toEqual(['下游 B', '下游 A'])
+    const cheap = report.byGroup.find((group) => group.groupId === 'g-cheap')
+    expect(cheap).toMatchObject({ entries: 2, alive: 2, spendCny: 60, usedCredits: 10_000 })
+    expect(cheap?.cnyPerCredit).toBeCloseTo(0.006, 6)
+    // 单号行上也带分组名，便于明细表直接展示
+    expect(report.rows.find((row) => row.accountId === 'a-3')?.groupName).toBe('下游 B')
+  })
+
+  it('未分组的号归到「未分组」，分组被删掉时标注出来而不是留空白', () => {
+    const report = summarizeKskLedger({
+      entries: [
+        entry({ accountId: 'a-1', groupId: undefined, costCny: 50 }),
+        entry({ accountId: 'a-2', groupId: 'g-gone', costCny: 10 })
+      ],
+      days: 7,
+      groupNames: {},
+      now: NOW
+    })
+    const names = report.byGroup.map((group) => group.groupName)
+    expect(names).toContain('未分组')
+    expect(names.some((name) => name.startsWith('已删除的分组'))).toBe(true)
   })
 })
 
 describe('台账 · 持久化清洗', () => {
-  it('缺 keyHash 或 purchasedAt 的条目直接丢', () => {
+  it('缺 accountId 或 purchasedAt 的条目直接丢', () => {
     expect(normalizeKskLedgerEntry({ purchasedAt: NOW })).toBeNull()
-    expect(normalizeKskLedgerEntry({ keyHash: HASH_ONE })).toBeNull()
-    expect(normalizeKskLedgerEntry({ keyHash: HASH_ONE, purchasedAt: 0 })).toBeNull()
+    expect(normalizeKskLedgerEntry({ accountId: ACCOUNT_ONE })).toBeNull()
+    expect(normalizeKskLedgerEntry({ accountId: ACCOUNT_ONE, purchasedAt: 0 })).toBeNull()
   })
 
   it('累计量的负数按 0 读入，渠道认不出时回落而不是丢整条', () => {
     const parsed = normalizeKskLedgerEntry({
-      keyHash: HASH_ONE,
+      accountId: ACCOUNT_ONE,
       purchasedAt: NOW,
       channel: 'kiro_from_the_future',
       usedCredits: -5,
-      successCount: 3
+      baselineUsage: 120
     })
     expect(parsed?.usedCredits).toBe(0)
-    expect(parsed?.successCount).toBe(3)
+    expect(parsed?.baselineUsage).toBe(120)
     expect(parsed?.channel).toBe(KSK_HUNTER_CHANNEL.KIRO_MARKET)
   })
 
-  it('同一 keyHash 重复出现时保留采购更晚的那条', () => {
+  it('同一 accountId 重复出现时保留采购更晚的那条', () => {
     const entries = normalizeKskLedgerPayload({
       version: 1,
       entries: [
-        { keyHash: HASH_ONE, purchasedAt: NOW - HOUR, costCny: 30 },
-        { keyHash: HASH_ONE, purchasedAt: NOW, costCny: 50 }
+        { accountId: ACCOUNT_ONE, purchasedAt: NOW - HOUR, costCny: 30 },
+        { accountId: ACCOUNT_ONE, purchasedAt: NOW, costCny: 50 }
       ]
     })
     expect(entries).toHaveLength(1)
@@ -520,13 +486,18 @@ describe('台账 · runner 记账时机', () => {
   function makeDeps(
     store: PersistedKskHunterStore,
     ledger: KskLedgerEntry[],
-    retired: { keyHash: string; reason: string }[],
     overrides: Partial<HunterDeps> = {}
   ): HunterDeps {
     return {
       readStore: async () => ({ ...store, deliveries: deliveryStore.records as never }),
       fetchImpl: async () => jsonResponse({ code: 0, data: [] }),
-      importCredential: async () => ({ added: true }),
+      // 默认：入库成功并回带账号 id 与买入时的额度基线
+      importCredential: async () => ({
+        added: true,
+        accountId: ACCOUNT_ONE,
+        usageCurrent: 3_000,
+        usageLimit: 10_000
+      }),
       notifyInStock: vi.fn(),
       notifyOrdered: vi.fn(),
       notifyAccountsChanged: vi.fn(),
@@ -535,12 +506,9 @@ describe('台账 · runner 记账时机', () => {
       appendReportEvent: async () => {},
       readReportEvents: async () => [],
       recordLedgerPurchase: async (item) => {
-        const index = ledger.findIndex((existing) => existing.keyHash === item.keyHash)
+        const index = ledger.findIndex((existing) => existing.accountId === item.accountId)
         if (index < 0) ledger.push(item)
         else ledger[index] = item
-      },
-      markLedgerRetired: async ({ keyHash, reason }) => {
-        retired.push({ keyHash, reason })
       },
       readLedger: async () => ledger,
       log: vi.fn(),
@@ -548,10 +516,9 @@ describe('台账 · runner 记账时机', () => {
     }
   }
 
-  it('下单成功后按 sha256(ksk) 建档，带上成本、渠道与脱敏 key，不落明文', async () => {
+  it('入库成功后按账号 id 建档，把入库时的额度记成买入基线', async () => {
     deliveryStore.reset()
     const ledger: KskLedgerEntry[] = []
-    const retired: { keyHash: string; reason: string }[] = []
     const store = hunterStore([hunterLink({ channel: KSK_HUNTER_CHANNEL.KIRO_DROP })], {
       billing: {
         ...DEFAULT_KSK_HUNTER_CONFIG.billing,
@@ -563,37 +530,66 @@ describe('台账 · runner 记账时机', () => {
         }
       }
     })
-    const manager = new KskHunterManager(
-      makeDeps(store, ledger, retired, { fetchImpl: inStockFetch(120) })
-    )
+    const manager = new KskHunterManager(makeDeps(store, ledger, { fetchImpl: inStockFetch(120) }))
 
     await manager.runNow()
     manager.stop()
 
     expect(ledger).toHaveLength(1)
     expect(ledger[0]).toMatchObject({
-      keyHash: HASH_ONE,
+      accountId: ACCOUNT_ONE,
       channel: KSK_HUNTER_CHANNEL.KIRO_DROP,
       region: 'eu-central-1',
       costUnit: 120,
       costCny: 30,
       unitLabel: 'CRD',
       linkId: 'link-1',
+      // 买来时这个号已经烧了 3000，记进基线
+      baselineUsage: 3_000,
+      usageLimit: 10_000,
       usedCredits: 0
     })
     // 台账文件是明文 JSON，出现 ksk 明文就是凭据泄露
     expect(JSON.stringify(ledger)).not.toContain(KSK_ONE)
     expect(ledger[0].maskedKey).toBe('ksk_...aaaa')
-    expect(retired).toHaveLength(0)
   })
 
-  it('验活失败时立即标「买到即废」，不让它挂在待确认等宽限期', async () => {
+  it('把抢号配置的目标分组记进台账，报表才能按分组汇总', async () => {
     deliveryStore.reset()
     const ledger: KskLedgerEntry[] = []
-    const retired: { keyHash: string; reason: string }[] = []
-    const store = hunterStore([hunterLink()])
     const manager = new KskHunterManager(
-      makeDeps(store, ledger, retired, {
+      makeDeps(hunterStore([hunterLink()], { targetGroupId: 'group-downstream-a' }), ledger, {
+        fetchImpl: inStockFetch(10)
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(ledger[0].groupId).toBe('group-downstream-a')
+  })
+
+  it('重复号（没有新账号 id）不建档，避免留下一行没有主键的空数据', async () => {
+    deliveryStore.reset()
+    const ledger: KskLedgerEntry[] = []
+    const manager = new KskHunterManager(
+      makeDeps(hunterStore([hunterLink()]), ledger, {
+        fetchImpl: inStockFetch(10),
+        importCredential: async () => ({ added: false })
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(ledger).toHaveLength(0)
+  })
+
+  it('验活失败仍记这笔采购（钱花了），并立即标「买到即废」', async () => {
+    deliveryStore.reset()
+    const ledger: KskLedgerEntry[] = []
+    const manager = new KskHunterManager(
+      makeDeps(hunterStore([hunterLink()]), ledger, {
         fetchImpl: inStockFetch(10),
         importCredential: async () => {
           throw new Error('AccountSuspendedException')
@@ -604,20 +600,36 @@ describe('台账 · runner 记账时机', () => {
     await manager.runNow()
     manager.stop()
 
-    // 钱已经花出去了，采购记录必须留着
     expect(ledger).toHaveLength(1)
     expect(ledger[0].costCny).toBe(10)
-    expect(retired).toEqual([{ keyHash: HASH_ONE, reason: KSK_LEDGER_RETIRE_REASON.INVALID }])
+    expect(ledger[0].retireReason).toBe(KSK_LEDGER_RETIRE_REASON.INVALID)
+    expect(resolveLedgerState(ledger[0])).toBe(KSK_LEDGER_STATE.DEAD_ON_ARRIVAL)
+    // 合成主键永远匹配不上真实账号，所以它不会被观测复活
+    expect(ledger[0].accountId.startsWith('dead:')).toBe(true)
     expect(deliveryStore.records[0].state).toBe(KSK_HUNTER_DELIVERY_STATE.DEAD_KEY)
+  })
+
+  it('买到即废的记录不会被后续账号观测复活', async () => {
+    const dead = entry({
+      accountId: 'dead:delivery-1',
+      retiredAt: NOW,
+      retireReason: KSK_LEDGER_RETIRE_REASON.INVALID
+    })
+    const { entries, changed } = applyLedgerObservation({
+      entries: [dead],
+      observations: [observation({ accountId: ACCOUNT_ONE })],
+      at: NOW + HOUR,
+      canRetire: true
+    })
+    expect(entries[0].retiredAt).toBe(NOW)
+    expect(changed).toBe(false)
   })
 
   it('台账写盘失败不影响抢号主流程（号已经买到了）', async () => {
     deliveryStore.reset()
     const ledger: KskLedgerEntry[] = []
-    const retired: { keyHash: string; reason: string }[] = []
-    const store = hunterStore([hunterLink()])
     const manager = new KskHunterManager(
-      makeDeps(store, ledger, retired, {
+      makeDeps(hunterStore([hunterLink()]), ledger, {
         fetchImpl: inStockFetch(10),
         recordLedgerPurchase: async () => {
           throw new Error('ENOSPC: no space left on device')
@@ -636,7 +648,7 @@ describe('台账 · runner 记账时机', () => {
     const ledger: KskLedgerEntry[] = [
       entry({ purchasedAt: Date.now() - HOUR, costCny: 50, usedCredits: 2_500 })
     ]
-    const manager = new KskHunterManager(makeDeps(hunterStore([]), ledger, []))
+    const manager = new KskHunterManager(makeDeps(hunterStore([]), ledger))
 
     const report = await manager.ledgerReport(7)
     manager.stop()

@@ -53,8 +53,7 @@ import {
   type KskLedgerReport,
   type KskLedgerSort
 } from '../../shared/kskLedger'
-import { loadKskLedger, markKskLedgerRetired, recordKskLedgerPurchase } from './ledgerStore'
-import { sha256Hex } from '../kskAutomation/localAdminClient'
+import { loadKskLedger, recordKskLedgerPurchase } from './ledgerStore'
 import {
   appendKskHunterDelivery,
   appendKskHunterSpend,
@@ -82,6 +81,17 @@ import { HunterBalanceCache } from './balanceClient'
 /** 抢到号后的入库结果。 */
 export interface HunterImportResult {
   added: boolean
+  /**
+   * 新建的账号 id。台账按它关联，缺失（重复号）时不建档。
+   */
+  accountId?: string
+  /**
+   * 入库时拉到的额度快照，作为「买入时基线」。
+   *
+   * 二手号买来可能已经烧掉一部分，记进基线才不会把前主的消耗算成下游的产出。
+   */
+  usageCurrent?: number
+  usageLimit?: number
 }
 
 export interface KskHunterDeps {
@@ -124,12 +134,14 @@ export interface KskHunterDeps {
    * 与报表事件流分开注入：事件流只追加，台账要反复更新同一条记录的累计值。
    */
   recordLedgerPurchase?: (entry: KskLedgerEntry) => Promise<void>
-  markLedgerRetired?: (input: {
-    keyHash: string
-    at: number
-    reason: (typeof KSK_LEDGER_RETIRE_REASON)[keyof typeof KSK_LEDGER_RETIRE_REASON]
-  }) => Promise<void>
   readLedger?: () => Promise<KskLedgerEntry[]>
+  /**
+   * 读账号分组的 id → 名字表，供台账报表展示分组名。
+   *
+   * 做成注入是因为分组归本地账号库管（index.ts 的 store），把它拖进抢号模块
+   * 会让这个模块在测试里必须连带 mock 整个账号存储。不注入时报表只显示 id。
+   */
+  readGroupNames?: () => Promise<Record<string, string>>
   log?: (message: string) => void
 }
 
@@ -223,10 +235,12 @@ export class KskHunterManager {
     })
   }
 
-  /** 单号台账报表：成本、存活时长、经本机反代的产出。 */
+  /** 单号台账报表：成本、存活时长、下游消耗。 */
   async ledgerReport(days?: number, sort?: KskLedgerSort): Promise<KskLedgerReport> {
     const read = this.deps.readLedger ?? loadKskLedger
-    return summarizeKskLedger({ entries: await read(), days, sort })
+    // 分组名要现查：台账只存 id，分组随时可能改名或被删
+    const groupNames = await this.deps.readGroupNames?.()
+    return summarizeKskLedger({ entries: await read(), days, sort, groupNames })
   }
 
   /**
@@ -239,17 +253,6 @@ export class KskHunterManager {
     const record = this.deps.recordLedgerPurchase ?? recordKskLedgerPurchase
     void record(entry).catch((error) => {
       this.log(`台账写入失败：${error instanceof Error ? error.message : String(error)}`)
-    })
-  }
-
-  /** 标记台账里某个号下线。同样吞掉写盘错误。 */
-  private markLedgerRetired(
-    keyHash: string,
-    reason: (typeof KSK_LEDGER_RETIRE_REASON)[keyof typeof KSK_LEDGER_RETIRE_REASON]
-  ): void {
-    const mark = this.deps.markLedgerRetired ?? markKskLedgerRetired
-    void mark({ keyHash, at: Date.now(), reason }).catch((error) => {
-      this.log(`台账下线标记失败：${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -733,32 +736,26 @@ export class KskHunterManager {
       costCny: budget.costCny,
       unitLabel
     })
+    if (store.config.notifyOnAutoOrder) {
+      this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region })
+    }
 
     /*
-     * 台账建档。keyHash 用 sha256(明文) —— 与 Admin 的 apiKeyHash 同一算法，
-     * 反代采样时靠它把这条采购和后续消耗焊在一起，台账文件里不留明文。
+     * 台账建档的共同字段。真正落账要等验活入库拿到账号 id——台账按账号 id 关联，
+     * 号还没进账号库时没有可用的主键。
      */
-    const keyHash = sha256Hex(credential.key)
-    this.recordLedgerPurchase({
-      keyHash,
+    const purchase = {
       maskedKey,
       region: credential.region,
       channel: link.channel,
       linkId: link.id,
       linkName: link.name,
+      // 抢到的号会落进这个分组；不同分组通常对应不同下游，报表按它汇总
+      groupId: store.config.targetGroupId,
       purchasedAt: now,
       costUnit: budget.costUnit,
       costCny: budget.costCny,
-      unitLabel,
-      usedCredits: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      successCount: 0,
-      failureCount: 0
-    })
-
-    if (store.config.notifyOnAutoOrder) {
-      this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region })
+      unitLabel
     }
 
     // 验活兼入库：验活失败的号不推给下游，但记录保留供人工处理
@@ -768,6 +765,24 @@ export class KskHunterManager {
         groupId: store.config.targetGroupId
       })
       if (result.added) this.deps.notifyAccountsChanged()
+      /*
+       * 建档：入库时拉到的 usage 就是**买入时的额度基线**。二手号买来可能已经烧掉
+       * 一部分，记进基线才不会把前主的消耗算成下游的产出。
+       *
+       * accountId 缺失时不记（重复号，或旧版 importCredential 不回这个字段）：
+       * 没有主键的条目参与不了任何聚合，记了只会变成一行空数据。
+       */
+      if (result.accountId) {
+        this.recordLedgerPurchase({
+          ...purchase,
+          accountId: result.accountId,
+          baselineUsage: result.usageCurrent,
+          currentUsage: result.usageCurrent,
+          usageLimit: result.usageLimit,
+          carriedCredits: 0,
+          usedCredits: 0
+        })
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await patchKskHunterDelivery(delivery.id, {
@@ -775,8 +790,19 @@ export class KskHunterManager {
         lastError: `验活失败：${message}`
       })
       this.recordReportEvent(HUNTER_REPORT_EVENT.DEAD_KEY, link, { region: credential.region })
-      // 钱花了号不能用：台账立即标死，别让它挂在「待确认」等宽限期走完
-      this.markLedgerRetired(keyHash, KSK_LEDGER_RETIRE_REASON.INVALID)
+      /*
+       * 钱花了号不能用。台账仍要记这笔采购——这是真实支出，不记就等于账目缺一块；
+       * 但它没有账号 id（没进账号库），所以用一个带 `dead:` 前缀的合成主键，
+       * 保证它永远匹配不上任何账号观测，会一直停在「买到即废」。
+       */
+      this.recordLedgerPurchase({
+        ...purchase,
+        accountId: `dead:${delivery.id}`,
+        retiredAt: Date.now(),
+        retireReason: KSK_LEDGER_RETIRE_REASON.INVALID,
+        carriedCredits: 0,
+        usedCredits: 0
+      })
       this.log(`已购 ${maskedKey} 验活失败，不推送下游：${message}`)
       await this.refreshDeliveryCounters()
       return

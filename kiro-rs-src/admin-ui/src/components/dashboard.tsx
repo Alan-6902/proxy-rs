@@ -62,6 +62,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const endIndex = startIndex + itemsPerPage
   const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
 
+  // 当前页待查余额的凭据（禁用的查不出东西，跳过）
+  const queryableIds = currentCredentials.filter(c => !c.disabled).map(c => c.id)
+  /*
+   * 作为 effect 依赖用的稳定标识。不能直接依赖 currentCredentials：
+   * useCredentials 每 30 秒轮询一次，数组每轮都是新引用，会把自动查询变成
+   * 每 30 秒重打一遍上游。
+   */
+  const queryableIdsKey = queryableIds.join(',')
+
   // 当凭据列表变化时重置到第一页
   useEffect(() => {
     setCurrentPage(1)
@@ -326,22 +335,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
     deselectAll()
   }
 
-  // 查询当前页凭据信息（逐个查询，避免瞬时并发）
-  const handleQueryCurrentPageInfo = async () => {
-    if (currentCredentials.length === 0) {
-      toast.error('当前页没有可查询的凭据')
-      return
-    }
-
-    const ids = currentCredentials
-      .filter(credential => !credential.disabled)
-      .map(credential => credential.id)
-
-    if (ids.length === 0) {
-      toast.error('当前页没有可查询的启用凭据')
-      return
-    }
-
+  /*
+   * 逐个查余额，不并发。上游对同一账号的高频查询会触发风控，串行是刻意的。
+   * 后端 /balance 有 5 分钟缓存，重复调用同一条命中缓存不会打到上游。
+   */
+  const queryBalances = async (ids: number[]) => {
     setQueryingInfo(true)
     setQueryInfoProgress({ current: 0, total: ids.length })
 
@@ -366,7 +364,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           next.set(id, balance)
           return next
         })
-      } catch (error) {
+      } catch {
         failCount++
       } finally {
         setLoadingBalanceIds(prev => {
@@ -380,13 +378,45 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     setQueryingInfo(false)
+    return { successCount, failCount }
+  }
+
+  // 手动点「查询信息」：强制重查当前页全部，拿最新数据
+  const handleQueryCurrentPageInfo = async () => {
+    if (queryableIds.length === 0) {
+      toast.error('当前页没有可查询的启用凭据')
+      return
+    }
+
+    const { successCount, failCount } = await queryBalances(queryableIds)
 
     if (failCount === 0) {
-      toast.success(`查询完成：成功 ${successCount}/${ids.length}`)
+      toast.success(`查询完成：成功 ${successCount}/${queryableIds.length}`)
     } else {
       toast.warning(`查询完成：成功 ${successCount} 个，失败 ${failCount} 个`)
     }
   }
+
+  /*
+   * 进入页面或翻页后自动补齐当前页的余额，省掉每次手点「查询信息」。
+   * 只查 balanceMap 里还没有的，已经查过的不重复打上游——手动按钮才做强制重查。
+   * autoQueryRunningRef 防止上一轮还没跑完就被下一轮插进来（两个循环会同时改
+   * loadingBalanceIds，进度条也会互相打乱）。
+   */
+  const autoQueryRunningRef = useRef(false)
+  useEffect(() => {
+    if (autoQueryRunningRef.current || queryableIds.length === 0) return
+
+    const missing = queryableIds.filter(id => !balanceMap.has(id))
+    if (missing.length === 0) return
+
+    autoQueryRunningRef.current = true
+    queryBalances(missing).finally(() => {
+      autoQueryRunningRef.current = false
+    })
+    // balanceMap 故意不进依赖：它在查询过程中会被逐条写入，会让 effect 自我重触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryableIdsKey])
 
   // 批量验活
   const handleBatchVerify = async () => {

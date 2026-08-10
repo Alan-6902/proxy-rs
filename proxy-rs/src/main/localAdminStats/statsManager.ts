@@ -75,16 +75,6 @@ export interface LocalAdminStatsManagerDeps {
     credentials: readonly LocalAdminCredentialStats[]
   ) => Promise<LocalAdminExhaustedCleanupSummary>
   notifySnapshot: (snapshot: LocalAdminStatsSnapshot) => void
-  /**
-   * 把本轮观测并入抢号台账。
-   *
-   * 做成注入而不是在这里直接调 ledgerStore：台账归抢号模块管，把它硬连进来
-   * 会让统计模块在测试里必须连带 mock 抢号的持久化。不注入时整块跳过。
-   */
-  updateLedger?: (input: {
-    credentials: readonly LocalAdminCredentialStats[]
-    at: number
-  }) => Promise<void>
   log?: (message: string) => void
 }
 
@@ -421,19 +411,6 @@ export class LocalAdminStatsManager {
     } catch (error) {
       this.samples = [...this.samples, sample].slice(-LOCAL_ADMIN_STATS_MAX_SAMPLES)
       this.log(`趋势采样落盘失败（已保留内存中的曲线）: ${this.message(error)}`)
-    }
-
-    /*
-     * 台账更新排在最后且单独 try：它与趋势/桶是两份互不依赖的观测数据，
-     * 台账写失败不该让已经算好的报表桶也一起丢。
-     *
-     * 只在这里调用（即采集成功之后）：抓取失败那轮 credentials 是空的，
-     * 拿它去更新台账会把全池的号都判成「已从反代消失」。
-     */
-    try {
-      await this.deps.updateLedger?.({ credentials, at })
-    } catch (error) {
-      this.log(`抢号台账更新失败: ${this.message(error)}`)
     }
   }
 

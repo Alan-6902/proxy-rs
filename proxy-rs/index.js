@@ -8753,20 +8753,20 @@ const DEFAULT_KSK_AUTOMATION_CONFIG = {
 function isRecord$1(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function readString$1(value) {
+function readString$3(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 function resolveProviderRegion(account) {
-  const awsRegion = readString$1(account.aws_region);
+  const awsRegion = readString$3(account.aws_region);
   if (isValidKiroRegion(awsRegion)) return awsRegion;
-  const zone = readString$1(account.zone).toLowerCase();
+  const zone = readString$3(account.zone).toLowerCase();
   const zoneRegion = zone === "us" ? "us-east-1" : zone === "eu" ? "eu-central-1" : zone === "ap" ? "ap-southeast-1" : "";
   return isValidKiroRegion(zoneRegion) ? zoneRegion : "";
 }
 function parseKskProviderResponse(payload) {
   if (!isRecord$1(payload)) throw new Error("KSK 提供接口返回的不是 JSON 对象");
   if (payload.code !== 0) {
-    throw new Error(readString$1(payload.msg) || `KSK 提供接口返回 code=${String(payload.code)}`);
+    throw new Error(readString$3(payload.msg) || `KSK 提供接口返回 code=${String(payload.code)}`);
   }
   if (!Array.isArray(payload.data)) throw new Error("KSK 提供接口 data 不是数组");
   const credentials = [];
@@ -8777,8 +8777,8 @@ function parseKskProviderResponse(payload) {
       rejectedCount++;
       continue;
     }
-    const key = readString$1(item.account.key);
-    const status = readString$1(item.account.status).toLowerCase();
+    const key = readString$3(item.account.key);
+    const status = readString$3(item.account.status).toLowerCase();
     const region = resolveProviderRegion(item.account);
     if (!isValidKiroApiKey(key) || status !== "active" || !region || seen.has(key)) {
       rejectedCount++;
@@ -8793,7 +8793,7 @@ function parseKskProviderResponse(payload) {
     });
   }
   return {
-    message: readString$1(payload.msg) || void 0,
+    message: readString$3(payload.msg) || void 0,
     credentials,
     rejectedCount
   };
@@ -8847,12 +8847,15 @@ async function sendKskAddedEmail(config, credentials) {
     socketTimeout: 3e4
   });
   try {
-    await transporter.sendMail({
-      from: config.from.trim(),
-      to: recipients,
-      subject: "Proxy RS 新增 KSK",
-      text: credentials.map((credential) => `${credential.key} (${credential.region})`).join("\n")
-    });
+    const text = credentials.map((credential) => `${credential.key} (${credential.region})`).join("\n");
+    for (const recipient of recipients) {
+      await transporter.sendMail({
+        from: config.from.trim(),
+        to: recipient,
+        subject: "Proxy RS 新增 KSK",
+        text
+      });
+    }
     return credentials.length;
   } finally {
     transporter.close();
@@ -8864,9 +8867,15 @@ const LOCAL_ADMIN_AUTH_METHOD = {
   SOCIAL: "social"
 };
 const LOCAL_ADMIN_DEFAULT_PRIORITY = 0;
+function normalizeLocalAdminEmail(value) {
+  const trimmed = value?.trim();
+  if (!trimmed) return void 0;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed) ? trimmed : void 0;
+}
 function resolveLocalAdminCredentialPayload(candidate) {
   const kiroApiKey = candidate.kiroApiKey?.trim() ?? "";
   const region = candidate.region?.trim() ?? "";
+  const email = normalizeLocalAdminEmail(candidate.email);
   if (candidate.credentialKind === "kiro_api_key" || kiroApiKey) {
     if (!isValidKiroApiKey(kiroApiKey)) return { ok: false, reason: "账号的 Kiro API Key 无效" };
     if (!isValidKiroRegion(region)) return { ok: false, reason: "账号缺少合法的 AWS 区域" };
@@ -8877,7 +8886,8 @@ function resolveLocalAdminCredentialPayload(candidate) {
         priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
         kiroApiKey,
         authRegion: region,
-        apiRegion: region
+        apiRegion: region,
+        email
       }
     };
   }
@@ -8885,6 +8895,7 @@ function resolveLocalAdminCredentialPayload(candidate) {
   if (!refreshToken) return { ok: false, reason: "账号缺少 Refresh Token" };
   const clientId = candidate.clientId?.trim() ?? "";
   const clientSecret = candidate.clientSecret?.trim() ?? "";
+  const credentialRegion = isValidKiroRegion(region) ? region : void 0;
   if (candidate.authMethod === "social") {
     return {
       ok: true,
@@ -8892,7 +8903,9 @@ function resolveLocalAdminCredentialPayload(candidate) {
         authMethod: LOCAL_ADMIN_AUTH_METHOD.SOCIAL,
         priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
         refreshToken,
-        authRegion: isValidKiroRegion(region) ? region : void 0
+        authRegion: credentialRegion,
+        apiRegion: credentialRegion,
+        email
       }
     };
   }
@@ -8908,7 +8921,9 @@ function resolveLocalAdminCredentialPayload(candidate) {
       refreshToken,
       clientId: isIdc ? clientId : void 0,
       clientSecret: isIdc ? clientSecret : void 0,
-      authRegion: isValidKiroRegion(region) ? region : void 0
+      authRegion: credentialRegion,
+      apiRegion: credentialRegion,
+      email
     }
   };
 }
@@ -9165,7 +9180,9 @@ async function syncKskAccountsToLocalAdmin(input) {
             kiroApiKey: account.kiroApiKey,
             authRegion: account.region,
             apiRegion: account.region,
-            priority: 0
+            priority: 0,
+            // 没有它 Admin 卡片只显示「凭据 #id」，跟本地账号对不上
+            email: normalizeLocalAdminEmail(account.email)
           }
         }
       );
@@ -9196,12 +9213,13 @@ function describeProbeVerdict(verdict) {
   }
   return "未验证";
 }
-async function verifyOrRollback(context, verify, describe) {
+async function verifyOrRollback(context, verify, describe, tolerate) {
   try {
     await verify();
     return;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    if (tolerate?.(detail)) return;
     let removed = false;
     try {
       await deleteRemoteCredential({
@@ -9220,6 +9238,13 @@ async function verifyOrRollback(context, verify, describe) {
       removed ? `${describe(detail)}；已从 Admin 删除该凭据` : `${describe(detail)}；且删除凭据 #${context.credentialId} 失败，需要手动清理`
     );
   }
+}
+function isBalanceQueryUnauthorized(detail) {
+  return detail.includes("权限不足") || detail.includes("User is not authorized to make this call");
+}
+const TRANSIENT_BALANCE_FAILURE_PATTERN = /\bHTTP (?:408|425|429|5\d{2})\b|fetch failed|error sending request|network|timed?\s*out|timeout|aborted|aborterror|econnreset|econnrefused|eai_again|enotfound|超时|网络|连接失败/i;
+function isTransientBalanceQueryFailure(detail) {
+  return TRANSIENT_BALANCE_FAILURE_PATTERN.test(detail);
 }
 async function pushAccountToLocalAdmin(input) {
   const resolved = resolveLocalAdminCredentialPayload(input.candidate);
@@ -9254,6 +9279,7 @@ async function pushAccountToLocalAdmin(input) {
   );
   const credentialId = readCredentialId(created);
   if (!credentialId) throw new Error("本机 Admin 未返回 credentialId");
+  let balanceVerified = true;
   await verifyOrRollback(
     { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
     async () => {
@@ -9265,14 +9291,26 @@ async function pushAccountToLocalAdmin(input) {
         { method: "GET" }
       );
     },
-    (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`
+    (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`,
+    (detail) => {
+      if (!input.probeLiveness) return false;
+      if (!isBalanceQueryUnauthorized(detail) && !isTransientBalanceQueryFailure(detail)) {
+        return false;
+      }
+      balanceVerified = false;
+      return true;
+    }
   );
+  let probeVerdict = LOCAL_ADMIN_PROBE_VERDICT.SKIPPED;
   if (input.probeLiveness) {
     await verifyOrRollback(
       { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
       async () => {
         const outcome = await input.probeLiveness(input.candidate);
-        if (outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE) return;
+        probeVerdict = outcome.verdict;
+        if (outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE || outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT) {
+          return;
+        }
         throw new Error(outcome.error || describeProbeVerdict(outcome.verdict));
       },
       (detail) => `发消息验活未通过：${detail}`
@@ -9281,10 +9319,13 @@ async function pushAccountToLocalAdmin(input) {
   return {
     status: "created",
     credentialId,
-    verified: true,
+    /*
+     * verified 说的是「余额接口调通了」。余额失败被发消息验活兜底时如实报 false；
+     * probeVerdict 则独立说明真实发消息是 alive、transient 还是未执行。
+     */
+    verified: balanceVerified,
     authMethod: payload.authMethod,
-    // 没注入探针时只过了 balance 那一关，别谎报 alive
-    probeVerdict: input.probeLiveness ? LOCAL_ADMIN_PROBE_VERDICT.ALIVE : LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
+    probeVerdict
   };
 }
 const KSK_CREDENTIAL_VALIDATION_CONCURRENCY = 4;
@@ -9993,7 +10034,7 @@ class KskAutomationManager {
     for (const runner of this.runners.values()) runner.blacklistKeys(keys);
   }
 }
-const STORE_FILE$3 = "ksk-automation.enc";
+const STORE_FILE$5 = "ksk-automation.enc";
 const LEGACY_TASK_ID = "legacy-ksk-automation";
 const LEGACY_TASK_NAME = "自动拉取 KSK";
 const EMPTY_STATUS$1 = {
@@ -10013,9 +10054,9 @@ const EMPTY_STATUS$1 = {
   lastCleanupRetainedCount: 0,
   logs: []
 };
-let mutationQueue$3 = Promise.resolve();
+let mutationQueue$5 = Promise.resolve();
 function storePath$2() {
-  return node_path.join(electron.app.getPath("userData"), STORE_FILE$3);
+  return node_path.join(electron.app.getPath("userData"), STORE_FILE$5);
 }
 function positiveInt$1(value, fallback, min, max) {
   const numberValue = typeof value === "number" ? value : Number(value);
@@ -10156,7 +10197,7 @@ async function mutateStore(mutate) {
     resolveResult = resolve;
     rejectResult = reject;
   });
-  mutationQueue$3 = mutationQueue$3.then(async () => {
+  mutationQueue$5 = mutationQueue$5.then(async () => {
     const store2 = await loadKskAutomationStore();
     const value = await mutate(store2);
     await saveStore$1(store2);
@@ -10299,8 +10340,20 @@ async function listTaskViews(manager) {
   const store2 = await loadKskAutomationStore();
   return store2.tasks.map((task) => toKskAutomationTaskView(task, manager.snapshot(task.id)));
 }
-function toError$2(error) {
+function toError$3(error) {
   return { success: false, error: error instanceof Error ? error.message : String(error) };
+}
+const LOCAL_ADMIN_PUSH_LOG_CATEGORY = "LocalAdminPush";
+function logLocalAdminPush(message) {
+  console.log(`[${LOCAL_ADMIN_PUSH_LOG_CATEGORY}] ${message}`);
+}
+function logLocalAdminPushError(message) {
+  console.error(`[${LOCAL_ADMIN_PUSH_LOG_CATEGORY}] ${message}`);
+}
+function describePushCandidate(candidate) {
+  const kind = candidate.credentialKind === "kiro_api_key" || candidate.kiroApiKey ? "api_key" : "oauth";
+  const authMethod = candidate.authMethod ?? "未声明";
+  return `${kind} / authMethod=${authMethod} / region=${candidate.region?.trim() || "未填"}`;
 }
 async function resolveLocalAdminTarget() {
   const store2 = await loadKskAutomationStore();
@@ -10327,7 +10380,7 @@ function registerKskAutomationIpcHandlers(deps) {
       try {
         return { success: true, data: await listTaskViews(deps.getManager()) };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10354,7 +10407,7 @@ function registerKskAutomationIpcHandlers(deps) {
         await deps.getManager().reloadTask(task.id);
         return { success: true, data: await listTaskViews(deps.getManager()) };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10377,7 +10430,7 @@ function registerKskAutomationIpcHandlers(deps) {
         await deps.getManager().reloadTask(taskId);
         return { success: true, data: await listTaskViews(deps.getManager()) };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10392,7 +10445,7 @@ function registerKskAutomationIpcHandlers(deps) {
         await deps.getManager().reloadTask(taskId);
         return { success: true, data: await listTaskViews(deps.getManager()) };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10404,7 +10457,7 @@ function registerKskAutomationIpcHandlers(deps) {
         deps.getManager().removeTask(taskId);
         return { success: true, data: await listTaskViews(deps.getManager()) };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10417,7 +10470,7 @@ function registerKskAutomationIpcHandlers(deps) {
           data: { taskId, status: await deps.getManager().runNow(taskId) }
         };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10430,7 +10483,7 @@ function registerKskAutomationIpcHandlers(deps) {
           data: { taskId, status: await deps.getManager().syncLocalAdminNow(taskId) }
         };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
@@ -10443,28 +10496,33 @@ function registerKskAutomationIpcHandlers(deps) {
           data: { taskId, status: await deps.getManager().cleanupNow(taskId) }
         };
       } catch (error) {
-        return toError$2(error);
+        return toError$3(error);
       }
     }
   );
   electron.ipcMain.handle(
     KSK_AUTOMATION_CHANNEL.pushAccountToLocalAdmin,
     async (_event, candidate) => {
+      const who = describePushCandidate(candidate);
+      logLocalAdminPush(`开始推送账号到本机 Admin：${who}`);
       try {
         const target = await resolveLocalAdminTarget();
-        return {
-          success: true,
-          data: await pushAccountToLocalAdmin({
-            candidate,
-            baseUrl: target.baseUrl,
-            adminApiKey: target.adminApiKey,
-            timeoutSeconds: target.timeoutSeconds,
-            fetchImpl: deps.localAdminFetchImpl,
-            probeLiveness: deps.probeLocalAdminPushLiveness
-          })
-        };
+        const result = await pushAccountToLocalAdmin({
+          candidate,
+          baseUrl: target.baseUrl,
+          adminApiKey: target.adminApiKey,
+          timeoutSeconds: target.timeoutSeconds,
+          fetchImpl: deps.localAdminFetchImpl,
+          probeLiveness: deps.probeLocalAdminPushLiveness
+        });
+        logLocalAdminPush(
+          result.status === "existing" ? `Admin 已有同一凭据，未新建（#${result.credentialId ?? "未知"}）：${who}` : `推送完成并保留凭据（#${result.credentialId ?? "未知"}，验活=${result.probeVerdict}）：${who}`
+        );
+        return { success: true, data: result };
       } catch (error) {
-        return toError$2(error);
+        const failure = toError$3(error);
+        logLocalAdminPushError(`推送失败：${failure.error}（${who}）`);
+        return failure;
       }
     }
   );
@@ -10521,6 +10579,9 @@ const EMPTY_LOCAL_ADMIN_STATS_TOTALS = {
   usageLimit: 0,
   usageRemaining: 0,
   usagePercentUsed: void 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  usedCredits: 0,
   alertCount: 0
 };
 function aggregateLocalAdminStats(credentials) {
@@ -10532,6 +10593,9 @@ function aggregateLocalAdminStats(credentials) {
     totals.successCount += credential.successCount;
     totals.failureCount += credential.failureCount;
     totals.refreshFailureCount += credential.refreshFailureCount;
+    totals.inputTokens += credential.inputTokens ?? 0;
+    totals.outputTokens += credential.outputTokens ?? 0;
+    totals.usedCredits += credential.usedCredits ?? 0;
     if (credential.alerts.length > 0) totals.alertCount++;
     if (credential.usage) {
       totals.usageSampleCount++;
@@ -10576,24 +10640,40 @@ function accumulateHourlyUsage(input) {
   const current = bucketByHour.get(hour) ?? { credentials: [] };
   const deltaById = new Map(current.credentials.map((item) => [item.id, { ...item }]));
   for (const credential of input.credentials) {
-    const cursor = cursorById.get(credential.id);
+    const previousCursor = cursorById.get(credential.id);
+    const rotated = previousCursor?.maskedKey !== void 0 && credential.maskedKey !== void 0 && previousCursor.maskedKey !== credential.maskedKey;
+    const cursor = rotated ? void 0 : previousCursor;
     const usageCurrent = credential.usage?.current;
     const entry = deltaById.get(credential.id) ?? {
       id: credential.id,
       maskedKey: credential.maskedKey,
+      email: credential.email,
       usageDelta: 0,
+      inputTokenDelta: 0,
+      outputTokenDelta: 0,
+      creditDelta: 0,
       successDelta: 0,
       failureDelta: 0,
       refreshFailureDelta: 0,
       lastSeenAt: input.at
     };
     entry.maskedKey = credential.maskedKey ?? entry.maskedKey;
+    entry.email = credential.email ?? entry.email;
     entry.successDelta += diffLocalAdminCounter(cursor?.successCount, credential.successCount);
     entry.failureDelta += diffLocalAdminCounter(cursor?.failureCount, credential.failureCount);
     entry.refreshFailureDelta += diffLocalAdminCounter(
       cursor?.refreshFailureCount,
       credential.refreshFailureCount
     );
+    if (credential.inputTokens !== void 0) {
+      entry.inputTokenDelta += diffLocalAdminCounter(cursor?.inputTokens, credential.inputTokens);
+    }
+    if (credential.outputTokens !== void 0) {
+      entry.outputTokenDelta += diffLocalAdminCounter(cursor?.outputTokens, credential.outputTokens);
+    }
+    if (credential.usedCredits !== void 0) {
+      entry.creditDelta += diffLocalAdminCounter(cursor?.usedCredits, credential.usedCredits);
+    }
     if (usageCurrent !== void 0) {
       entry.usageDelta += diffLocalAdminCounter(cursor?.usageCurrent, usageCurrent);
       entry.usageCurrent = usageCurrent;
@@ -10608,7 +10688,13 @@ function accumulateHourlyUsage(input) {
       refreshFailureCount: credential.refreshFailureCount,
       // 这一轮没查到用量时保留旧基线，否则下一轮会把整段累计当成新增消耗
       usageCurrent: usageCurrent ?? cursor?.usageCurrent,
-      at: input.at
+      // token 同理：kiro-rs 重启后计数从 0 起，靠 diff 的回落保护记 0
+      inputTokens: credential.inputTokens ?? cursor?.inputTokens,
+      outputTokens: credential.outputTokens ?? cursor?.outputTokens,
+      usedCredits: credential.usedCredits ?? cursor?.usedCredits,
+      at: input.at,
+      // 换号后基线要跟着换到新号，否则下一轮又会拿旧 key 判定一次复用
+      maskedKey: credential.maskedKey ?? cursor?.maskedKey
     });
   }
   bucketByHour.set(hour, { hour, credentials: [...deltaById.values()] });
@@ -10621,10 +10707,10 @@ function accumulateHourlyUsage(input) {
   );
   return { buckets, cursors };
 }
-const STORE_FILE$2 = "local-admin-stats-samples.json";
-let mutationQueue$2 = Promise.resolve();
+const STORE_FILE$4 = "local-admin-stats-samples.json";
+let mutationQueue$4 = Promise.resolve();
 function storePath$1() {
-  return node_path.join(electron.app.getPath("userData"), STORE_FILE$2);
+  return node_path.join(electron.app.getPath("userData"), STORE_FILE$4);
 }
 async function writeState(state) {
   const path2 = storePath$1();
@@ -10637,31 +10723,33 @@ async function writeState(state) {
   };
   await node_fs.promises.writeFile(path2, JSON.stringify(payload), { mode: 384 });
 }
-function readCount$1(value) {
+function readCount$3(value) {
   const numberValue = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
 }
-function readOptionalNumber(value) {
+function readOptionalNumber$2(value) {
   const numberValue = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numberValue) ? numberValue : void 0;
 }
 function normalizeSample(value) {
   if (!value || typeof value !== "object") return null;
   const source = value;
-  const at = readOptionalNumber(source.at);
+  const at = readOptionalNumber$2(source.at);
   if (at === void 0 || at <= 0) return null;
   return {
     at: Math.floor(at),
-    successCount: readCount$1(source.successCount),
-    failureCount: readCount$1(source.failureCount),
-    refreshFailureCount: readCount$1(source.refreshFailureCount),
-    credentials: readCount$1(source.credentials),
-    available: readCount$1(source.available),
-    usageCurrent: readOptionalNumber(source.usageCurrent),
-    usageLimit: readOptionalNumber(source.usageLimit)
+    successCount: readCount$3(source.successCount),
+    failureCount: readCount$3(source.failureCount),
+    refreshFailureCount: readCount$3(source.refreshFailureCount),
+    credentials: readCount$3(source.credentials),
+    available: readCount$3(source.available),
+    usageCurrent: readOptionalNumber$2(source.usageCurrent),
+    usageLimit: readOptionalNumber$2(source.usageLimit),
+    inputTokens: readOptionalNumber$2(source.inputTokens),
+    outputTokens: readOptionalNumber$2(source.outputTokens)
   };
 }
-function readOptionalString$1(value) {
+function readOptionalString$3(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
 }
 function readRawArray(payload, key) {
@@ -10676,18 +10764,24 @@ function readDelta(value) {
 function normalizeDelta(value) {
   if (!value || typeof value !== "object") return null;
   const source = value;
-  const id = readOptionalString$1(source.id);
+  const id = readOptionalString$3(source.id);
   if (!id) return null;
   return {
     id,
-    maskedKey: readOptionalString$1(source.maskedKey),
+    maskedKey: readOptionalString$3(source.maskedKey),
+    // 升级前落的桶没有 email，读出来是 undefined，报表回落到显示 #id
+    email: readOptionalString$3(source.email),
     usageDelta: readDelta(source.usageDelta),
+    // 升级前落的桶没有这几个键，按 0 读入
+    inputTokenDelta: readDelta(source.inputTokenDelta),
+    outputTokenDelta: readDelta(source.outputTokenDelta),
+    creditDelta: readDelta(source.creditDelta),
     successDelta: readDelta(source.successDelta),
     failureDelta: readDelta(source.failureDelta),
     refreshFailureDelta: readDelta(source.refreshFailureDelta),
-    usageCurrent: readOptionalNumber(source.usageCurrent),
-    usageLimit: readOptionalNumber(source.usageLimit),
-    lastSeenAt: readCount$1(source.lastSeenAt)
+    usageCurrent: readOptionalNumber$2(source.usageCurrent),
+    usageLimit: readOptionalNumber$2(source.usageLimit),
+    lastSeenAt: readCount$3(source.lastSeenAt)
   };
 }
 function normalizeBucketsPayload(payload, now = Date.now()) {
@@ -10696,7 +10790,7 @@ function normalizeBucketsPayload(payload, now = Date.now()) {
   return source.map((item) => {
     if (!item || typeof item !== "object") return null;
     const record = item;
-    const hour = readOptionalNumber(record.hour);
+    const hour = readOptionalNumber$2(record.hour);
     if (hour === void 0 || hour <= 0) return null;
     const credentials = Array.isArray(record.credentials) ? record.credentials.map(normalizeDelta).filter((entry) => entry !== null) : [];
     return { hour: Math.floor(hour), credentials };
@@ -10706,15 +10800,18 @@ function normalizeCursorsPayload(payload) {
   return readRawArray(payload, "cursors").map((item) => {
     if (!item || typeof item !== "object") return null;
     const record = item;
-    const id = readOptionalString$1(record.id);
+    const id = readOptionalString$3(record.id);
     if (!id) return null;
     return {
       id,
-      successCount: readCount$1(record.successCount),
-      failureCount: readCount$1(record.failureCount),
-      refreshFailureCount: readCount$1(record.refreshFailureCount),
-      usageCurrent: readOptionalNumber(record.usageCurrent),
-      at: readCount$1(record.at)
+      successCount: readCount$3(record.successCount),
+      failureCount: readCount$3(record.failureCount),
+      refreshFailureCount: readCount$3(record.refreshFailureCount),
+      usageCurrent: readOptionalNumber$2(record.usageCurrent),
+      inputTokens: readOptionalNumber$2(record.inputTokens),
+      outputTokens: readOptionalNumber$2(record.outputTokens),
+      usedCredits: readOptionalNumber$2(record.usedCredits),
+      at: readCount$3(record.at)
     };
   }).filter((item) => item !== null);
 }
@@ -10736,14 +10833,14 @@ async function loadLocalAdminStatsState() {
     return { samples: [], buckets: [], cursors: [] };
   }
 }
-function enqueue(task) {
+function enqueue$2(task) {
   let resolveResult;
   let rejectResult;
   const result = new Promise((resolve, reject) => {
     resolveResult = resolve;
     rejectResult = reject;
   });
-  mutationQueue$2 = mutationQueue$2.then(async () => {
+  mutationQueue$4 = mutationQueue$4.then(async () => {
     resolveResult(await task());
   }).catch((error) => {
     rejectResult(error);
@@ -10751,7 +10848,7 @@ function enqueue(task) {
   return result;
 }
 async function appendLocalAdminStatsSample(input) {
-  return enqueue(async () => {
+  return enqueue$2(async () => {
     const state = await loadLocalAdminStatsState();
     const samples = [...state.samples, input.sample].slice(-1440);
     const next = {
@@ -10764,24 +10861,36 @@ async function appendLocalAdminStatsSample(input) {
   });
 }
 async function clearLocalAdminStatsSamples() {
-  return enqueue(async () => {
+  return enqueue$2(async () => {
     const state = await loadLocalAdminStatsState();
     await writeState({ samples: [], buckets: state.buckets, cursors: state.cursors });
   });
 }
 async function clearLocalAdminUsageBuckets() {
-  return enqueue(async () => {
+  return enqueue$2(async () => {
     const state = await loadLocalAdminStatsState();
     await writeState({ samples: state.samples, buckets: [], cursors: [] });
   });
 }
 const USAGE_REQUEST_GAP_MS = 120;
-function readCount(value) {
+function readCount$2(value) {
   const numberValue = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
 }
-function readOptionalString(value) {
+function readOptionalString$2(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
+}
+function readOptionalCount(value) {
+  if (value === void 0 || value === null) return void 0;
+  const numberValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numberValue) || numberValue < 0) return void 0;
+  return Math.floor(numberValue);
+}
+function readOptionalDecimal(value) {
+  if (value === void 0 || value === null) return void 0;
+  const numberValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numberValue) || numberValue < 0) return void 0;
+  return numberValue;
 }
 function readTimestamp(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -10799,21 +10908,26 @@ function toCredentialStats(credential, usage) {
   const id = remoteCredentialId(credential);
   if (!id) return null;
   const disabled = credential.disabled === true;
-  const failureCount = readCount(credential.failureCount);
-  const refreshFailureCount = readCount(credential.refreshFailureCount);
+  const failureCount = readCount$2(credential.failureCount);
+  const refreshFailureCount = readCount$2(credential.refreshFailureCount);
   return {
     id,
-    maskedKey: readOptionalString(credential.maskedApiKey),
-    authMethod: readOptionalString(credential.authMethod),
-    endpoint: readOptionalString(credential.endpoint),
-    email: readOptionalString(credential.email),
-    subscriptionTitle: readOptionalString(credential.subscriptionTitle) ?? usage?.subscriptionTitle,
-    priority: readCount(credential.priority),
+    maskedKey: readOptionalString$2(credential.maskedApiKey),
+    authMethod: readOptionalString$2(credential.authMethod),
+    endpoint: readOptionalString$2(credential.endpoint),
+    email: readOptionalString$2(credential.email),
+    subscriptionTitle: readOptionalString$2(credential.subscriptionTitle) ?? usage?.subscriptionTitle,
+    priority: readCount$2(credential.priority),
     disabled,
     isCurrent: credential.isCurrent === true,
-    successCount: readCount(credential.successCount),
+    successCount: readCount$2(credential.successCount),
     failureCount,
     refreshFailureCount,
+    // 旧版 kiro-rs 不返回这两个字段，保持 undefined 以区分「不支持」与「真的是 0」
+    inputTokens: readOptionalCount(credential.inputTokens),
+    outputTokens: readOptionalCount(credential.outputTokens),
+    // 积分是小数，不能走取整那条
+    usedCredits: readOptionalDecimal(credential.usedCredits),
     lastUsedAt: readTimestamp(credential.lastUsedAt),
     usage,
     alerts: resolveLocalAdminAlerts({ disabled, failureCount, refreshFailureCount, usage })
@@ -10831,7 +10945,7 @@ function toCredentialUsage(payload, fetchedAt) {
     limit,
     remaining,
     percentUsed: limit > 0 ? current / limit : 0,
-    subscriptionTitle: readOptionalString(record.subscriptionTitle),
+    subscriptionTitle: readOptionalString$2(record.subscriptionTitle),
     nextResetAt: readTimestamp(record.nextResetAt),
     fetchedAt
   };
@@ -11200,7 +11314,9 @@ class LocalAdminStatsManager {
       available: totals.available,
       // 没查过用量时不写 0，否则趋势图会出现一段假的「用量归零」
       usageCurrent: totals.usageSampleCount > 0 ? totals.usageCurrent : void 0,
-      usageLimit: totals.usageSampleCount > 0 ? totals.usageLimit : void 0
+      usageLimit: totals.usageSampleCount > 0 ? totals.usageLimit : void 0,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens
     };
   }
   pushSnapshot() {
@@ -11222,7 +11338,7 @@ const LOCAL_ADMIN_STATS_CHANNEL = {
   clearBuckets: "local-admin-stats-clear-buckets",
   snapshotEvent: "local-admin-stats-changed"
 };
-function toError$1(error) {
+function toError$2(error) {
   return { success: false, error: error instanceof Error ? error.message : String(error) };
 }
 function sendLocalAdminStatsSnapshot(getMainWindow, snapshot) {
@@ -11236,7 +11352,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
     try {
       return { success: true, data: deps.getManager().snapshot() };
     } catch (error) {
-      return toError$1(error);
+      return toError$2(error);
     }
   });
   electron.ipcMain.handle(
@@ -11245,7 +11361,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().refreshNow() };
       } catch (error) {
-        return toError$1(error);
+        return toError$2(error);
       }
     }
   );
@@ -11255,7 +11371,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().refreshUsageNow() };
       } catch (error) {
-        return toError$1(error);
+        return toError$2(error);
       }
     }
   );
@@ -11265,7 +11381,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().cleanupExhaustedNow() };
       } catch (error) {
-        return toError$1(error);
+        return toError$2(error);
       }
     }
   );
@@ -11275,7 +11391,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().clearSamples() };
       } catch (error) {
-        return toError$1(error);
+        return toError$2(error);
       }
     }
   );
@@ -11285,7 +11401,7 @@ function registerLocalAdminStatsIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().clearUsageBuckets() };
       } catch (error) {
-        return toError$1(error);
+        return toError$2(error);
       }
     }
   );
@@ -11321,6 +11437,19 @@ const KSK_HUNTER_CHANNEL_LABEL = {
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: "Kiro Drop",
   [KSK_HUNTER_CHANNEL.KIRO_APP]: "KiroApp"
 };
+const KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: 30,
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: KSK_HUNTER_POLL_INTERVAL_SECONDS
+};
+const KSK_HUNTER_CHANNEL_REQUIRES_API_KEY = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: true,
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: false
+};
+const KSK_HUNTER_CHANNEL_AUTH_HEADER = "X-API-Key";
 const KSK_HUNTER_MAX_CNY_PER_UNIT = 1e4;
 const DEFAULT_KSK_HUNTER_CHANNEL_BILLING = {
   unitLabel: "CNY",
@@ -11335,8 +11464,9 @@ const DEFAULT_KSK_HUNTER_BILLING = {
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0
   },
+  // Kiro CEO 按积分计价，实测 /api/public/config：美区 50、欧区 35 积分/个
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: {
-    unitLabel: "CRD",
+    unitLabel: "积分",
     cnyPerUnit: 1,
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0
@@ -11694,10 +11824,10 @@ function summarizeHunterReport(input) {
     totalEventCount: input.events.length
   };
 }
-const STORE_FILE$1 = "ksk-hunter-report.jsonl";
-let mutationQueue$1 = Promise.resolve();
+const STORE_FILE$3 = "ksk-hunter-report.jsonl";
+let mutationQueue$3 = Promise.resolve();
 function hunterReportStorePath() {
-  return node_path.join(electron.app.getPath("userData"), STORE_FILE$1);
+  return node_path.join(electron.app.getPath("userData"), STORE_FILE$3);
 }
 function readNumber$1(value) {
   const numberValue = typeof value === "number" ? value : Number(value);
@@ -11707,7 +11837,7 @@ function readType(value) {
   const types = Object.values(HUNTER_REPORT_EVENT);
   return typeof value === "string" && types.includes(value) ? value : null;
 }
-function readChannel(value) {
+function readChannel$2(value) {
   const channels = Object.values(KSK_HUNTER_CHANNEL);
   return typeof value === "string" && channels.includes(value) ? value : null;
 }
@@ -11720,7 +11850,7 @@ function normalizeHunterReportEvent(value) {
   const source = value;
   const at = readNumber$1(source.at);
   const type = readType(source.type);
-  const channel = readChannel(source.channel);
+  const channel = readChannel$2(source.channel);
   if (at === void 0 || at <= 0 || !type || !channel) return null;
   return {
     at: Math.floor(at),
@@ -11764,7 +11894,7 @@ async function appendHunterReportEvent(event) {
     resolveResult = resolve;
     rejectResult = reject;
   });
-  mutationQueue$1 = mutationQueue$1.then(async () => {
+  mutationQueue$3 = mutationQueue$3.then(async () => {
     const path2 = hunterReportStorePath();
     await node_fs.promises.mkdir(node_path.dirname(path2), { recursive: true });
     await node_fs.promises.appendFile(path2, `${JSON.stringify(event)}
@@ -11774,6 +11904,806 @@ async function appendHunterReportEvent(event) {
     rejectResult(error);
   });
   return result;
+}
+const DOWNSTREAM_CSV_DIR_NAME = "downstream-csv";
+const DOWNSTREAM_CSV_FILE_PREFIX = "downstream-";
+const DOWNSTREAM_SETTLEMENT_RETENTION_DAYS = 90;
+const DOWNSTREAM_SETTLEMENT_TICK_MINUTES = 30;
+const DOWNSTREAM_REPORT_WINDOW_DAYS = 30;
+function downstreamDayStart(at) {
+  const date = new Date(at);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+function downstreamDateKeyToStart(date) {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim());
+  if (!matched) return void 0;
+  const year = Number(matched[1]);
+  const month = Number(matched[2]);
+  const day = Number(matched[3]);
+  const parsed = new Date(year, month - 1, day);
+  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) {
+    return void 0;
+  }
+  return parsed.getTime();
+}
+function downstreamDateRange(days, now) {
+  const span = Math.max(1, Math.floor(days));
+  const todayStart = downstreamDayStart(now);
+  const result = [];
+  for (let offset = span - 1; offset >= 0; offset--) {
+    const date = new Date(todayStart);
+    date.setDate(date.getDate() - offset);
+    const at = date.getTime();
+    result.push({ date: hunterLocalDateKey(at), at });
+  }
+  return result;
+}
+function downstreamPendingCredits(delivery, usage) {
+  if (!usage) return void 0;
+  const anchor = delivery.settledCredits ?? 0;
+  return Math.max(0, usage.usedCredits - anchor);
+}
+function summarizeDownstreamDay(input) {
+  const now = input.now ?? Date.now();
+  const date = input.date ?? hunterLocalDateKey(now);
+  const dayStart = downstreamDateKeyToStart(date) ?? downstreamDayStart(now);
+  const nextDayStart = new Date(dayStart);
+  nextDayStart.setDate(nextDayStart.getDate() + 1);
+  const dayEnd = nextDayStart.getTime();
+  const usage = input.usage ?? {};
+  const groupNames = input.groupNames ?? {};
+  const settlement = input.settlements.find((item) => item.date === date);
+  const deliveryById = new Map(input.deliveries.map((item) => [item.id, item]));
+  const isToday = date === hunterLocalDateKey(now);
+  const creditsByAccount = /* @__PURE__ */ new Map();
+  if (settlement) {
+    for (const entry of settlement.perAccount) creditsByAccount.set(entry.accountId, entry);
+  } else if (isToday) {
+    for (const delivery of input.deliveries) {
+      if (!delivery.accountId) continue;
+      const pending = downstreamPendingCredits(delivery, usage[delivery.accountId]);
+      if (pending === void 0 || pending <= 0) continue;
+      creditsByAccount.set(delivery.accountId, {
+        accountId: delivery.accountId,
+        creditsDelta: pending,
+        fromAt: delivery.settledAt ?? delivery.purchasedAt,
+        toAt: now
+      });
+    }
+  }
+  const toRow = (delivery, deliveredToday) => {
+    const accountUsage = delivery.accountId ? usage[delivery.accountId] : void 0;
+    const delta = delivery.accountId ? creditsByAccount.get(delivery.accountId) : void 0;
+    return {
+      id: delivery.id,
+      accountId: delivery.accountId,
+      maskedKey: delivery.maskedKey,
+      region: delivery.region,
+      channel: delivery.channel,
+      linkName: delivery.linkName,
+      groupName: delivery.groupId ? groupNames[delivery.groupId] : void 0,
+      deliveredAt: delivery.deliveredAt,
+      hour: new Date(delivery.deliveredAt).getHours(),
+      attempts: delivery.attempts,
+      costUnit: delivery.costUnit,
+      costCny: delivery.costCny,
+      unitLabel: delivery.unitLabel,
+      deliveredToday,
+      creditsDelta: delta?.creditsDelta,
+      creditsFromAt: delta?.fromAt,
+      creditsToAt: delta?.toAt,
+      totalCredits: accountUsage?.usedCredits,
+      state: accountUsage?.state
+    };
+  };
+  const rows = [];
+  const deliveriesByHour = Array.from({ length: 24 }, () => 0);
+  let deliveries = 0;
+  let spendCny = 0;
+  const includedIds = /* @__PURE__ */ new Set();
+  for (const delivery of input.deliveries) {
+    if (delivery.deliveredAt < dayStart || delivery.deliveredAt >= dayEnd) continue;
+    deliveries++;
+    spendCny = roundCny(spendCny + (delivery.costCny ?? 0));
+    deliveriesByHour[new Date(delivery.deliveredAt).getHours()]++;
+    rows.push(toRow(delivery, true));
+    includedIds.add(delivery.id);
+  }
+  for (const [accountId, delta] of creditsByAccount) {
+    if (delta.creditsDelta <= 0) continue;
+    let candidate;
+    for (const delivery of deliveryById.values()) {
+      if (delivery.accountId !== accountId) continue;
+      if (!candidate || delivery.deliveredAt > candidate.deliveredAt) candidate = delivery;
+    }
+    if (!candidate || includedIds.has(candidate.id)) continue;
+    rows.push(toRow(candidate, false));
+    includedIds.add(candidate.id);
+  }
+  const credits = settlement ? settlement.credits : [...creditsByAccount.values()].reduce((sum, item) => sum + item.creditsDelta, 0);
+  rows.sort((a, b) => b.deliveredAt - a.deliveredAt || a.maskedKey.localeCompare(b.maskedKey));
+  return {
+    generatedAt: now,
+    date,
+    settled: settlement !== void 0,
+    settledAt: settlement?.settledAt,
+    deliveries,
+    spendCny,
+    credits,
+    rows,
+    deliveriesByHour,
+    totalDeliveryCount: input.deliveries.length,
+    earliestDeliveredAt: input.deliveries.length > 0 ? Math.min(...input.deliveries.map((item) => item.deliveredAt)) : void 0,
+    totalSpendCny: roundCny(input.deliveries.reduce((sum, item) => sum + (item.costCny ?? 0), 0))
+  };
+}
+function summarizeDownstreamDaily(input) {
+  const now = input.now ?? Date.now();
+  const days = Math.max(1, Math.floor(input.days ?? DOWNSTREAM_REPORT_WINDOW_DAYS));
+  const range = downstreamDateRange(days, now);
+  const settlementByDate = new Map(input.settlements.map((item) => [item.date, item]));
+  const usage = input.usage ?? {};
+  const rowByDate = /* @__PURE__ */ new Map();
+  for (const entry of range) {
+    const settlement = settlementByDate.get(entry.date);
+    rowByDate.set(entry.date, {
+      date: entry.date,
+      at: entry.at,
+      deliveries: 0,
+      spendCny: 0,
+      credits: settlement?.credits ?? 0,
+      settled: settlement !== void 0
+    });
+  }
+  for (const delivery of input.deliveries) {
+    const row = rowByDate.get(hunterLocalDateKey(delivery.deliveredAt));
+    if (!row) continue;
+    row.deliveries++;
+    row.spendCny = roundCny(row.spendCny + (delivery.costCny ?? 0));
+  }
+  const today = hunterLocalDateKey(now);
+  const todayRow = rowByDate.get(today);
+  if (todayRow && !todayRow.settled) {
+    let credits = 0;
+    for (const delivery of input.deliveries) {
+      if (!delivery.accountId) continue;
+      const pending = downstreamPendingCredits(delivery, usage[delivery.accountId]);
+      if (pending !== void 0) credits += pending;
+    }
+    todayRow.credits = credits;
+  }
+  return range.map((entry) => rowByDate.get(entry.date));
+}
+function computeDownstreamSettlement(input) {
+  const dayStart = downstreamDateKeyToStart(input.date);
+  const perAccount = [];
+  let credits = 0;
+  let deliveries = 0;
+  let spendCny = 0;
+  const next = input.deliveries.map((delivery) => {
+    if (dayStart !== void 0 && hunterLocalDateKey(delivery.deliveredAt) === input.date) {
+      deliveries++;
+      spendCny = roundCny(spendCny + (delivery.costCny ?? 0));
+    }
+    if (!delivery.accountId) return delivery;
+    const accountUsage = input.usage[delivery.accountId];
+    const pending = downstreamPendingCredits(delivery, accountUsage);
+    if (pending === void 0 || accountUsage === void 0) return delivery;
+    if (pending > 0) {
+      perAccount.push({
+        accountId: delivery.accountId,
+        creditsDelta: pending,
+        fromAt: delivery.settledAt ?? delivery.purchasedAt,
+        toAt: input.at
+      });
+      credits += pending;
+    }
+    return { ...delivery, settledCredits: accountUsage.usedCredits, settledAt: input.at };
+  });
+  return {
+    settlement: {
+      date: input.date,
+      settledAt: input.at,
+      deliveries,
+      spendCny,
+      credits,
+      perAccount
+    },
+    deliveries: next
+  };
+}
+function pruneDownstreamSettlements(settlements, now, retentionDays = DOWNSTREAM_SETTLEMENT_RETENTION_DAYS) {
+  const cutoff = new Date(downstreamDayStart(now));
+  cutoff.setDate(cutoff.getDate() - Math.max(1, retentionDays));
+  const cutoffAt = cutoff.getTime();
+  return settlements.filter((item) => (downstreamDateKeyToStart(item.date) ?? 0) >= cutoffAt).sort((a, b) => a.date.localeCompare(b.date));
+}
+const CSV_BOM = "\uFEFF";
+const DOWNSTREAM_CSV_HEADERS = [
+  "日期",
+  "交付时刻",
+  "交付小时",
+  "完整Key",
+  "脱敏Key",
+  "Region",
+  "渠道",
+  "链接",
+  "分组",
+  "买入价",
+  "计价单位",
+  "买入价CNY",
+  "是否当日交付",
+  "当日新增积分",
+  "积分区间起",
+  "积分区间止",
+  "累计消耗积分",
+  "号状态"
+];
+function escapeCsvField(value) {
+  return /[",\n\r]/.test(value) || value !== value.trim() ? `"${value.replace(/"/g, '""')}"` : value;
+}
+function formatCsvTimestamp(at) {
+  if (at === void 0) return "";
+  const date = new Date(at);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+function formatCsvNumber(value) {
+  return value === void 0 ? "" : String(value);
+}
+function toDownstreamCsvFields(row, date) {
+  return [
+    date,
+    formatCsvTimestamp(row.deliveredAt),
+    String(row.hour).padStart(2, "0"),
+    row.key,
+    row.maskedKey,
+    row.region,
+    row.channel,
+    row.linkName,
+    row.groupName ?? "",
+    formatCsvNumber(row.costUnit),
+    row.unitLabel ?? "",
+    formatCsvNumber(row.costCny),
+    row.deliveredToday ? "是" : "否",
+    formatCsvNumber(row.creditsDelta),
+    formatCsvTimestamp(row.creditsFromAt),
+    formatCsvTimestamp(row.creditsToAt),
+    formatCsvNumber(row.totalCredits),
+    row.state ?? ""
+  ];
+}
+function buildDownstreamCsv(rows, date) {
+  const lines = [DOWNSTREAM_CSV_HEADERS.map(escapeCsvField).join(",")];
+  for (const row of rows) {
+    lines.push(toDownstreamCsvFields(row, date).map(escapeCsvField).join(","));
+  }
+  return `${CSV_BOM}${lines.join("\n")}
+`;
+}
+function downstreamCsvFileName(date) {
+  return `${DOWNSTREAM_CSV_FILE_PREFIX}${date}.csv`;
+}
+const STORE_FILE$2 = "ksk-delivery-ledger.enc";
+let mutationQueue$2 = Promise.resolve();
+function deliveryLedgerStorePath() {
+  return node_path.join(electron.app.getPath("userData"), STORE_FILE$2);
+}
+function isDeliveryLedgerAvailable() {
+  try {
+    return electron.safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+function readString$2(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function readOptionalString$1(value) {
+  return readString$2(value) || void 0;
+}
+function readOptionalNumber$1(value) {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) ? numberValue : void 0;
+}
+function readCount$1(value) {
+  const numberValue = readOptionalNumber$1(value);
+  return numberValue !== void 0 && numberValue > 0 ? numberValue : 0;
+}
+function readChannel$1(value) {
+  const channels = Object.values(KSK_HUNTER_CHANNEL);
+  const text = readString$2(value);
+  return channels.includes(text) ? text : KSK_HUNTER_CHANNEL.KIRO_MARKET;
+}
+function normalizeDownstreamDelivery(value) {
+  if (!value || typeof value !== "object") return null;
+  const source = value;
+  const id = readString$2(source.id);
+  const key = readString$2(source.key);
+  const deliveredAt = readOptionalNumber$1(source.deliveredAt);
+  if (!id || !isValidKiroApiKey(key) || deliveredAt === void 0 || deliveredAt <= 0) return null;
+  const purchasedAt = readOptionalNumber$1(source.purchasedAt);
+  return {
+    id,
+    accountId: readOptionalString$1(source.accountId),
+    key,
+    // 脱敏值可以从明文重算，不信文件里存的那份（可能被外部改坏）
+    maskedKey: maskKiroApiKey(key),
+    region: readString$2(source.region),
+    channel: readChannel$1(source.channel),
+    linkId: readString$2(source.linkId),
+    linkName: readString$2(source.linkName) || "未命名链接",
+    groupId: readOptionalString$1(source.groupId),
+    purchasedAt: purchasedAt !== void 0 && purchasedAt > 0 ? purchasedAt : deliveredAt,
+    deliveredAt: Math.floor(deliveredAt),
+    attempts: readCount$1(source.attempts) || 1,
+    costUnit: readOptionalNumber$1(source.costUnit),
+    costCny: readOptionalNumber$1(source.costCny),
+    unitLabel: readOptionalString$1(source.unitLabel),
+    settledCredits: readOptionalNumber$1(source.settledCredits),
+    settledAt: readOptionalNumber$1(source.settledAt)
+  };
+}
+function normalizeCreditDelta(value) {
+  if (!value || typeof value !== "object") return null;
+  const source = value;
+  const accountId = readString$2(source.accountId);
+  if (!accountId) return null;
+  return {
+    accountId,
+    creditsDelta: readCount$1(source.creditsDelta),
+    fromAt: readCount$1(source.fromAt),
+    toAt: readCount$1(source.toAt)
+  };
+}
+function normalizeDownstreamSettlement(value) {
+  if (!value || typeof value !== "object") return null;
+  const source = value;
+  const date = readString$2(source.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const perAccount = Array.isArray(source.perAccount) ? source.perAccount.map(normalizeCreditDelta).filter((item) => item !== null) : [];
+  return {
+    date,
+    settledAt: readCount$1(source.settledAt),
+    deliveries: readCount$1(source.deliveries),
+    spendCny: readCount$1(source.spendCny),
+    credits: readCount$1(source.credits),
+    perAccount
+  };
+}
+function normalizeDeliveryLedgerPayload(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const rawDeliveries = Array.isArray(source.deliveries) ? source.deliveries : [];
+  const byId = /* @__PURE__ */ new Map();
+  for (const item of rawDeliveries) {
+    const delivery = normalizeDownstreamDelivery(item);
+    if (!delivery) continue;
+    const existing = byId.get(delivery.id);
+    if (existing && existing.deliveredAt >= delivery.deliveredAt) continue;
+    byId.set(delivery.id, delivery);
+  }
+  const rawSettlements = Array.isArray(source.settlements) ? source.settlements : [];
+  const settlementByDate = /* @__PURE__ */ new Map();
+  for (const item of rawSettlements) {
+    const settlement = normalizeDownstreamSettlement(item);
+    if (settlement) settlementByDate.set(settlement.date, settlement);
+  }
+  return {
+    deliveries: [...byId.values()].sort((a, b) => a.deliveredAt - b.deliveredAt),
+    settlements: [...settlementByDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    lastSettledDate: readOptionalString$1(source.lastSettledDate)
+  };
+}
+function emptyState() {
+  return { deliveries: [], settlements: [] };
+}
+async function loadDeliveryLedger() {
+  if (!isDeliveryLedgerAvailable()) return emptyState();
+  try {
+    const encrypted = await node_fs.promises.readFile(deliveryLedgerStorePath());
+    return normalizeDeliveryLedgerPayload(JSON.parse(electron.safeStorage.decryptString(encrypted)));
+  } catch (error) {
+    if (error.code === "ENOENT") return emptyState();
+    throw new Error("交付账本无法解密或已损坏，已拒绝用空账本覆盖原文件");
+  }
+}
+async function writeLedger$1(state) {
+  if (!isDeliveryLedgerAvailable()) {
+    throw new Error("系统加密存储不可用，拒绝明文保存已交付的 KSK");
+  }
+  const path2 = deliveryLedgerStorePath();
+  await node_fs.promises.mkdir(node_path.dirname(path2), { recursive: true });
+  const payload = {
+    version: 1,
+    deliveries: state.deliveries,
+    settlements: state.settlements,
+    lastSettledDate: state.lastSettledDate
+  };
+  await node_fs.promises.writeFile(path2, electron.safeStorage.encryptString(JSON.stringify(payload)), { mode: 384 });
+}
+function enqueue$1(task) {
+  let resolveResult;
+  let rejectResult;
+  const result = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+  mutationQueue$2 = mutationQueue$2.then(async () => {
+    resolveResult(await task());
+  }).catch((error) => {
+    rejectResult(error);
+  });
+  return result;
+}
+async function mutateDeliveryLedger(mutate) {
+  return enqueue$1(async () => {
+    const current = await loadDeliveryLedger();
+    const { state, result, dirty } = mutate(current);
+    if (dirty !== false) await writeLedger$1(state);
+    return result;
+  });
+}
+async function recordDownstreamDelivery(delivery) {
+  return mutateDeliveryLedger((state) => {
+    if (state.deliveries.some((item) => item.id === delivery.id)) {
+      return { state, result: void 0, dirty: false };
+    }
+    return {
+      state: { ...state, deliveries: [...state.deliveries, delivery] },
+      result: void 0
+    };
+  });
+}
+async function commitDownstreamSettlement(input) {
+  return mutateDeliveryLedger((state) => {
+    const settlements = pruneDownstreamSettlements(
+      [...state.settlements.filter((item) => item.date !== input.date), input.settlement],
+      input.now
+    );
+    return {
+      state: {
+        deliveries: [...input.deliveries],
+        settlements,
+        // 取较大值：补齐历史缺口时会逐日结算，不能被中间某天覆盖成更早的日期
+        lastSettledDate: state.lastSettledDate && state.lastSettledDate > input.date ? state.lastSettledDate : input.date
+      },
+      result: void 0
+    };
+  });
+}
+const KSK_LEDGER_HOUR_MS = 36e5;
+const KSK_LEDGER_STATE = {
+  /** 还在账号库里服役。 */
+  ALIVE: "alive",
+  /** 已经从账号库消失（被清理、被删）。 */
+  RETIRED: "retired",
+  /** 买到但发消息验活没过：钱花了，号从没用上。 */
+  DEAD_ON_ARRIVAL: "dead_on_arrival"
+};
+const KSK_LEDGER_RETIRE_REASON = {
+  /** 额度耗尽被自动/手动清理。这是号的正常寿终。 */
+  EXHAUSTED: "exhausted",
+  /** 发消息验活判永久失效（封号、认证失败）。 */
+  INVALID: "invalid",
+  /**
+   * 从账号库消失了但没人报告过原因。
+   *
+   * 用户手动删了账号、或换了一份账号库都会走到这里。
+   */
+  VANISHED: "vanished"
+};
+const KSK_LEDGER_DEFAULT_WINDOW_DAYS = 30;
+const EMPTY_KSK_LEDGER_TOTALS = {
+  entries: 0,
+  alive: 0,
+  retired: 0,
+  wasted: 0,
+  spendCny: 0,
+  pricedOrders: 0,
+  usedCredits: 0
+};
+const KSK_LEDGER_SORT = {
+  PURCHASED: "purchased",
+  COST: "cost",
+  CREDITS: "credits",
+  ALIVE: "alive",
+  EFFICIENCY: "efficiency"
+};
+function resolveLedgerState(entry) {
+  if (entry.retiredAt === void 0) return KSK_LEDGER_STATE.ALIVE;
+  return entry.retireReason === KSK_LEDGER_RETIRE_REASON.INVALID ? KSK_LEDGER_STATE.DEAD_ON_ARRIVAL : KSK_LEDGER_STATE.RETIRED;
+}
+function resolveLedgerAliveMs(entry, now) {
+  const end = entry.retiredAt ?? now;
+  return Math.max(0, end - entry.purchasedAt);
+}
+function toKskLedgerRow(entry, now) {
+  const aliveMs = resolveLedgerAliveMs(entry, now);
+  const aliveHours = aliveMs / KSK_LEDGER_HOUR_MS;
+  return {
+    ...entry,
+    state: resolveLedgerState(entry),
+    aliveMs,
+    // 分母是产出，产出为 0 时「每积分成本」是无穷大，报 undefined 让 UI 显示「—」
+    cnyPerCredit: entry.costCny !== void 0 && entry.costCny > 0 && entry.usedCredits > 0 ? entry.costCny / entry.usedCredits : void 0,
+    // 存活不足一分钟时样本太少，算出来的时均没有意义
+    creditsPerHour: aliveMs >= 6e4 && entry.usedCredits > 0 ? entry.usedCredits / aliveHours : void 0,
+    usagePercent: entry.usageLimit !== void 0 && entry.usageLimit > 0 && entry.currentUsage !== void 0 ? entry.currentUsage / entry.usageLimit : void 0
+  };
+}
+function compareKskLedgerRows(a, b, sort) {
+  switch (sort) {
+    case KSK_LEDGER_SORT.COST:
+      return (b.costCny ?? -1) - (a.costCny ?? -1) || b.purchasedAt - a.purchasedAt;
+    case KSK_LEDGER_SORT.CREDITS:
+      return b.usedCredits - a.usedCredits || b.purchasedAt - a.purchasedAt;
+    case KSK_LEDGER_SORT.ALIVE:
+      return b.aliveMs - a.aliveMs || b.purchasedAt - a.purchasedAt;
+    case KSK_LEDGER_SORT.EFFICIENCY:
+      return (a.cnyPerCredit ?? Number.POSITIVE_INFINITY) - (b.cnyPerCredit ?? Number.POSITIVE_INFINITY) || b.purchasedAt - a.purchasedAt;
+    default:
+      return b.purchasedAt - a.purchasedAt;
+  }
+}
+function aggregateKskLedger(rows) {
+  const totals = { ...EMPTY_KSK_LEDGER_TOTALS };
+  let aliveMsSum = 0;
+  for (const row of rows) {
+    totals.entries++;
+    if (row.state === KSK_LEDGER_STATE.ALIVE) totals.alive++;
+    if (row.state === KSK_LEDGER_STATE.RETIRED) totals.retired++;
+    if (row.state === KSK_LEDGER_STATE.DEAD_ON_ARRIVAL) totals.wasted++;
+    aliveMsSum += row.aliveMs;
+    totals.spendCny += row.costCny ?? 0;
+    if (row.costUnit !== void 0) totals.pricedOrders++;
+    totals.usedCredits += row.usedCredits;
+  }
+  totals.spendCny = Math.round(totals.spendCny * 100) / 100;
+  totals.avgAliveMs = totals.entries > 0 ? aliveMsSum / totals.entries : void 0;
+  totals.cnyPerCredit = totals.usedCredits > 0 && totals.spendCny > 0 ? totals.spendCny / totals.usedCredits : void 0;
+  totals.avgCostCny = totals.pricedOrders > 0 ? Math.round(totals.spendCny / totals.pricedOrders * 100) / 100 : void 0;
+  return totals;
+}
+function aggregateKskLedgerByGroup(rows, groupNames = {}) {
+  const byGroup = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const key = row.groupId ?? "";
+    let bucket = byGroup.get(key);
+    if (!bucket) {
+      bucket = {
+        row: {
+          groupId: row.groupId,
+          groupName: row.groupId ? groupNames[row.groupId] ?? `已删除的分组（${row.groupId.slice(0, 8)}）` : "未分组",
+          entries: 0,
+          alive: 0,
+          spendCny: 0,
+          usedCredits: 0
+        },
+        aliveMsSum: 0
+      };
+      byGroup.set(key, bucket);
+    }
+    bucket.row.entries++;
+    if (row.state === KSK_LEDGER_STATE.ALIVE) bucket.row.alive++;
+    bucket.row.spendCny += row.costCny ?? 0;
+    bucket.row.usedCredits += row.usedCredits;
+    bucket.aliveMsSum += row.aliveMs;
+  }
+  return [...byGroup.values()].map(({ row, aliveMsSum }) => ({
+    ...row,
+    spendCny: Math.round(row.spendCny * 100) / 100,
+    cnyPerCredit: row.usedCredits > 0 && row.spendCny > 0 ? row.spendCny / row.usedCredits : void 0,
+    avgAliveMs: row.entries > 0 ? aliveMsSum / row.entries : void 0
+  })).sort((a, b) => b.spendCny - a.spendCny || b.entries - a.entries);
+}
+function summarizeKskLedger(input) {
+  const now = input.now ?? Date.now();
+  const days = Math.max(1, Math.floor(input.days ?? KSK_LEDGER_DEFAULT_WINDOW_DAYS));
+  const fromDate = new Date(now);
+  fromDate.setHours(0, 0, 0, 0);
+  fromDate.setDate(fromDate.getDate() - (days - 1));
+  const from = fromDate.getTime();
+  const groupNames = input.groupNames ?? {};
+  const rows = input.entries.filter((entry) => entry.purchasedAt >= from).map((entry) => ({
+    ...toKskLedgerRow(entry, now),
+    groupName: entry.groupId ? groupNames[entry.groupId] : void 0
+  })).sort((a, b) => compareKskLedgerRows(a, b, input.sort ?? KSK_LEDGER_SORT.PURCHASED));
+  return {
+    generatedAt: now,
+    days,
+    from,
+    rows,
+    totals: aggregateKskLedger(rows),
+    byGroup: aggregateKskLedgerByGroup(rows, groupNames),
+    totalEntryCount: input.entries.length,
+    earliestPurchasedAt: input.entries.length > 0 ? Math.min(...input.entries.map((entry) => entry.purchasedAt)) : void 0
+  };
+}
+function applyLedgerObservation(input) {
+  const seen = new Map(input.observations.map((item) => [item.accountId, item]));
+  let changed = false;
+  const entries = input.entries.map((entry) => {
+    const observation = seen.get(entry.accountId);
+    if (!observation) {
+      if (entry.retiredAt !== void 0) return entry;
+      changed = true;
+      return {
+        ...entry,
+        retiredAt: input.at,
+        retireReason: entry.retireReason ?? KSK_LEDGER_RETIRE_REASON.VANISHED
+      };
+    }
+    const current = observation.currentUsage;
+    let baseline = entry.baselineUsage ?? current;
+    let carried = entry.carriedCredits ?? 0;
+    const previous = entry.currentUsage;
+    if (current !== void 0 && previous !== void 0 && current < previous) {
+      carried += Math.max(0, previous - (baseline ?? previous));
+      baseline = current;
+    }
+    const inPeriod = current !== void 0 && baseline !== void 0 ? Math.max(0, current - baseline) : 0;
+    const next = {
+      ...entry,
+      lastSeenAt: input.at,
+      // 号回到账号库（重新导入同一个号）就清掉下线标记
+      retiredAt: void 0,
+      retireReason: void 0,
+      baselineUsage: baseline,
+      currentUsage: current ?? entry.currentUsage,
+      usageLimit: observation.usageLimit ?? entry.usageLimit,
+      carriedCredits: carried,
+      usedCredits: carried + inPeriod
+    };
+    changed = true;
+    return next;
+  });
+  return { entries, changed };
+}
+const STORE_FILE$1 = "ksk-hunter-ledger.json";
+let mutationQueue$1 = Promise.resolve();
+function kskLedgerStorePath() {
+  return node_path.join(electron.app.getPath("userData"), STORE_FILE$1);
+}
+function readOptionalNumber(value) {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) ? numberValue : void 0;
+}
+function readCount(value) {
+  const numberValue = readOptionalNumber(value);
+  return numberValue !== void 0 && numberValue > 0 ? numberValue : 0;
+}
+function readString$1(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function readOptionalString(value) {
+  return readString$1(value) || void 0;
+}
+function readChannel(value) {
+  const channels = Object.values(KSK_HUNTER_CHANNEL);
+  const text = readString$1(value);
+  return channels.includes(text) ? text : KSK_HUNTER_CHANNEL.KIRO_MARKET;
+}
+function readRetireReason(value) {
+  const reasons = Object.values(KSK_LEDGER_RETIRE_REASON);
+  const text = readString$1(value);
+  return reasons.includes(text) ? text : void 0;
+}
+function normalizeKskLedgerEntry(value) {
+  if (!value || typeof value !== "object") return null;
+  const source = value;
+  const accountId = readString$1(source.accountId);
+  const purchasedAt = readOptionalNumber(source.purchasedAt);
+  if (!accountId || purchasedAt === void 0 || purchasedAt <= 0) return null;
+  return {
+    accountId,
+    maskedKey: readString$1(source.maskedKey) || "ksk_...",
+    region: readString$1(source.region),
+    channel: readChannel(source.channel),
+    linkId: readString$1(source.linkId),
+    linkName: readString$1(source.linkName) || "未命名链接",
+    groupId: readOptionalString(source.groupId),
+    purchasedAt: Math.floor(purchasedAt),
+    costUnit: readOptionalNumber(source.costUnit),
+    costCny: readOptionalNumber(source.costCny),
+    unitLabel: readOptionalString(source.unitLabel),
+    lastSeenAt: readOptionalNumber(source.lastSeenAt),
+    retiredAt: readOptionalNumber(source.retiredAt),
+    retireReason: readRetireReason(source.retireReason),
+    baselineUsage: readOptionalNumber(source.baselineUsage),
+    currentUsage: readOptionalNumber(source.currentUsage),
+    usageLimit: readOptionalNumber(source.usageLimit),
+    carriedCredits: readCount(source.carriedCredits),
+    usedCredits: readCount(source.usedCredits)
+  };
+}
+function normalizeKskLedgerPayload(payload) {
+  const source = payload && typeof payload === "object" ? payload.entries : void 0;
+  if (!Array.isArray(source)) return [];
+  const byId = /* @__PURE__ */ new Map();
+  for (const item of source) {
+    const entry = normalizeKskLedgerEntry(item);
+    if (!entry) continue;
+    const existing = byId.get(entry.accountId);
+    if (existing && existing.purchasedAt >= entry.purchasedAt) continue;
+    byId.set(entry.accountId, entry);
+  }
+  return [...byId.values()].sort((a, b) => a.purchasedAt - b.purchasedAt).slice(-5e3);
+}
+async function loadKskLedger() {
+  try {
+    return normalizeKskLedgerPayload(JSON.parse(await node_fs.promises.readFile(kskLedgerStorePath(), "utf-8")));
+  } catch {
+    return [];
+  }
+}
+async function writeLedger(entries) {
+  const path2 = kskLedgerStorePath();
+  await node_fs.promises.mkdir(node_path.dirname(path2), { recursive: true });
+  const payload = { version: 1, entries };
+  await node_fs.promises.writeFile(path2, JSON.stringify(payload), { mode: 384 });
+}
+function enqueue(task) {
+  let resolveResult;
+  let rejectResult;
+  const result = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+  mutationQueue$1 = mutationQueue$1.then(async () => {
+    resolveResult(await task());
+  }).catch((error) => {
+    rejectResult(error);
+  });
+  return result;
+}
+async function mutateKskLedger(mutate) {
+  return enqueue(async () => {
+    const current = await loadKskLedger();
+    const { entries, result, dirty } = mutate(current);
+    if (dirty !== false) await writeLedger(entries.slice(-5e3));
+    return result;
+  });
+}
+async function recordKskLedgerPurchase(entry) {
+  return mutateKskLedger((entries) => {
+    const index = entries.findIndex((item) => item.accountId === entry.accountId);
+    if (index < 0) return { entries: [...entries, entry], result: void 0 };
+    const previous = entries[index];
+    const next = [...entries];
+    next[index] = {
+      ...entry,
+      baselineUsage: previous.baselineUsage ?? entry.baselineUsage,
+      currentUsage: previous.currentUsage,
+      usageLimit: previous.usageLimit ?? entry.usageLimit,
+      carriedCredits: previous.carriedCredits,
+      usedCredits: previous.usedCredits,
+      lastSeenAt: previous.lastSeenAt
+    };
+    return { entries: next, result: void 0 };
+  });
+}
+async function markKskLedgerRetired(input) {
+  return mutateKskLedger((entries) => {
+    const index = entries.findIndex((item) => item.accountId === input.accountId);
+    if (index < 0) return { entries, result: void 0, dirty: false };
+    const next = [...entries];
+    next[index] = { ...next[index], retiredAt: input.at, retireReason: input.reason };
+    return { entries: next, result: void 0 };
+  });
+}
+async function updateKskLedgerFromAccounts(input) {
+  return mutateKskLedger((entries) => {
+    if (entries.length === 0) return { entries, result: void 0, dirty: false };
+    const applied = applyLedgerObservation({
+      entries,
+      observations: input.observations,
+      at: input.at
+    });
+    return { entries: applied.entries, result: void 0, dirty: applied.changed };
+  });
+}
+async function clearKskLedger() {
+  return enqueue(() => writeLedger([]));
 }
 const STORE_FILE = "ksk-hunter.enc";
 const MAX_DELIVERY_RECORDS = 200;
@@ -11840,14 +12770,24 @@ function normalizeBilling(value) {
   }
   return result;
 }
-function normalizeBalanceUrls(value) {
+function normalizeChannelSecrets(value) {
   const source = value ?? {};
   const result = {};
   for (const channel of Object.values(KSK_HUNTER_CHANNEL)) {
-    const url = normalizeString(source[channel]);
-    if (url) result[channel] = url;
+    const text = normalizeString(source[channel]);
+    if (text) result[channel] = text;
   }
   return result;
+}
+function mergeChannelSecrets(current, patch) {
+  const merged = { ...current ?? {} };
+  for (const [channel, value] of Object.entries(patch)) {
+    if (value === void 0) continue;
+    const trimmed = normalizeString(value);
+    if (trimmed) merged[channel] = trimmed;
+    else delete merged[channel];
+  }
+  return merged;
 }
 function normalizeKskHunterConfig(input) {
   const source = input ?? {};
@@ -11865,7 +12805,8 @@ function normalizeKskHunterConfig(input) {
     dailyLimitCny: normalizeAmount(source.dailyLimitCny, 0, Number.MAX_SAFE_INTEGER),
     billing: normalizeBilling(source.billing),
     allowUnknownPriceOrder: source.allowUnknownPriceOrder === true,
-    balanceCheckEnabled: source.balanceCheckEnabled === true
+    balanceCheckEnabled: source.balanceCheckEnabled === true,
+    csvExportDir: normalizeString(source.csvExportDir) || void 0
   };
 }
 function normalizeLink(value, now) {
@@ -11903,6 +12844,8 @@ function normalizeDelivery(value, now) {
     channel: normalizeChannelValue(source.channel) ?? void 0,
     key,
     region: normalizeString(source.region),
+    accountId: normalizeString(source.accountId) || void 0,
+    groupId: normalizeString(source.groupId) || void 0,
     state: normalizeDeliveryState(source.state),
     attempts: positiveInt(source.attempts, 0, 0, 1e3),
     createdAt,
@@ -11941,7 +12884,7 @@ function emptyStore() {
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: normalizeKskHunterConfig(void 0),
-    secrets: { downstreamApiKey: "", balanceUrls: {} },
+    secrets: { downstreamApiKey: "", balanceUrls: {}, apiKeys: {} },
     links: [],
     deliveries: [],
     spend: []
@@ -11964,7 +12907,8 @@ function normalizeKskHunterStorePayload(payload, now = Date.now()) {
     config: normalizeKskHunterConfig(source.config),
     secrets: {
       downstreamApiKey: normalizeString(source.secrets?.downstreamApiKey),
-      balanceUrls: normalizeBalanceUrls(source.secrets?.balanceUrls)
+      balanceUrls: normalizeChannelSecrets(source.secrets?.balanceUrls),
+      apiKeys: normalizeChannelSecrets(source.secrets?.apiKeys)
     },
     links,
     deliveries,
@@ -12019,13 +12963,13 @@ async function updateKskHunterConfig(config, secrets) {
       store2.secrets.downstreamApiKey = normalizeString(secrets.downstreamApiKey);
     }
     if (secrets?.balanceUrls) {
-      store2.secrets.balanceUrls = { ...store2.secrets.balanceUrls ?? {} };
-      for (const [channel, url] of Object.entries(secrets.balanceUrls)) {
-        if (url === void 0) continue;
-        const trimmed = normalizeString(url);
-        if (trimmed) store2.secrets.balanceUrls[channel] = trimmed;
-        else delete store2.secrets.balanceUrls[channel];
-      }
+      store2.secrets.balanceUrls = mergeChannelSecrets(
+        store2.secrets.balanceUrls,
+        secrets.balanceUrls
+      );
+    }
+    if (secrets?.apiKeys) {
+      store2.secrets.apiKeys = mergeChannelSecrets(store2.secrets.apiKeys, secrets.apiKeys);
     }
     return store2;
   });
@@ -12122,6 +13066,12 @@ function toKskHunterConfigView(store2) {
       Object.values(KSK_HUNTER_CHANNEL).map((channel) => [
         channel,
         hunterUrlHint(store2.secrets.balanceUrls?.[channel] ?? "")
+      ])
+    ),
+    apiKeyHints: Object.fromEntries(
+      Object.values(KSK_HUNTER_CHANNEL).map((channel) => [
+        channel,
+        maskHunterSecretTail(store2.secrets.apiKeys?.[channel] ?? "")
       ])
     )
   };
@@ -12265,17 +13215,21 @@ function parseKiroMarketOffers(payload) {
   });
 }
 function parseKiroCeoOffers(payload) {
-  return readOfferArray(payload).flatMap((item) => {
+  if (!isRecord(payload) || !Array.isArray(payload.zones)) {
+    throw new Error("Kiro CEO 库存接口未返回 zones 数组");
+  }
+  return payload.zones.flatMap((item) => {
     if (!isRecord(item)) return [];
-    const goodsId = readString(item.id ?? item.goods_id ?? item.productId);
+    const goodsId = readString(item.zone);
     if (!goodsId) return [];
     return [
       {
         goodsId,
-        title: readString(item.title ?? item.goods_name ?? item.name),
-        region: resolveOfferRegion(item.zone, item.tag, item.title, item.goods_name),
-        stock: resolveStock(item.remain, item.stock, item.quantity),
-        price: readNumber(item.price ?? item.credit ?? item.crd)
+        title: readString(item.label) || `Kiro Key · ${goodsId}`,
+        region: resolveOfferRegion(item.zone, item.label),
+        // 下架的区域按无货处理：站点还会返回 stock，但下单必然失败
+        stock: item.enabled === false ? 0 : resolveStock(item.stock, item.available),
+        price: readNumber(item.unit_price)
       }
     ];
   });
@@ -12330,12 +13284,18 @@ function parseChannelOffers(channel, payload) {
       return parseKiroAppOffers(payload);
   }
 }
-function buildOrderRequestBody(channel, offer) {
+function buildOrderRequestBody(channel, offer, options = {}) {
   switch (channel) {
     case KSK_HUNTER_CHANNEL.KIRO_MARKET:
       return { id: offer.goodsId, num: 1 };
+    /*
+     * Kiro CEO：goodsId 是区域短码（us / eu），不是商品 id。
+     * client_order_id 是站点必填项（32 位十六进制），漏传会 400，
+     * 所以这里宁可抛错也不发一个注定失败的请求。
+     */
     case KSK_HUNTER_CHANNEL.KIRO_CEO:
-      return { goods_id: offer.goodsId, count: 1 };
+      if (!options.idempotencyKey) throw new Error("Kiro CEO 下单缺少幂等键");
+      return { count: 1, zone: offer.goodsId, client_order_id: options.idempotencyKey };
     case KSK_HUNTER_CHANNEL.KIRO_DROP:
       return { item_id: offer.goodsId, quantity: 1 };
     /*
@@ -12481,7 +13441,10 @@ async function fetchChannelBalance(input) {
   try {
     const response = await input.fetchImpl(parsed.toString(), {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...input.apiKey ? { [KSK_HUNTER_CHANNEL_AUTH_HEADER]: input.apiKey } : {}
+      },
       signal: controller.signal
     });
     const text = await response.text();
@@ -12524,7 +13487,8 @@ class HunterBalanceCache {
       const amountUnit = await fetchChannelBalance({
         url: input.url,
         timeoutSeconds: input.timeoutSeconds,
-        fetchImpl: input.fetchImpl
+        fetchImpl: input.fetchImpl,
+        apiKey: input.apiKey
       });
       const snapshot = { amountUnit, checkedAt: now };
       this.cache.set(input.channel, snapshot);
@@ -12610,6 +13574,58 @@ class KskHunterManager {
       events: await read(),
       billing: source.config.billing,
       days
+    });
+  }
+  /** 单号台账报表：成本、存活时长、下游消耗。 */
+  async ledgerReport(days, sort) {
+    const read = this.deps.readLedger ?? loadKskLedger;
+    const groupNames = await this.deps.readGroupNames?.();
+    return summarizeKskLedger({ entries: await read(), days, sort, groupNames });
+  }
+  /**
+   * 记一笔采购到台账。
+   *
+   * 吞掉写盘错误的理由同 recordReportEvent：台账是观测数据，磁盘满了也不该
+   * 让「号已经买到了」这条主流程失败。
+   */
+  recordLedgerPurchase(entry) {
+    const record = this.deps.recordLedgerPurchase ?? recordKskLedgerPurchase;
+    void record(entry).catch((error) => {
+      this.log(`台账写入失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+  /**
+   * 记一条交付到对账账本。
+   *
+   * 只在推送下游**成功**后调：这份账本的语义就是「交给下游的号」，是收款依据。
+   * 验活判死与推送失败已由报表与台账覆盖，混进来会让对账多收钱。
+   *
+   * 吞掉写盘错误的理由同上：号已经交出去了，磁盘满了也不该让这条主流程失败。
+   * 但这里的失败比另外两处严重（丢的是收款依据），所以日志写明要人工核对。
+   */
+  recordDownstreamDelivery(delivery, store2, attempts) {
+    const record = this.deps.recordDownstreamDelivery ?? recordDownstreamDelivery;
+    const link = deliveryReportLink(delivery, store2);
+    void record({
+      id: delivery.id,
+      accountId: delivery.accountId,
+      key: delivery.key,
+      maskedKey: maskKiroApiKey(delivery.key),
+      region: delivery.region,
+      channel: link.channel,
+      linkId: delivery.linkId,
+      linkName: link.name,
+      groupId: delivery.groupId,
+      purchasedAt: delivery.createdAt,
+      deliveredAt: Date.now(),
+      attempts,
+      costUnit: delivery.costUnit,
+      costCny: delivery.costCny,
+      unitLabel: delivery.unitLabel
+    }).catch((error) => {
+      this.log(
+        `交付账本写入失败（${maskKiroApiKey(delivery.key)} 已交付但未记账，需人工核对）：${error instanceof Error ? error.message : String(error)}`
+      );
     });
   }
   snapshotStatus() {
@@ -12732,14 +13748,33 @@ class KskHunterManager {
   /** 查一条链接。返回 false 表示本轮该链接失败。 */
   async checkLink(link, store2) {
     if (this.inFlightLinks.has(link.id)) return true;
+    const minIntervalMs = KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS[link.channel] * 1e3;
+    if (minIntervalMs > KSK_HUNTER_POLL_INTERVAL_SECONDS * 1e3) {
+      const lastCheckedAt = this.linkRuntimeOf(link.id).lastCheckedAt;
+      if (lastCheckedAt !== void 0 && Date.now() - lastCheckedAt < minIntervalMs) return true;
+    }
+    const apiKey = this.channelApiKey(link.channel, store2);
+    if (KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[link.channel] && !apiKey) {
+      this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
+        lastInStock: false,
+        lastError: `${KSK_HUNTER_CHANNEL_LABEL[link.channel]} 渠道需要在设置里填写 API Key`
+      });
+      return false;
+    }
     this.inFlightLinks.add(link.id);
     try {
-      const payload = await this.fetchJson(link.secrets.listUrl, store2.config.requestTimeoutSeconds);
+      const payload = await this.fetchJson(
+        link.secrets.listUrl,
+        store2.config.requestTimeoutSeconds,
+        { method: "GET", apiKey }
+      );
       const offers = parseChannelOffers(link.channel, payload).filter(
         (offer) => offer.stock > 0 && matchesHunterRegions(link.regions, offer.region)
       );
       const wasInStock = this.linkRuntimeOf(link.id).lastInStock;
       this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
         lastInStock: offers.length > 0,
         lastCheckedAt: Date.now(),
         lastError: void 0
@@ -12760,6 +13795,7 @@ class KskHunterManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.linkRuntime.set(link.id, {
+        ...this.linkRuntimeOf(link.id),
         lastInStock: false,
         lastCheckedAt: Date.now(),
         lastError: message
@@ -12827,7 +13863,8 @@ class KskHunterManager {
       channel,
       url,
       timeoutSeconds: store2.config.requestTimeoutSeconds,
-      fetchImpl: this.deps.fetchImpl
+      fetchImpl: this.deps.fetchImpl,
+      apiKey: this.channelApiKey(channel, store2)
     });
     if (snapshot.error) {
       this.log(`渠道 ${channel} 余额查询失败：${snapshot.error}`);
@@ -12923,11 +13960,17 @@ class KskHunterManager {
     });
   }
   async orderOne(link, offer, store2, budget) {
+    const idempotencyKey = this.resolveIdempotencyKey(link.id, offer.goodsId);
     const orderPayload = await this.fetchJson(
       link.secrets.orderUrl,
       store2.config.requestTimeoutSeconds,
-      { method: "POST", body: buildOrderRequestBody(link.channel, offer) }
+      {
+        method: "POST",
+        body: buildOrderRequestBody(link.channel, offer, { idempotencyKey }),
+        apiKey: this.channelApiKey(link.channel, store2)
+      }
     );
+    this.clearIdempotencyKey(link.id);
     const credential = parseOrderedCredential(orderPayload, offer.region);
     if (!isUsableHunterCredential(credential)) {
       throw new Error("下单返回的 KSK 或区域不合法");
@@ -12944,6 +13987,8 @@ class KskHunterManager {
       channel: link.channel,
       key: credential.key,
       region: credential.region,
+      // 对账要按分组汇总，而配置里的 targetGroupId 随时会改，推送时回读可能已经不是这个
+      groupId: store2.config.targetGroupId,
       state: KSK_HUNTER_DELIVERY_STATE.PENDING,
       attempts: 0,
       createdAt: now,
@@ -12969,12 +14014,39 @@ class KskHunterManager {
     if (store2.config.notifyOnAutoOrder) {
       this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region });
     }
+    const purchase = {
+      maskedKey,
+      region: credential.region,
+      channel: link.channel,
+      linkId: link.id,
+      linkName: link.name,
+      // 抢到的号会落进这个分组；不同分组通常对应不同下游，报表按它汇总
+      groupId: store2.config.targetGroupId,
+      purchasedAt: now,
+      costUnit: budget.costUnit,
+      costCny: budget.costCny,
+      unitLabel
+    };
     try {
       const result = await this.deps.importCredential({
         ...credential,
         groupId: store2.config.targetGroupId
       });
       if (result.added) this.deps.notifyAccountsChanged();
+      if (result.accountId) {
+        await patchKskHunterDelivery(delivery.id, { accountId: result.accountId });
+      }
+      if (result.accountId) {
+        this.recordLedgerPurchase({
+          ...purchase,
+          accountId: result.accountId,
+          baselineUsage: result.usageCurrent,
+          currentUsage: result.usageCurrent,
+          usageLimit: result.usageLimit,
+          carriedCredits: 0,
+          usedCredits: 0
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await patchKskHunterDelivery(delivery.id, {
@@ -12982,11 +14054,51 @@ class KskHunterManager {
         lastError: `验活失败：${message}`
       });
       this.recordReportEvent(HUNTER_REPORT_EVENT.DEAD_KEY, link, { region: credential.region });
+      this.recordLedgerPurchase({
+        ...purchase,
+        accountId: `dead:${delivery.id}`,
+        retiredAt: Date.now(),
+        retireReason: KSK_LEDGER_RETIRE_REASON.INVALID,
+        carriedCredits: 0,
+        usedCredits: 0
+      });
       this.log(`已购 ${maskedKey} 验活失败，不推送下游：${message}`);
       await this.refreshDeliveryCounters();
       return;
     }
     this.scheduleDeliveryDrain(0);
+  }
+  /**
+   * 取（或生成）这条链接当前的下单幂等键。
+   *
+   * 32 位十六进制：Kiro CEO 要求这个格式，randomUUID() 带横线共 36 位，过不了它的校验。
+   *
+   * 键在**下单请求成功之前**一直保留，超时或 5xx 重试时复用同一个——服务端会把它识别成
+   * 同一笔订单原样返回，不会重复扣费、重复发货。换 zone 则必须换键：同一个键配不同的
+   * zone 会被服务端当成另一笔订单的重放，拿回来的号区域可能不是你要的。
+   *
+   * **只存在内存里**：进程重启后重试会变成第二笔订单（一次约 50 积分）。要修得在每次
+   * 下单尝试前写盘，代价与这个风险不成比例——重启恰好卡在下单请求中间才会碰上。
+   */
+  resolveIdempotencyKey(linkId, goodsId) {
+    const pending = this.linkRuntimeOf(linkId).pendingOrder;
+    if (pending && pending.goodsId === goodsId) return pending.key;
+    const key = node_crypto.randomBytes(16).toString("hex");
+    this.linkRuntime.set(linkId, {
+      ...this.linkRuntimeOf(linkId),
+      pendingOrder: { goodsId, key }
+    });
+    return key;
+  }
+  clearIdempotencyKey(linkId) {
+    const runtime = this.linkRuntimeOf(linkId);
+    if (!runtime.pendingOrder) return;
+    this.linkRuntime.set(linkId, { ...runtime, pendingOrder: void 0 });
+  }
+  /** 该渠道的请求头密钥；未配置或不需要时为 undefined。 */
+  channelApiKey(channel, store2) {
+    if (!KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[channel]) return void 0;
+    return store2.secrets.apiKeys?.[channel] || void 0;
   }
   async fetchJson(url, timeoutSeconds, init = { method: "GET" }) {
     const parsed = new URL(url);
@@ -12998,7 +14110,8 @@ class KskHunterManager {
         method: init.method,
         headers: {
           Accept: "application/json",
-          ...init.body === void 0 ? {} : { "Content-Type": "application/json" }
+          ...init.body === void 0 ? {} : { "Content-Type": "application/json" },
+          ...init.apiKey ? { [KSK_HUNTER_CHANNEL_AUTH_HEADER]: init.apiKey } : {}
         },
         body: init.body === void 0 ? void 0 : JSON.stringify(init.body),
         signal: controller.signal
@@ -13061,6 +14174,7 @@ class KskHunterManager {
       this.recordReportEvent(HUNTER_REPORT_EVENT.DELIVERED, deliveryReportLink(delivery, store2), {
         region: delivery.region || void 0
       });
+      this.recordDownstreamDelivery(delivery, store2, attempts);
       this.status = { ...this.status, totalDelivered: this.status.totalDelivered + 1 };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -13144,9 +14258,12 @@ const KSK_HUNTER_CHANNEL_NAME = {
   deleteDelivery: "ksk-hunter-delete-delivery",
   report: "ksk-hunter-report",
   revealReportFile: "ksk-hunter-reveal-report-file",
+  ledgerReport: "ksk-hunter-ledger-report",
+  clearLedger: "ksk-hunter-clear-ledger",
+  revealLedgerFile: "ksk-hunter-reveal-ledger-file",
   statusEvent: "ksk-hunter-status-changed"
 };
-function toError(error) {
+function toError$1(error) {
   return { success: false, error: error instanceof Error ? error.message : String(error) };
 }
 async function buildSnapshot(manager) {
@@ -13216,7 +14333,7 @@ function registerKskHunterIpcHandlers(deps) {
     try {
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(
@@ -13234,7 +14351,7 @@ function registerKskHunterIpcHandlers(deps) {
         await deps.getManager().reload();
         return await respondSnapshot();
       } catch (error) {
-        return toError(error);
+        return toError$1(error);
       }
     }
   );
@@ -13247,7 +14364,7 @@ function registerKskHunterIpcHandlers(deps) {
       await deps.getManager().reload();
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(
@@ -13265,7 +14382,7 @@ function registerKskHunterIpcHandlers(deps) {
         await deps.getManager().reload();
         return await respondSnapshot();
       } catch (error) {
-        return toError(error);
+        return toError$1(error);
       }
     }
   );
@@ -13277,7 +14394,7 @@ function registerKskHunterIpcHandlers(deps) {
         await deps.getManager().reload();
         return await respondSnapshot();
       } catch (error) {
-        return toError(error);
+        return toError$1(error);
       }
     }
   );
@@ -13287,7 +14404,7 @@ function registerKskHunterIpcHandlers(deps) {
       await deps.getManager().reload();
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.runNow, async () => {
@@ -13295,7 +14412,7 @@ function registerKskHunterIpcHandlers(deps) {
       await deps.getManager().runNow();
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.retryDelivery, async (_event, deliveryId) => {
@@ -13303,7 +14420,7 @@ function registerKskHunterIpcHandlers(deps) {
       await deps.getManager().retryDelivery(deliveryId);
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.deleteDelivery, async (_event, deliveryId) => {
@@ -13311,7 +14428,7 @@ function registerKskHunterIpcHandlers(deps) {
       await deleteKskHunterDelivery(deliveryId);
       return await respondSnapshot();
     } catch (error) {
-      return toError(error);
+      return toError$1(error);
     }
   });
   electron.ipcMain.handle(
@@ -13320,7 +14437,7 @@ function registerKskHunterIpcHandlers(deps) {
       try {
         return { success: true, data: await deps.getManager().report(days) };
       } catch (error) {
-        return toError(error);
+        return toError$1(error);
       }
     }
   );
@@ -13332,6 +14449,313 @@ function registerKskHunterIpcHandlers(deps) {
       return { success: true, data: path2 };
     } catch {
       return { success: false, error: "报表历史文件还不存在，抢号产生第一条记录后才会生成" };
+    }
+  });
+  electron.ipcMain.handle(
+    KSK_HUNTER_CHANNEL_NAME.ledgerReport,
+    async (_event, days, sort) => {
+      try {
+        return { success: true, data: await deps.getManager().ledgerReport(days, sort) };
+      } catch (error) {
+        return toError$1(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    KSK_HUNTER_CHANNEL_NAME.clearLedger,
+    async () => {
+      try {
+        await clearKskLedger();
+        return { success: true, data: await deps.getManager().ledgerReport() };
+      } catch (error) {
+        return toError$1(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(KSK_HUNTER_CHANNEL_NAME.revealLedgerFile, async () => {
+    try {
+      const path2 = kskLedgerStorePath();
+      await node_fs.promises.access(path2);
+      electron.shell.showItemInFolder(path2);
+      return { success: true, data: path2 };
+    } catch {
+      return { success: false, error: "台账文件还不存在，抢到第一个号后才会生成" };
+    }
+  });
+}
+class DownstreamSettlementManager {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  timer = null;
+  stopped = true;
+  tickPromise = null;
+  async start() {
+    this.stopped = false;
+    this.scheduleNext(2e4);
+  }
+  stop() {
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+  scheduleNext(delayMs) {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.runTick();
+    }, delayMs);
+  }
+  /** 并发调用合并到同一次执行，避免手动触发撞上定时 tick 重复结算。 */
+  runTick() {
+    if (this.tickPromise) return this.tickPromise;
+    this.tickPromise = this.executeTick().finally(() => {
+      this.tickPromise = null;
+    });
+    return this.tickPromise;
+  }
+  /** 立刻跑一轮结算补齐，供页面手动触发。 */
+  async settleNow() {
+    await this.runTick();
+  }
+  async executeTick() {
+    try {
+      const state = await loadDeliveryLedger();
+      const pending = this.pendingDates(state);
+      for (const date of pending) await this.settleDay(date);
+      if (pending.length > 0) {
+        this.log(`已结算 ${pending.length} 天：${pending.join("、")}`);
+      }
+    } catch (error) {
+      this.log(`结算失败：${this.message(error)}`);
+    } finally {
+      this.scheduleNext(DOWNSTREAM_SETTLEMENT_TICK_MINUTES * 6e4);
+    }
+  }
+  /**
+   * 待结算的日期列表，从早到晚。
+   *
+   * 只结算**已经过去**的自然日：当天还在产生交付与消耗，定稿了数字就不再变，
+   * 会漏掉当天剩下的部分。
+   *
+   * 起点取「最后一次结算的次日」与「最早一条交付」的较晚者。没有交付记录时
+   * 返回空——没号可对账，不必凭空生成一堆空 CSV。
+   */
+  pendingDates(state) {
+    if (state.deliveries.length === 0) return [];
+    const todayStart = downstreamDayStart(Date.now());
+    const earliest = Math.min(...state.deliveries.map((item) => item.deliveredAt));
+    let cursor = downstreamDayStart(earliest);
+    if (state.lastSettledDate) {
+      const lastStart = downstreamDateKeyToStart(state.lastSettledDate);
+      if (lastStart !== void 0) {
+        const next = new Date(lastStart);
+        next.setDate(next.getDate() + 1);
+        cursor = Math.max(cursor, next.getTime());
+      }
+    }
+    const dates = [];
+    const maxDays = 400;
+    while (cursor < todayStart && dates.length < maxDays) {
+      dates.push(hunterLocalDateKey(cursor));
+      const next = new Date(cursor);
+      next.setDate(next.getDate() + 1);
+      cursor = next.getTime();
+    }
+    if (dates.length >= maxDays) {
+      this.log(`未结算的历史超过 ${maxDays} 天，只补最近 ${maxDays} 天`);
+    }
+    return dates;
+  }
+  /** CSV 导出目录。用户配了就用配的（必须是绝对路径），否则落 userData 下的子目录。 */
+  async resolveCsvDir() {
+    const configured = (await this.deps.readCsvDir())?.trim();
+    if (configured && node_path.isAbsolute(configured)) return configured;
+    return node_path.join(this.deps.userDataDir(), DOWNSTREAM_CSV_DIR_NAME);
+  }
+  /**
+   * 导出某一天的 CSV，返回文件路径。
+   *
+   * 纯读，不动锚点。覆盖同名文件：同一天可能先手动导一次、午夜再自动结算一次，
+   * 覆盖比生成两份带后缀的文件好——对账时不用猜哪份是准的。
+   */
+  async exportDay(date) {
+    const state = await loadDeliveryLedger();
+    const usage = await this.readUsageSafely();
+    const groupNames = await this.readGroupNamesSafely();
+    const report = summarizeDownstreamDay({
+      deliveries: state.deliveries,
+      settlements: state.settlements,
+      usage,
+      groupNames,
+      date
+    });
+    const keyById = new Map(state.deliveries.map((item) => [item.id, item.key]));
+    const rows = report.rows.map((row) => ({
+      ...row,
+      key: keyById.get(row.id) ?? ""
+    }));
+    const dir = await this.resolveCsvDir();
+    await node_fs.promises.mkdir(dir, { recursive: true });
+    const path2 = node_path.join(dir, downstreamCsvFileName(date));
+    await node_fs.promises.writeFile(path2, buildDownstreamCsv(rows, date), { encoding: "utf-8", mode: 384 });
+    return path2;
+  }
+  /**
+   * 结算某一天：先导出 CSV，再落定稿并推进锚点。
+   *
+   * 顺序不能反。CSV 是长期存档，落定稿之前先把它写成功——反过来的话导出失败
+   * 就再也导不出这一天了（锚点已推进，积分增量算不回来）。
+   */
+  async settleDay(date) {
+    await this.exportDay(date);
+    const state = await loadDeliveryLedger();
+    const usage = await this.readUsageSafely();
+    const now = Date.now();
+    const computed = computeDownstreamSettlement({
+      deliveries: state.deliveries,
+      usage,
+      date,
+      at: now
+    });
+    await commitDownstreamSettlement({
+      date,
+      settlement: computed.settlement,
+      deliveries: computed.deliveries,
+      now
+    });
+  }
+  /** 某一天的完整报表：日明细 + 按天汇总 + 导出目录。 */
+  async report(input) {
+    const state = await loadDeliveryLedger();
+    const usage = await this.readUsageSafely();
+    const groupNames = await this.readGroupNamesSafely();
+    const now = Date.now();
+    const days = input?.days ?? DOWNSTREAM_REPORT_WINDOW_DAYS;
+    const day = summarizeDownstreamDay({
+      deliveries: state.deliveries,
+      settlements: state.settlements,
+      usage,
+      groupNames,
+      date: input?.date,
+      now
+    });
+    return {
+      ...day,
+      days,
+      daily: summarizeDownstreamDaily({
+        deliveries: state.deliveries,
+        settlements: state.settlements,
+        usage,
+        days,
+        now
+      }),
+      csvDir: await this.resolveCsvDir()
+    };
+  }
+  /**
+   * 台账读失败时按空处理。
+   *
+   * 空 usage 会让所有积分列显示「未知」而不是 0，且 `computeDownstreamSettlement`
+   * 不会推进查不到的号的锚点——下一轮台账恢复后能补上，不会永久丢账。
+   */
+  async readUsageSafely() {
+    try {
+      return await this.deps.readLedgerUsage();
+    } catch (error) {
+      this.log(`读取台账消耗失败，本轮积分按未知处理：${this.message(error)}`);
+      return {};
+    }
+  }
+  async readGroupNamesSafely() {
+    try {
+      return await this.deps.readGroupNames?.() ?? {};
+    } catch {
+      return {};
+    }
+  }
+  message(error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  log(message) {
+    this.deps.log?.(`[DownstreamSettlement] ${message}`);
+  }
+}
+const DOWNSTREAM_SETTLEMENT_CHANNEL = {
+  report: "downstream-settlement-report",
+  exportDay: "downstream-settlement-export-day",
+  settleNow: "downstream-settlement-settle-now",
+  pickCsvDir: "downstream-settlement-pick-csv-dir",
+  openCsvDir: "downstream-settlement-open-csv-dir"
+};
+function toError(error) {
+  return { success: false, error: error instanceof Error ? error.message : String(error) };
+}
+function registerDownstreamSettlementIpcHandlers(deps) {
+  electron.ipcMain.handle(
+    DOWNSTREAM_SETTLEMENT_CHANNEL.report,
+    async (_event, date, days) => {
+      try {
+        return { success: true, data: await deps.getManager().report({ date, days }) };
+      } catch (error) {
+        return toError(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    DOWNSTREAM_SETTLEMENT_CHANNEL.exportDay,
+    async (_event, date) => {
+      try {
+        return { success: true, data: await deps.getManager().exportDay(date) };
+      } catch (error) {
+        return toError(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    DOWNSTREAM_SETTLEMENT_CHANNEL.settleNow,
+    async () => {
+      try {
+        const manager = deps.getManager();
+        await manager.settleNow();
+        return { success: true, data: await manager.report() };
+      } catch (error) {
+        return toError(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    DOWNSTREAM_SETTLEMENT_CHANNEL.pickCsvDir,
+    async () => {
+      try {
+        const win2 = deps.getMainWindow();
+        if (!win2 || win2.isDestroyed()) throw new Error("窗口不可用");
+        const result = await electron.dialog.showOpenDialog(win2, {
+          title: "选择对账 CSV 的存放目录",
+          message: "CSV 里含完整 KSK 明文；选择云同步目录会把它们上传到云端",
+          properties: ["openDirectory", "createDirectory"]
+        });
+        if (result.canceled || result.filePaths.length === 0) return { success: true, data: null };
+        const dir = result.filePaths[0];
+        await node_fs.promises.access(dir);
+        if (!node_path.isAbsolute(dir)) throw new Error("请选择一个绝对路径目录");
+        await deps.saveCsvDir(dir);
+        return { success: true, data: dir };
+      } catch (error) {
+        return toError(error);
+      }
+    }
+  );
+  electron.ipcMain.handle(DOWNSTREAM_SETTLEMENT_CHANNEL.openCsvDir, async () => {
+    try {
+      const dir = await deps.getManager().resolveCsvDir();
+      await node_fs.promises.mkdir(dir, { recursive: true });
+      const failure = await electron.shell.openPath(dir);
+      if (failure) throw new Error(failure);
+      return { success: true, data: dir };
+    } catch (error) {
+      return toError(error);
     }
   });
 }
@@ -14912,7 +16336,13 @@ async function importProviderKskCredential(input) {
     store.set("accountData", next);
     lastSavedData = next;
     await createBackup(next);
-    return { ...input, added: true };
+    return {
+      ...input,
+      added: true,
+      accountId: account.id,
+      usageCurrent: totalCurrent,
+      usageLimit: totalLimit
+    };
   });
 }
 async function resolveKskLivenessModelId(probeAccount, configured) {
@@ -15071,6 +16501,18 @@ async function cleanupInvalidStoredKskAccounts(groupId, liveness = {}) {
     await createBackup(next);
     return removedIds2;
   });
+  const retiredAt = Date.now();
+  await Promise.all(
+    removedIds.map(
+      (accountId) => markKskLedgerRetired({
+        accountId,
+        at: retiredAt,
+        reason: KSK_LEDGER_RETIRE_REASON.INVALID
+      }).catch((error) => {
+        console.warn("[KskLedger] Failed to mark retired:", error);
+      })
+    )
+  );
   result.removed = removedIds.length;
   result.removedKeys = removedIds.map((accountId) => permanentlyInvalid.get(accountId)?.key).filter((key) => Boolean(key));
   return result;
@@ -15131,6 +16573,18 @@ async function cleanupExhaustedLocalAdminCredentials(credentials) {
   try {
     const local = await removeStoredKskAccountsByHash(hashes);
     summary.removedLocalAccounts = local.removedIds.length;
+    const retiredAt = Date.now();
+    await Promise.all(
+      local.removedIds.map(
+        (accountId) => markKskLedgerRetired({
+          accountId,
+          at: retiredAt,
+          reason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
+        }).catch((error) => {
+          console.warn("[KskLedger] Failed to mark retired:", error);
+        })
+      )
+    );
     kskAutomationManager.blacklistKeys(local.removedKeys);
     if (local.removedIds.length > 0) sendKskAutomationAccountsChanged(() => mainWindow);
   } catch (error) {
@@ -15139,6 +16593,22 @@ async function cleanupExhaustedLocalAdminCredentials(credentials) {
     );
   }
   return summary;
+}
+async function syncKskLedgerFromAccounts() {
+  try {
+    const observations = await accountStoreCoordinator.runExclusive(async () => {
+      await initStore();
+      const data = store.get("accountData", EMPTY_ACCOUNT_DATA);
+      return Object.entries(data.accounts ?? {}).map(([accountId, account]) => ({
+        accountId,
+        currentUsage: account.usage?.current,
+        usageLimit: account.usage?.limit
+      }));
+    });
+    await updateKskLedgerFromAccounts({ observations, at: Date.now() });
+  } catch (error) {
+    console.warn("[KskLedger] Failed to sync from accounts:", error);
+  }
 }
 async function readKskAccountsForLocalAdmin(groupId) {
   return await accountStoreCoordinator.runExclusive(async () => {
@@ -15150,7 +16620,7 @@ async function readKskAccountsForLocalAdmin(groupId) {
       if (account.groupId !== groupId || account.credentials?.credentialKind !== "kiro_api_key" || !key || !region) {
         return [];
       }
-      return [{ kiroApiKey: key, region }];
+      return [{ kiroApiKey: key, region, email: account.email }];
     });
   });
 }
@@ -15204,7 +16674,12 @@ const kskHunterManager = new KskHunterManager({
   importCredential: async (input) => {
     const result = await importProviderKskCredential(input);
     if (result.rejected) throw new Error("发消息验活未通过，该号已不可用");
-    return { added: result.added };
+    return {
+      added: result.added,
+      accountId: result.accountId,
+      usageCurrent: result.usageCurrent,
+      usageLimit: result.usageLimit
+    };
   },
   notifyInStock: ({ linkName, title, region }) => {
     localNotifications.notify(LocalNoticeKind.KskHunterInStock, {
@@ -15218,6 +16693,14 @@ const kskHunterManager = new KskHunterManager({
       bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并推送下游。`
     });
   },
+  // 台账报表要显示分组名；台账只存 id，分组可改名，所以每次现查
+  readGroupNames: async () => accountStoreCoordinator.runExclusive(async () => {
+    await initStore();
+    const data = store.get("accountData", EMPTY_ACCOUNT_DATA);
+    return Object.fromEntries(
+      Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
+    );
+  }),
   notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
   notifyBudgetExhausted: ({ scope, channelLabel, spentCny, limitCny }) => {
     const unit = scope === "global" ? "¥" : "";
@@ -15236,6 +16719,33 @@ const kskHunterManager = new KskHunterManager({
     void sendKskHunterStatus(() => mainWindow, kskHunterManager).catch(() => {
     });
   },
+  log: (message) => console.log(message)
+});
+const downstreamSettlementManager = new DownstreamSettlementManager({
+  readCsvDir: async () => (await loadKskHunterStore()).config.csvExportDir,
+  userDataDir: () => electron.app.getPath("userData"),
+  readLedgerUsage: async () => {
+    const entries = await loadKskLedger();
+    return Object.fromEntries(
+      entries.map((entry) => [
+        entry.accountId,
+        {
+          accountId: entry.accountId,
+          usedCredits: entry.usedCredits,
+          usageLimit: entry.usageLimit,
+          state: resolveLedgerState(entry)
+        }
+      ])
+    );
+  },
+  // 分组名要现查：交付账本只存 id，分组随时可能改名或被删
+  readGroupNames: async () => accountStoreCoordinator.runExclusive(async () => {
+    await initStore();
+    const data = store.get("accountData", EMPTY_ACCOUNT_DATA);
+    return Object.fromEntries(
+      Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
+    );
+  }),
   log: (message) => console.log(message)
 });
 async function initStoreInternal() {
@@ -15704,6 +17214,16 @@ electron.app.whenReady().then(async () => {
   void kskHunterManager.start().catch((err) => {
     console.warn("[KskHunter] Failed to start:", err);
   });
+  registerDownstreamSettlementIpcHandlers({
+    getManager: () => downstreamSettlementManager,
+    getMainWindow: () => mainWindow,
+    saveCsvDir: async (dir) => {
+      await updateKskHunterConfig({ csvExportDir: dir }, void 0);
+    }
+  });
+  void downstreamSettlementManager.start().catch((err) => {
+    console.warn("[DownstreamSettlement] Failed to start:", err);
+  });
   electron.ipcMain.handle("get-tray-settings", () => {
     return traySettings;
   });
@@ -16020,6 +17540,7 @@ electron.app.whenReady().then(async () => {
       }
     });
     kskAutomationManager.queueLocalAdminSync();
+    void syncKskLedgerFromAccounts();
   });
   electron.ipcMain.handle(
     "refresh-account-token",

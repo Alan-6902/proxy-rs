@@ -1,9 +1,24 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import {
+  Activity,
+  CheckCircle2,
+  Database,
+  FileUp,
+  Gauge,
+  LogOut,
+  Moon,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Server,
+  Sun,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { CredentialCard } from '@/components/credential-card'
@@ -211,7 +226,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     const failedIds = Array.from(selectedIds).filter(id => {
       const cred = data?.credentials.find(c => c.id === id)
-      return cred && cred.failureCount > 0
+      return cred && (cred.failureCount > 0 || cred.refreshFailureCount > 0)
     })
 
     if (failedIds.length === 0) {
@@ -523,12 +538,21 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
+  const totalCredentials = data?.total || 0
+  const availableCredentials = data?.available || 0
+
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-muted-foreground">加载中...</p>
+      <div className="admin-shell flex min-h-screen items-center justify-center p-6">
+        <div className="control-deck w-full max-w-sm p-8 text-center">
+          <div className="brand-mark mx-auto mb-5">
+            <Server className="h-5 w-5" />
+          </div>
+          <div className="mx-auto mb-4 h-1.5 w-24 overflow-hidden rounded-full bg-muted">
+            <div className="h-full w-2/3 animate-pulse rounded-full bg-primary" />
+          </div>
+          <p className="font-console-display text-lg">正在接入控制平面</p>
+          <p className="mt-1 text-sm text-muted-foreground">同步凭据与运行状态...</p>
         </div>
       </div>
     )
@@ -536,10 +560,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
-        <Card className="w-full max-w-md">
+      <div className="admin-shell flex min-h-screen items-center justify-center p-4">
+        <Card className="control-deck w-full max-w-md border-destructive/30">
           <CardContent className="pt-6 text-center">
-            <div className="text-red-500 mb-4">加载失败</div>
+            <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-destructive/10 text-destructive">
+              <Activity className="h-5 w-5" />
+            </div>
+            <div className="font-console-display mb-2 text-xl">控制平面连接失败</div>
             <p className="text-muted-foreground mb-4">{(error as Error).message}</p>
             <div className="space-x-2">
               <Button onClick={() => refetch()}>重试</Button>
@@ -552,171 +579,144 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="admin-shell">
       {/* 顶部导航 */}
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-14 items-center justify-between px-4 md:px-8">
-          <div className="flex items-center gap-2">
-            <Server className="h-5 w-5" />
-            <span className="font-semibold">Kiro Admin</span>
+      <header className="admin-topbar">
+        <div className="mx-auto flex min-h-[64px] max-w-[1600px] items-center justify-between gap-4 px-4 py-2.5 md:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="brand-mark shrink-0">
+              <Server className="h-5 w-5" />
+            </div>
+            <div className="flex min-w-0 items-center gap-2.5">
+              <div className="truncate text-[17px] font-bold leading-none tracking-[-0.025em]">Kiro Admin</div>
+              <span className="hidden h-4 w-px bg-border sm:block" aria-hidden="true" />
+              <div className="hidden items-center gap-1.5 text-xs font-medium text-muted-foreground sm:flex">
+                <span className="telemetry-dot" aria-hidden="true" />
+                <span className="whitespace-nowrap">凭据控制台</span>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <Button
               variant="outline"
               size="sm"
               onClick={handleToggleLoadBalancing}
               disabled={isLoadingMode || isSettingMode}
               title="切换负载均衡模式"
+              aria-label={`切换负载均衡模式，当前为${loadBalancingData?.mode === 'balanced' ? '均衡负载模式' : '优先级模式'}`}
+              className="h-9 gap-2 rounded-xl bg-card/70 px-2.5 shadow-sm sm:px-3"
             >
-              {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
+              <Gauge className="h-4 w-4 text-primary" />
+              <span className="hidden md:inline">
+                {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
+              </span>
             </Button>
-            <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
-              {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+            <Button variant="ghost" size="icon" onClick={toggleDarkMode} className="h-9 w-9 rounded-xl" aria-label="切换深浅色主题" title="切换深浅色主题">
+              {darkMode ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleRefresh}>
-              <RefreshCw className="h-5 w-5" />
+            <Button variant="ghost" size="icon" onClick={handleRefresh} className="h-9 w-9 rounded-xl" aria-label="刷新凭据列表" title="刷新凭据列表">
+              <RefreshCw className="h-[18px] w-[18px]" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleLogout}>
-              <LogOut className="h-5 w-5" />
+            <Button variant="ghost" size="icon" onClick={handleLogout} className="h-9 w-9 rounded-xl" aria-label="退出登录" title="退出登录">
+              <LogOut className="h-[18px] w-[18px]" />
             </Button>
           </div>
         </div>
       </header>
 
       {/* 主内容 */}
-      <main className="container mx-auto px-4 md:px-8 py-6">
-        {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                凭据总数
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{data?.total || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                可用凭据
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-green-600">{data?.available || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                当前活跃
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold flex items-center gap-2">
-                #{data?.currentId || '-'}
-                <Badge variant="success">活跃</Badge>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* 凭据列表 */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <h2 className="text-xl font-semibold">凭据管理</h2>
-              {selectedIds.size > 0 && (
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
-                  <Button onClick={deselectAll} size="sm" variant="ghost">
-                    取消选择
-                  </Button>
-                </div>
-              )}
+      <main className="mx-auto max-w-[1680px] px-4 pb-10 pt-4 md:px-8">
+        <section className="credential-toolbar mb-3" aria-labelledby="credential-list-title">
+          <div className="credential-toolbar__summary">
+            <div className="flex min-w-0 items-baseline gap-2.5">
+              <h1 id="credential-list-title" className="whitespace-nowrap text-lg font-semibold tracking-tight">凭据管理</h1>
+              <span className="text-xs tabular-nums text-muted-foreground">{data?.credentials.length || 0} 条</span>
             </div>
-            <div className="flex gap-2">
-              {selectedIds.size > 0 && (
-                <>
-                  <Button onClick={handleBatchVerify} size="sm" variant="outline">
-                    <CheckCircle2 className="h-4 w-4 mr-2" />
-                    批量验活
-                  </Button>
-                  <Button
-                    onClick={handleBatchForceRefresh}
-                    size="sm"
-                    variant="outline"
-                    disabled={batchRefreshing}
-                  >
-                    <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
-                    {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
-                  </Button>
-                  <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
-                    <RotateCcw className="h-4 w-4 mr-2" />
-                    恢复异常
-                  </Button>
-                  <Button
-                    onClick={handleBatchDelete}
-                    size="sm"
-                    variant="destructive"
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    批量删除 ({selectedIds.size})
-                  </Button>
-                </>
-              )}
-              {verifying && !verifyDialogOpen && (
-                <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
-                  <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
-                  验活中... {verifyProgress.current}/{verifyProgress.total}
-                </Button>
-              )}
-              {data?.credentials && data.credentials.length > 0 && (
-                <Button
-                  onClick={handleQueryCurrentPageInfo}
-                  size="sm"
-                  variant="outline"
-                  disabled={queryingInfo}
-                >
-                  <RefreshCw className={`h-4 w-4 mr-2 ${queryingInfo ? 'animate-spin' : ''}`} />
-                  {queryingInfo ? `查询中... ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询信息'}
-                </Button>
-              )}
-              {data?.credentials && data.credentials.length > 0 && (
-                <Button
-                  onClick={handleClearAll}
-                  size="sm"
-                  variant="outline"
-                  className="text-destructive hover:text-destructive"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  清除已禁用
-                </Button>
-              )}
-              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
-                <FileUp className="h-4 w-4 mr-2" />
-                Kiro Account Manager 导入
-              </Button>
-              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
-                <Upload className="h-4 w-4 mr-2" />
-                批量导入
-              </Button>
-              <Button onClick={() => setAddDialogOpen(true)} size="sm">
-                <Plus className="h-4 w-4 mr-2" />
-                添加凭据
-              </Button>
+            <div className="credential-toolbar__stats" aria-label="凭据统计">
+              <span className="credential-toolbar__stat"><span>总数</span><strong>{totalCredentials}</strong></span>
+              <span className="credential-toolbar__stat"><span>可用</span><strong className="text-emerald-600 dark:text-emerald-400">{availableCredentials}</strong></span>
+              <span className="credential-toolbar__stat"><span>当前</span><strong>#{data?.currentId || '-'}</strong></span>
             </div>
           </div>
+
+          <div className="credential-toolbar__actions [&_button]:rounded-lg">
+                {verifying && !verifyDialogOpen && (
+                  <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary" className="h-8 px-2.5 text-xs">
+                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    {verifyProgress.current}/{verifyProgress.total}
+                  </Button>
+                )}
+                {data?.credentials && data.credentials.length > 0 && (
+                  <Button
+                    onClick={handleQueryCurrentPageInfo}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2.5 text-xs"
+                    disabled={queryingInfo}
+                    title="更新当前页凭据额度"
+                  >
+                    <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${queryingInfo ? 'animate-spin' : ''}`} />
+                    {queryingInfo ? `${queryInfoProgress.current}/${queryInfoProgress.total}` : '更新额度'}
+                  </Button>
+                )}
+                {data?.credentials && data.credentials.length > 0 && (
+                  <Button onClick={handleClearAll} size="sm" variant="outline" className="h-8 px-2.5 text-xs text-destructive hover:text-destructive">
+                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                    清理禁用
+                  </Button>
+                )}
+                <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline" className="h-8 px-2.5 text-xs" title="从 Kiro Account Manager 导入">
+                  <FileUp className="mr-1.5 h-3.5 w-3.5" />
+                  KAM 导入
+                </Button>
+                <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline" className="h-8 px-2.5 text-xs">
+                  <Upload className="mr-1.5 h-3.5 w-3.5" />
+                  批量导入
+                </Button>
+                <Button onClick={() => setAddDialogOpen(true)} size="sm" className="h-8 px-2.5 text-xs shadow-[0_6px_18px_hsl(var(--primary)/0.18)]">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  添加凭据
+                </Button>
+          </div>
+
+          {selectedIds.size > 0 && (
+              <div className="credential-toolbar__selection">
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary" className="rounded-full">已选 {selectedIds.size}</Badge>
+                  <Button onClick={deselectAll} size="sm" variant="ghost" className="h-7 rounded-full px-2 text-xs">取消</Button>
+                </div>
+                <div className="flex flex-wrap justify-end gap-1.5 [&_button]:h-7 [&_button]:rounded-lg [&_button]:px-2 [&_button]:text-xs">
+                  <Button onClick={handleBatchVerify} size="sm" variant="outline"><CheckCircle2 className="mr-1 h-3.5 w-3.5" />验活</Button>
+                  <Button onClick={handleBatchForceRefresh} size="sm" variant="outline" disabled={batchRefreshing}>
+                    <RefreshCw className={`mr-1 h-3.5 w-3.5 ${batchRefreshing ? 'animate-spin' : ''}`} />
+                    {batchRefreshing ? `${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '刷新 Token'}
+                  </Button>
+                  <Button onClick={handleBatchResetFailure} size="sm" variant="outline"><RotateCcw className="mr-1 h-3.5 w-3.5" />恢复</Button>
+                  <Button onClick={handleBatchDelete} size="sm" variant="destructive"><Trash2 className="mr-1 h-3.5 w-3.5" />删除</Button>
+                </div>
+              </div>
+          )}
+        </section>
+
+        {/* 凭据列表 */}
+        <div className="space-y-3">
           {data?.credentials.length === 0 ? (
-            <Card>
-              <CardContent className="py-8 text-center text-muted-foreground">
-                暂无凭据
+            <Card className="control-deck border-dashed">
+              <CardContent className="flex flex-col items-center py-14 text-center">
+                <div className="metric-icon mb-4 h-12 w-12 rounded-2xl">
+                  <Database className="h-5 w-5" />
+                </div>
+                <div className="font-console-display text-xl text-foreground">凭据池还是空的</div>
+                <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">添加单个凭据，或使用批量导入快速建立可调度的账号池。</p>
+                <Button onClick={() => setAddDialogOpen(true)} size="sm" className="mt-5 rounded-xl">
+                  <Plus className="mr-2 h-4 w-4" />
+                  添加第一条凭据
+                </Button>
               </CardContent>
             </Card>
           ) : (
             <>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="credential-grid grid gap-3">
                 {currentCredentials.map((credential) => (
                   <CredentialCard
                     key={credential.id}
@@ -732,21 +732,23 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
               {/* 分页控件 */}
               {totalPages > 1 && (
-                <div className="flex justify-center items-center gap-4 mt-6">
+                <div className="control-deck mt-7 flex flex-wrap items-center justify-center gap-3 px-4 py-3">
                   <Button
                     variant="outline"
                     size="sm"
+                    className="rounded-xl bg-background/60"
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
                   >
                     上一页
                   </Button>
-                  <span className="text-sm text-muted-foreground">
+                  <span className="px-2 text-center text-xs font-semibold tabular-nums text-muted-foreground sm:text-sm">
                     第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
                   </span>
                   <Button
                     variant="outline"
                     size="sm"
+                    className="rounded-xl bg-background/60"
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                     disabled={currentPage === totalPages}
                   >

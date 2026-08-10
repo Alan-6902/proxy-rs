@@ -396,7 +396,7 @@ export function ProxyStatsPage(): React.ReactNode {
         buckets: snapshot?.buckets ?? [],
         range: { date: reportDate, hour },
         now: Date.now(),
-        presentIds: (snapshot?.credentials ?? []).map((item) => item.id)
+        present: snapshot?.credentials ?? []
       }),
     [snapshot, reportDate, hour]
   )
@@ -675,8 +675,9 @@ export function ProxyStatsPage(): React.ReactNode {
                   号被原主或别的反代共用时会比前者涨得快，两者差距大的号很可能在被别处使用。
                   积分与额度同单位，但积分是估算：上游不下发逐次扣减量，kiro-rs 只能在
                   「本机确实有调用」的观测窗口里对累计额度做差分。 按相邻两次采样的差值累加，每{' '}
-                  {LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS} 秒一轮， 计数归零或换号时该轮增量按 0
-                  计，不会出现负值。
+                  {LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS} 秒一轮， 计数归零时该轮增量按 0
+                  计，不会出现负值。 Admin 的 #id 会被复用，换号后按脱敏 Key
+                  分行，旧号的消耗不会算到新号头上。
                 </p>
               </div>
               <Button
@@ -709,11 +710,23 @@ export function ProxyStatsPage(): React.ReactNode {
                     </tr>
                   </thead>
                   <tbody>
+                    {/* id 会被复用，同一个 id 可能有多行（换号），key 要带上 maskedKey */}
                     {report.rows.map((row) => (
-                      <tr key={row.id} className="border-b border-border/40 last:border-0">
+                      <tr
+                        key={`${row.id} ${row.maskedKey ?? ''}`}
+                        className="border-b border-border/40 last:border-0"
+                      >
                         <td className="px-2 py-2">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-medium">#{row.id}</span>
+                            {/*
+                              邮箱在前、#id 在后：邮箱是用户认得出的标识，而 #id 是与
+                              Admin 卡片对账用的编号，两个都得露出来。老凭据（推送时没带
+                              email）只有 #id。
+                            */}
+                            <span className="font-medium">{row.email || `#${row.id}`}</span>
+                            {row.email && (
+                              <span className="text-xs text-muted-foreground">#{row.id}</span>
+                            )}
                             {row.maskedKey && (
                               <span className="font-mono text-xs text-muted-foreground">
                                 {row.maskedKey}
@@ -902,8 +915,16 @@ export function ProxyStatsPage(): React.ReactNode {
                         )}
                       >
                         <td className="px-2 py-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">#{credential.id}</span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {/* 与 Admin 卡片同一口径：有邮箱显示邮箱，没有才退回「凭据 #id」 */}
+                            <span className="font-medium">
+                              {credential.email || `#${credential.id}`}
+                            </span>
+                            {credential.email && (
+                              <span className="text-xs text-muted-foreground">
+                                #{credential.id}
+                              </span>
+                            )}
                             {credential.isCurrent && (
                               <Badge variant="success" className="px-1.5 py-0 text-[10px]">
                                 当前

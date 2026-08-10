@@ -71,12 +71,6 @@ export interface LocalAdminCredentialStats {
   id: string
   /** Admin 侧的脱敏 Key，形如 ksk_...ibfB */
   maskedKey?: string
-  /**
-   * Admin 侧的 `sha256(ksk 明文)`。抢号台账靠它把「这个号花多少钱买的」
-   * 与「它替我烧了多少积分」对上（见 shared/kskLedger）。
-   * oauth 凭据没有这个字段。
-   */
-  apiKeyHash?: string
   authMethod?: string
   endpoint?: string
   email?: string
@@ -336,6 +330,14 @@ export interface LocalAdminHourlyCredentialDelta {
   id: string
   /** 观测时的脱敏 Key，凭据被删后报表仍能显示它是谁 */
   maskedKey?: string
+  /**
+   * 观测时的账号邮箱。
+   *
+   * 与 maskedKey 同样是「记下来才不会丢」的信息：Admin 侧 id 会复用、凭据会被删，
+   * 事后拿 id 去反查已经查不到了。邮箱是用户唯一认得出的标识，报表里必须能显示。
+   * 只有推送时带了 email 的凭据才有（见 normalizeLocalAdminEmail）。
+   */
+  email?: string
   /** 该小时新增的额度消耗（Kiro credits，含别处共用该号的量） */
   usageDelta: number
   /** 该小时经本机反代新增的输入 tokens（不含外部消耗） */
@@ -440,6 +442,7 @@ export function accumulateHourlyUsage(input: {
     const entry = deltaById.get(credential.id) ?? {
       id: credential.id,
       maskedKey: credential.maskedKey,
+      email: credential.email,
       usageDelta: 0,
       inputTokenDelta: 0,
       outputTokenDelta: 0,
@@ -451,6 +454,7 @@ export function accumulateHourlyUsage(input: {
     }
 
     entry.maskedKey = credential.maskedKey ?? entry.maskedKey
+    entry.email = credential.email ?? entry.email
     entry.successDelta += diffLocalAdminCounter(cursor?.successCount, credential.successCount)
     entry.failureDelta += diffLocalAdminCounter(cursor?.failureCount, credential.failureCount)
     entry.refreshFailureDelta += diffLocalAdminCounter(
@@ -517,6 +521,8 @@ export interface LocalAdminReportRange {
 export interface LocalAdminReportRow {
   id: string
   maskedKey?: string
+  /** 观测时的账号邮箱，凭据被删后报表仍能显示它是哪个号 */
+  email?: string
   /** 窗口内的额度消耗（账号口径，含别处共用该号的量） */
   usageDelta: number
   /** 窗口内经本机反代的输入 tokens（我的消耗） */
@@ -586,16 +592,39 @@ export function resolveReportWindow(
   return { from: base.getTime(), to: base.getTime() + 3_600_000 }
 }
 
+/**
+ * 报表行的聚合键：id 与观测时的脱敏 Key 一起做键。
+ *
+ * 为什么不能只用 id：Admin 侧的 id 会复用（删掉 #2 再建一条还是 #2）。只按 id 聚合会
+ * 把前后两个号的消耗累加到同一行，而 maskedKey 被后来者覆盖，于是报表显示的是新号的
+ * Key、数字里却混着旧号的量。实测一天内 id 1 轮换过 8 个号，#2 那行 3737 积分全部
+ * 来自已被换掉的号，而当前占用 id 2 的号一分没花。
+ *
+ * 老桶（升级前落的）没有 maskedKey，键回落到 id 单独一组——与历史行为一致，不会
+ * 因为改键就把旧数据拆散。
+ */
+function reportRowKey(id: string, maskedKey?: string): string {
+  return maskedKey ? `${id} ${maskedKey}` : id
+}
+
 /** 按窗口聚合小时桶，得到每个账号的消耗报表。 */
 export function buildLocalAdminReport(input: {
   buckets: LocalAdminHourlyBucket[]
   range: LocalAdminReportRange
   now: number
-  /** 当前仍在 Admin 里的凭据 id，用于标记已删除的历史行 */
-  presentIds?: Iterable<string>
+  /**
+   * 当前仍在 Admin 里的凭据，用于标记已删除的历史行。
+   *
+   * 要连 maskedKey 一起比而不是只比 id：id 复用后同一个 id 会有多行（换号），
+   * 只按 id 判定会把已经被换掉的旧号也标成「还在」。
+   */
+  present?: Iterable<{ id: string; maskedKey?: string }>
 }): LocalAdminReport {
   const { from, to } = resolveReportWindow(input.range, input.now)
-  const present = new Set(input.presentIds ?? [])
+  const presentList = [...(input.present ?? [])]
+  const presentKeys = new Set(presentList.map((item) => reportRowKey(item.id, item.maskedKey)))
+  // 老桶的行没有 maskedKey，只能退回按 id 判定
+  const presentIds = new Set(presentList.map((item) => item.id))
   const rowById = new Map<string, LocalAdminReportRow>()
   let hoursWithData = 0
 
@@ -603,9 +632,11 @@ export function buildLocalAdminReport(input: {
     if (bucket.hour < from || bucket.hour >= to) continue
     if (bucket.credentials.length > 0) hoursWithData++
     for (const item of bucket.credentials) {
-      const row = rowById.get(item.id) ?? {
+      const key = reportRowKey(item.id, item.maskedKey)
+      const row = rowById.get(key) ?? {
         id: item.id,
         maskedKey: item.maskedKey,
+        email: item.email,
         usageDelta: 0,
         inputTokenDelta: 0,
         outputTokenDelta: 0,
@@ -614,9 +645,9 @@ export function buildLocalAdminReport(input: {
         failureDelta: 0,
         refreshFailureDelta: 0,
         lastSeenAt: 0,
-        present: present.has(item.id)
+        present: item.maskedKey ? presentKeys.has(key) : presentIds.has(item.id)
       }
-      row.maskedKey = item.maskedKey ?? row.maskedKey
+      row.email = item.email ?? row.email
       row.usageDelta += item.usageDelta
       // 老桶没有这几个字段，按 0 计而不是让整行变 NaN
       row.inputTokenDelta += item.inputTokenDelta ?? 0
@@ -631,7 +662,7 @@ export function buildLocalAdminReport(input: {
         if (item.usageCurrent !== undefined) row.usageCurrent = item.usageCurrent
         if (item.usageLimit !== undefined) row.usageLimit = item.usageLimit
       }
-      rowById.set(item.id, row)
+      rowById.set(key, row)
     }
   }
 

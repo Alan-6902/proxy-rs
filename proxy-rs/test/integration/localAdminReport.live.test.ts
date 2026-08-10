@@ -103,7 +103,7 @@ describe.runIf(BASE_URL && API_KEY)('反代统计 · 真实 Admin 消耗差分',
       buckets: state.buckets,
       range: { date: toLocalDateKey(Date.now()), hour: new Date().getHours() },
       now: Date.now(),
-      presentIds: second.map((item) => item.id)
+      present: second
     })
 
     // 核心断言：真实数据喂进来也不会出现负增量

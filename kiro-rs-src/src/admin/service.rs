@@ -17,8 +17,16 @@ use super::types::{
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
 };
 
-/// 余额缓存过期时间（秒），5 分钟
-const BALANCE_CACHE_TTL_SECS: i64 = 300;
+/// 余额缓存过期时间（秒）
+///
+/// 这个值同时决定积分归因的窗口宽度：`attribute_credit_usage` 只在缓存过期、
+/// 真去上游查了一次余额时才做一次差分。TTL 越长，一次差分覆盖的时间越久，
+/// 号被原主或别的反代共用的消耗被算进「我的积分」的机会就越大。
+///
+/// 60 秒与 proxy 侧的采样周期对齐（LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS），
+/// 让每轮采样都能推进一次基线。代价是每个凭据每分钟一次 getUsageLimits，
+/// 这是个轻量查询，且只在 Admin 有凭据时发生。
+const BALANCE_CACHE_TTL_SECS: i64 = 60;
 
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]

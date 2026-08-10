@@ -114,6 +114,8 @@ function normalizeDelta(value: unknown): LocalAdminHourlyCredentialDelta | null 
   return {
     id,
     maskedKey: readOptionalString(source.maskedKey),
+    // 升级前落的桶没有 email，读出来是 undefined，报表回落到显示 #id
+    email: readOptionalString(source.email),
     usageDelta: readDelta(source.usageDelta),
     // 升级前落的桶没有这几个键，按 0 读入
     inputTokenDelta: readDelta(source.inputTokenDelta),
@@ -170,7 +172,9 @@ export function normalizeCursorsPayload(payload: unknown): LocalAdminCumulativeC
         inputTokens: readOptionalNumber(record.inputTokens),
         outputTokens: readOptionalNumber(record.outputTokens),
         usedCredits: readOptionalNumber(record.usedCredits),
-        at: readCount(record.at)
+        at: readCount(record.at),
+        // 换号检测靠它：漏读会让 accumulateHourlyUsage 的 rotated 判断在重启后永久失效
+        maskedKey: readOptionalString(record.maskedKey)
       }
     })
     .filter((item): item is LocalAdminCumulativeCursor => item !== null)

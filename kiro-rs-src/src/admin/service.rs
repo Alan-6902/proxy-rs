@@ -17,16 +17,11 @@ use super::types::{
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
 };
 
-/// 余额缓存过期时间（秒）
+/// 余额缓存过期时间（秒），5 分钟
 ///
-/// 这个值同时决定积分归因的窗口宽度：`attribute_credit_usage` 只在缓存过期、
-/// 真去上游查了一次余额时才做一次差分。TTL 越长，一次差分覆盖的时间越久，
-/// 号被原主或别的反代共用的消耗被算进「我的积分」的机会就越大。
-///
-/// 60 秒与 proxy 侧的采样周期对齐（LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS），
-/// 让每轮采样都能推进一次基线。代价是每个凭据每分钟一次 getUsageLimits，
-/// 这是个轻量查询，且只在 Admin 有凭据时发生。
-const BALANCE_CACHE_TTL_SECS: i64 = 60;
+/// 积分统计已改为读上游 `meteringEvent` 的实测扣减量，不再依赖这份缓存的新鲜度
+/// 做额度差分，所以这里只需满足「页面上的余额别太旧」，无需为记账缩短。
+const BALANCE_CACHE_TTL_SECS: i64 = 300;
 
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,19 +32,6 @@ struct CachedBalance {
     data: BalanceResponse,
 }
 
-/// 积分差分的基线：上一次向上游查到的账号累计额度，以及当时的成功次数
-///
-/// 为什么不复用 `balance_cache`：那份缓存按 TTL 过期并在加载时丢弃旧条目，
-/// 而基线必须跨 TTL 与进程重启存活——丢了基线就只能重新建，那一段消耗会漏记。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreditCursor {
-    /// 上一次观测到的账号累计额度消耗
-    current_usage: f64,
-    /// 上一次观测时该凭据经本反代的成功次数
-    success_count: u64,
-}
-
 /// Admin 服务
 ///
 /// 封装所有 Admin API 的业务逻辑
@@ -57,9 +39,6 @@ pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
-    /// 积分差分基线，按凭据 id 索引
-    credit_cursors: Mutex<HashMap<u64, CreditCursor>>,
-    credit_cursor_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
 }
@@ -72,19 +51,13 @@ impl AdminService {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
-        let credit_cursor_path = token_manager
-            .cache_dir()
-            .map(|d| d.join("kiro_credit_cursors.json"));
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
-        let credit_cursors = Self::load_credit_cursors_from(&credit_cursor_path);
 
         Self {
             token_manager,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
-            credit_cursors: Mutex::new(credit_cursors),
-            credit_cursor_path,
             known_endpoints: known_endpoints.into_iter().collect(),
         }
     }
@@ -217,8 +190,6 @@ impl AdminService {
             0.0
         };
 
-        self.attribute_credit_usage(id, current_usage);
-
         Ok(BalanceResponse {
             id,
             subscription_title: usage.subscription_title().map(|s| s.to_string()),
@@ -228,44 +199,6 @@ impl AdminService {
             usage_percentage,
             next_reset_at: usage.next_date_reset,
         })
-    }
-
-    /// 把本次观测到的额度增量归因给本反代的消耗
-    ///
-    /// 这是「我消耗了多少积分」的唯一数据来源，因为 AWS 不下发逐次扣减量。做法是
-    /// 保存上一次观测到的累计额度与当时的成功次数，两次观测之间：
-    /// - 成功次数没变 → 本反代没调用过，额度即使涨了也是别处共用该号造成的，不记；
-    /// - 成功次数变了 → 这段增量记到该凭据上。
-    ///
-    /// 剩下的不准确性无法消除：同一个观测窗口内本反代与外部同时用这个号时，两者的
-    /// 消耗混在一个增量里分不开。额度按月重置导致的负增量由 `record_credit_usage`
-    /// 挡掉（只收正数），代价是跨重置那次观测会少记重置后新产生的部分。
-    fn attribute_credit_usage(&self, id: u64, current_usage: f64) {
-        let Some(success_count) = self.token_manager.success_count_of(id) else {
-            // 凭据已被删除，没有可归因的对象
-            return;
-        };
-        let previous = {
-            let mut cursors = self.credit_cursors.lock();
-            cursors.insert(
-                id,
-                CreditCursor {
-                    current_usage,
-                    success_count,
-                },
-            )
-        };
-        self.save_credit_cursors();
-
-        // 首次观测只建基线：这条凭据入库前的历史消耗不该算成本反代的
-        let Some(previous) = previous else {
-            return;
-        };
-        if success_count == previous.success_count {
-            return;
-        }
-        self.token_manager
-            .record_credit_usage(id, current_usage - previous.current_usage);
     }
 
     /// 添加新凭据
@@ -344,17 +277,6 @@ impl AdminService {
             cache.remove(&id);
         }
         self.save_balance_cache();
-
-        /*
-         * 基线也要一起丢：id 会被复用（删掉 #1 再建一条还是 #1），留着旧号的
-         * 大额度当基线，新号第一次观测就会得到一个负增量（被挡掉，只是少记），
-         * 但反过来若旧号额度更低，新号入库前的历史消耗会被整段算成本反代的。
-         */
-        {
-            let mut cursors = self.credit_cursors.lock();
-            cursors.remove(&id);
-        }
-        self.save_credit_cursors();
 
         Ok(())
     }
@@ -447,52 +369,6 @@ impl AdminService {
                 }
             }
             Err(e) => tracing::warn!("序列化余额缓存失败: {}", e),
-        }
-    }
-
-    // ============ 积分差分基线持久化 ============
-
-    /// 加载积分基线。与余额缓存不同，这里不按 TTL 丢弃：基线过期就得重建，
-    /// 重建期间那一段消耗会漏记，所以只要文件在就一直用。
-    fn load_credit_cursors_from(path: &Option<PathBuf>) -> HashMap<u64, CreditCursor> {
-        let path = match path {
-            Some(p) => p,
-            None => return HashMap::new(),
-        };
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return HashMap::new(),
-        };
-        let map: HashMap<String, CreditCursor> = match serde_json::from_str(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("解析积分基线失败，将重建: {}", e);
-                return HashMap::new();
-            }
-        };
-        map.into_iter()
-            .filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v)))
-            .collect()
-    }
-
-    fn save_credit_cursors(&self) {
-        let path = match &self.credit_cursor_path {
-            Some(p) => p,
-            None => return,
-        };
-
-        // 持有锁期间完成序列化和写入，防止并发损坏
-        let cursors = self.credit_cursors.lock();
-        let map: HashMap<String, &CreditCursor> =
-            cursors.iter().map(|(k, v)| (k.to_string(), v)).collect();
-
-        match serde_json::to_string_pretty(&map) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(path, json) {
-                    tracing::warn!("保存积分基线失败: {}", e);
-                }
-            }
-            Err(e) => tracing::warn!("序列化积分基线失败: {}", e),
         }
     }
 

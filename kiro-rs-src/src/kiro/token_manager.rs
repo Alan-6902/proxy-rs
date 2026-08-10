@@ -1345,32 +1345,22 @@ impl MultiTokenManager {
         self.save_stats_debounced();
     }
 
-    /// 读取指定凭据当前的成功次数，用于积分差分的归因判断
+    /// 累加指定凭据经本反代消耗的 Kiro 积分
     ///
-    /// 返回 None 表示该凭据已不存在（被删除或 id 未注册）。
-    pub fn success_count_of(&self, id: u64) -> Option<u64> {
-        self.entries
-            .lock()
-            .iter()
-            .find(|e| e.id == id)
-            .map(|e| e.success_count)
-    }
-
-    /// 累加指定凭据经本反代消耗的账号额度（Kiro 积分）
+    /// 数据来源是上游每次请求都会下发的 `meteringEvent`（形如
+    /// `{"unit":"credit","usage":0.0174}`），由流处理层在读完流后调用，
+    /// 与 `record_token_usage` 同一时机。这是实测量而非估算：只累加确实经过
+    /// 本反代的那些请求，号被原主或别的反代共用时这个数不会涨。
     ///
-    /// 为什么只能这样估：AWS 不下发「本次请求扣了多少积分」，`getUsageLimits`
-    /// 只回累计值。调用方（AdminService）保存上一次观测到的累计额度，两次之间的
-    /// 正增量就是这段时间该号的总消耗，通过本方法归到凭据上。
-    ///
-    /// 归因的约束在调用方：只有当这两次观测之间本反代确实产生过成功调用时才记账，
-    /// 否则号被原主或别的反代共用的消耗会被算成自己的。即使如此仍是估算——同一个
-    /// 观测窗口内本反代与外部同时用这个号时，两者的消耗分不开。
+    /// 历史实现曾用 `/balance` 的账号累计额度做差分来倒推本反代消耗，前提是
+    /// 「AWS 不下发逐次扣减量」——该前提是错的。账号额度含别处共用该号的量，
+    /// 靠它做差分实测把 277 积分的真实消耗记成了 8781（偏高约 32 倍）。
     ///
     /// # Arguments
-    /// * `id` - 凭据 ID
-    /// * `delta` - 本次观测到的额度增量，必须为有限正数（其余一律忽略）
+    /// * `id` - 凭据 ID（来自 CallContext）
+    /// * `delta` - 本次请求的扣减量，必须为有限正数（其余一律忽略）
     pub fn record_credit_usage(&self, id: u64, delta: f64) {
-        // 负值与 NaN 都不该进累计：额度重置会让差分为负，NaN 会污染整份统计
+        // NaN 一旦进累计，之后所有加法都是 NaN，整份统计就废了
         if !delta.is_finite() || delta <= 0.0 {
             return;
         }
@@ -3091,18 +3081,4 @@ mod tests {
         assert_eq!(entry.used_credits, 0.0);
     }
 
-    #[tokio::test]
-    async fn test_success_count_of_tracks_reported_successes() {
-        let config = Config::default();
-        let mut cred = KiroCredentials::default();
-        cred.refresh_token = Some("rt-1".to_string());
-        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
-        let id = manager.snapshot().entries[0].id;
-
-        // 积分归因靠这个读数判断「两次观测之间本反代有没有调用过」
-        assert_eq!(manager.success_count_of(id), Some(0));
-        manager.report_success(id);
-        assert_eq!(manager.success_count_of(id), Some(1));
-        assert_eq!(manager.success_count_of(id + 9999), None);
-    }
 }

@@ -6,7 +6,6 @@ import {
   ChartLine,
   CheckCircle2,
   Coins,
-  Flame,
   Gauge,
   Loader2,
   RefreshCw,
@@ -34,7 +33,6 @@ import { cn } from '@/lib/utils'
 /** 表格排序维度。 */
 const SORT_KEY = {
   ID: 'id',
-  CREDITS: 'credits',
   SUCCESS: 'success',
   FAILURE: 'failure',
   LAST_USED: 'lastUsed',
@@ -45,7 +43,6 @@ type SortKey = (typeof SORT_KEY)[keyof typeof SORT_KEY]
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: SORT_KEY.ID, label: '编号' },
-  { key: SORT_KEY.CREDITS, label: '消耗积分' },
   { key: SORT_KEY.SUCCESS, label: '成功次数' },
   { key: SORT_KEY.FAILURE, label: '失败次数' },
   { key: SORT_KEY.LAST_USED, label: '最后调用' },
@@ -166,9 +163,6 @@ function compareCredentials(
   key: SortKey
 ): number {
   switch (key) {
-    case SORT_KEY.CREDITS:
-      // 没有积分数据的排最后，而不是当成 0 混在真花了 0 分的号里
-      return (b.usedCredits ?? -1) - (a.usedCredits ?? -1)
     case SORT_KEY.SUCCESS:
       return b.successCount - a.successCount
     case SORT_KEY.FAILURE:
@@ -415,12 +409,6 @@ export function ProxyStatsPage(): React.ReactNode {
     [snapshot]
   )
 
-  /** 积分统计是后加的字段，比 token 更晚才有，所以单独判一次支持性。 */
-  const creditSupported = useMemo(
-    () => (snapshot?.credentials ?? []).some((item) => item.usedCredits !== undefined),
-    [snapshot]
-  )
-
   /** KPI 与表头共用的窗口标签，避免「本小时/今天」两处写法不一致。 */
   const rangeLabel =
     reportHour === LOCAL_ADMIN_REPORT_ALL_HOURS
@@ -603,21 +591,7 @@ export function ProxyStatsPage(): React.ReactNode {
           KPI 统一用窗口口径（跟上方过滤器走），只有「凭据」和「剩余用量」是当下水位。
           累计计数不再上卡片：Admin 重启就归零，跟窗口口径混排还容易看串。
         */}
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          <KpiCard
-            label={`${rangeLabel} 我的积分`}
-            value={creditSupported ? formatUsage(report.creditDelta) : '不支持'}
-            hint={
-              // 均摊只在前端算：上游只存累计值，多存一个均值字段没意义
-              !creditSupported
-                ? '需升级 kiro-rs 才有此数据'
-                : report.successDelta > 0
-                  ? `估算 · 每次约 ${formatUsage(report.creditDelta / report.successDelta)}`
-                  : '估算 · 窗口内没有成功调用'
-            }
-            icon={Flame}
-            accent="#f43f5e"
-          />
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label={`${rangeLabel} 我的 token`}
             value={tokenSupported ? formatTokens(reportTokens) : '不支持'}
@@ -671,10 +645,11 @@ export function ProxyStatsPage(): React.ReactNode {
               <div>
                 <h2 className="text-sm font-medium">账号消耗明细 · {rangeLabel}</h2>
                 <p className="text-xs text-muted-foreground">
-                  「我的积分」「我的 token」只统计走本机反代的请求；「账号额度」是该号的总消耗，
+                  「我的 token」只统计走本机反代的请求；「账号额度」是该号的总消耗，
                   号被原主或别的反代共用时会比前者涨得快，两者差距大的号很可能在被别处使用。
-                  积分与额度同单位，但积分是估算：上游不下发逐次扣减量，kiro-rs 只能在
-                  「本机确实有调用」的观测窗口里对累计额度做差分。 按相邻两次采样的差值累加，每{' '}
+                  不再单列「我的积分」：上游既不下发可用的逐次扣减量（meteringEvent
+                  的值与实际扣减差约 26 倍），账号额度差分也分不清哪部分是自己烧的，
+                  两种口径实测都偏离一个量级以上。 按相邻两次采样的差值累加，每{' '}
                   {LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS} 秒一轮， 计数归零时该轮增量按 0
                   计，不会出现负值。 Admin 的 #id 会被复用，换号后按脱敏 Key
                   分行，旧号的消耗不会算到新号头上。
@@ -701,7 +676,6 @@ export function ProxyStatsPage(): React.ReactNode {
                   <thead>
                     <tr className="border-b border-border/60 text-xs text-muted-foreground">
                       <th className="px-2 py-2 text-left font-medium">账号</th>
-                      <th className="px-2 py-2 text-right font-medium">我的积分</th>
                       <th className="px-2 py-2 text-right font-medium">我的 token</th>
                       <th className="px-2 py-2 text-right font-medium">账号额度</th>
                       <th className="px-2 py-2 text-right font-medium">成功</th>
@@ -741,13 +715,6 @@ export function ProxyStatsPage(): React.ReactNode {
                               </Badge>
                             )}
                           </div>
-                        </td>
-                        {/* 我的积分与右侧「账号额度」同单位，相邻放便于看出差距 */}
-                        <td
-                          className="px-2 py-2 text-right font-medium tabular-nums text-rose-600 dark:text-rose-400"
-                          title="经本机反代消耗的积分（估算）；与右侧账号额度的差就是别处共用该号的量"
-                        >
-                          {creditSupported ? formatUsage(row.creditDelta) : '—'}
                         </td>
                         {/* 占比与输入/输出拆分不单独占列，压进 title：需要时悬浮即可 */}
                         <td
@@ -792,9 +759,6 @@ export function ProxyStatsPage(): React.ReactNode {
                   <tfoot>
                     <tr className="border-t border-border/60 text-xs">
                       <td className="px-2 py-2 font-medium">合计</td>
-                      <td className="px-2 py-2 text-right font-semibold tabular-nums">
-                        {creditSupported ? formatUsage(report.creditDelta) : '—'}
-                      </td>
                       <td
                         className="px-2 py-2 text-right font-semibold tabular-nums"
                         title={`${formatNumber(reportTokens)} tokens · 输入 ${formatNumber(report.inputTokenDelta)} · 输出 ${formatNumber(report.outputTokenDelta)}`}
@@ -895,7 +859,6 @@ export function ProxyStatsPage(): React.ReactNode {
                   <thead>
                     <tr className="border-b border-border/60 text-xs text-muted-foreground">
                       <th className="px-2 py-2 text-left font-medium">凭据</th>
-                      <th className="px-2 py-2 text-right font-medium">累计积分</th>
                       <th className="px-2 py-2 text-right font-medium">累计 token</th>
                       <th className="px-2 py-2 text-right font-medium">成功</th>
                       <th className="px-2 py-2 text-right font-medium">失败 / 刷新</th>
@@ -945,22 +908,6 @@ export function ProxyStatsPage(): React.ReactNode {
                               .filter(Boolean)
                               .join(' · ') || '—'}
                           </p>
-                        </td>
-                        <td
-                          className="px-2 py-2 text-right tabular-nums"
-                          title={
-                            credential.usedCredits === undefined
-                              ? '当前 kiro-rs 不返回积分统计'
-                              : '经本机反代消耗的积分累计值（估算）'
-                          }
-                        >
-                          {credential.usedCredits === undefined ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : (
-                            <span className="font-medium text-rose-600 dark:text-rose-400">
-                              {formatUsage(credential.usedCredits)}
-                            </span>
-                          )}
                         </td>
                         <td
                           className="px-2 py-2 text-right text-xs tabular-nums text-muted-foreground"

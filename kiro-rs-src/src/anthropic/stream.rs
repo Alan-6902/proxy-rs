@@ -523,8 +523,6 @@ pub struct StreamContext {
     pub context_input_tokens: Option<i32>,
     /// 输出 tokens 累计
     pub output_tokens: i32,
-    /// 上游 `meteringEvent` 报告的积分扣减量累计（一次响应可能有多个事件）
-    pub credit_usage: f64,
     /// 工具块索引映射 (tool_id -> block_index)
     pub tool_block_indices: HashMap<String, i32>,
     /// 工具名称反向映射（短名称 → 原始名称），用于响应时还原
@@ -561,7 +559,6 @@ impl StreamContext {
             input_tokens,
             context_input_tokens: None,
             output_tokens: 0,
-            credit_usage: 0.0,
             tool_block_indices: HashMap::new(),
             tool_name_map,
             thinking_enabled,
@@ -638,19 +635,6 @@ impl StreamContext {
         match event {
             Event::AssistantResponse(resp) => self.process_assistant_response(&resp.content),
             Event::ToolUse(tool_use) => self.process_tool_use(tool_use),
-            Event::Metering(metering) => {
-                // 计费事件不产生给客户端的 SSE，只记账
-                match metering.credit_usage() {
-                    Some(usage) => self.credit_usage += usage,
-                    // 单位不是 credit 时不能当积分加：语义由 unit 决定
-                    None => tracing::warn!(
-                        "跳过 meteringEvent（单位或数值不可用）: unit={} usage={}",
-                        metering.unit,
-                        metering.usage
-                    ),
-                }
-                Vec::new()
-            }
             Event::ContextUsage(context_usage) => {
                 // 从上下文使用百分比计算实际的 input_tokens
                 let window_size = get_context_window_size(&self.model);
@@ -1153,14 +1137,6 @@ impl StreamContext {
         let input = self.context_input_tokens.unwrap_or(self.input_tokens);
         (input.max(0) as u64, self.output_tokens.max(0) as u64)
     }
-
-    /// 本次请求上游报告的积分扣减量合计
-    ///
-    /// 一次响应里可能有多个 `meteringEvent`，全部累加。0 表示上游没报（旧版本
-    /// 或非计费请求），调用方据此跳过记账而不是记 0。
-    pub fn final_credit_usage(&self) -> f64 {
-        self.credit_usage
-    }
 }
 
 /// 缓冲流处理上下文 - 用于 /cc/v1/messages 流式请求
@@ -1265,11 +1241,6 @@ impl BufferedStreamContext {
             .unwrap_or(self.estimated_input_tokens);
         (input.max(0) as u64, self.inner.output_tokens.max(0) as u64)
     }
-
-    /// 本次请求的积分扣减量，口径同 [`StreamContext::final_credit_usage`]
-    pub fn final_credit_usage(&self) -> f64 {
-        self.inner.final_credit_usage()
-    }
 }
 
 /// 简单的 token 估算
@@ -1296,35 +1267,6 @@ fn estimate_tokens(text: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn metering(unit: &str, usage: f64) -> Event {
-        Event::Metering(crate::kiro::model::events::MeteringEvent {
-            unit: unit.to_string(),
-            unit_plural: format!("{}s", unit),
-            usage,
-        })
-    }
-
-    #[test]
-    fn test_metering_events_accumulate_credit() {
-        let mut ctx = StreamContext::new_with_thinking("claude-sonnet-4-5", 10, false, HashMap::new());
-        assert_eq!(ctx.final_credit_usage(), 0.0);
-
-        // 一次响应里可能有多个计费事件，要累加而不是覆盖
-        let events = ctx.process_kiro_event(&metering("credit", 0.017364763582089555));
-        assert!(events.is_empty(), "计费事件不该产生给客户端的 SSE");
-        ctx.process_kiro_event(&metering("credit", 0.02));
-
-        assert!((ctx.final_credit_usage() - 0.037364763582089555).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_metering_skips_unknown_unit() {
-        let mut ctx = StreamContext::new_with_thinking("claude-sonnet-4-5", 10, false, HashMap::new());
-        ctx.process_kiro_event(&metering("request", 5.0));
-        // 单位不是 credit 时跳过，不能把 5 当积分记进去
-        assert_eq!(ctx.final_credit_usage(), 0.0);
-    }
 
     #[test]
     fn test_sse_event_format() {

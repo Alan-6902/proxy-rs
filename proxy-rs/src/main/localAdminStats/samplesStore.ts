@@ -120,7 +120,6 @@ function normalizeDelta(value: unknown): LocalAdminHourlyCredentialDelta | null 
     // 升级前落的桶没有这几个键，按 0 读入
     inputTokenDelta: readDelta(source.inputTokenDelta),
     outputTokenDelta: readDelta(source.outputTokenDelta),
-    creditDelta: readDelta(source.creditDelta),
     successDelta: readDelta(source.successDelta),
     failureDelta: readDelta(source.failureDelta),
     refreshFailureDelta: readDelta(source.refreshFailureDelta),
@@ -171,7 +170,6 @@ export function normalizeCursorsPayload(payload: unknown): LocalAdminCumulativeC
         usageCurrent: readOptionalNumber(record.usageCurrent),
         inputTokens: readOptionalNumber(record.inputTokens),
         outputTokens: readOptionalNumber(record.outputTokens),
-        usedCredits: readOptionalNumber(record.usedCredits),
         at: readCount(record.at),
         // 换号检测靠它：漏读会让 accumulateHourlyUsage 的 rotated 判断在重启后永久失效
         maskedKey: readOptionalString(record.maskedKey)

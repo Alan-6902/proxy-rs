@@ -3,6 +3,7 @@ import { isValidKiroApiKey, isValidKiroRegion } from '../../shared/kiroApiKey'
 import {
   LOCAL_ADMIN_AUTH_METHOD,
   LOCAL_ADMIN_PROBE_VERDICT,
+  normalizeLocalAdminEmail,
   resolveLocalAdminCredentialPayload,
   type LocalAdminProbeVerdict,
   type LocalAdminPushCandidate,
@@ -13,6 +14,8 @@ import type { KskCredentialCleanupResult } from './credentialCleanup'
 export interface LocalAdminAccount {
   kiroApiKey: string
   region: string
+  /** 账号邮箱，推给 Admin 当凭据卡片标题；不是邮箱格式的展示名会被丢掉。 */
+  email?: string
 }
 
 /** 发消息验活的结论 + 失败时的错误摘要。 */
@@ -61,7 +64,6 @@ export interface RemoteCredential {
   inputTokens?: number
   outputTokens?: number
   /** 经本机反代消耗的 Kiro 积分累计值（估算），需 kiro-rs 支持 */
-  usedCredits?: number
   lastUsedAt?: string | number | null
   expiresAt?: string | number | null
   hasProfileArn?: boolean
@@ -444,7 +446,9 @@ export async function syncKskAccountsToLocalAdmin(input: {
             kiroApiKey: account.kiroApiKey,
             authRegion: account.region,
             apiRegion: account.region,
-            priority: 0
+            priority: 0,
+            // 没有它 Admin 卡片只显示「凭据 #id」，跟本地账号对不上
+            email: normalizeLocalAdminEmail(account.email)
           }
         }
       )

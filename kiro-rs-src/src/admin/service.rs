@@ -87,7 +87,6 @@ impl AdminService {
                 last_used_at: entry.last_used_at.clone(),
                 input_tokens: entry.input_tokens,
                 output_tokens: entry.output_tokens,
-                used_credits: entry.used_credits,
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,

@@ -422,13 +422,6 @@ struct CredentialEntry {
     input_tokens: u64,
     /// 经本反代成功调用累计的输出 tokens
     output_tokens: u64,
-    /// 经本反代消耗的账号额度（Kiro 积分）累计值
-    ///
-    /// 与 tokens 的差别是它测不精确：AWS 不下发「本次扣了多少积分」，只能靠
-    /// `getUsageLimits` 的累计值做差分。差分归因见 `record_credit_usage`——
-    /// 只在两次观测之间本反代确实有成功调用时才记，否则号被别处共用的消耗
-    /// 会被算到自己头上。所以这是估算量，粒度受 balance 缓存 TTL（300 秒）限制。
-    used_credits: f64,
 }
 
 /// 禁用原因
@@ -460,8 +453,6 @@ struct StatsEntry {
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
-    #[serde(default)]
-    used_credits: f64,
 }
 
 // ============================================================================
@@ -503,7 +494,6 @@ pub struct CredentialEntrySnapshot {
     /// 经本反代成功调用累计的输出 tokens
     pub output_tokens: u64,
     /// 经本反代消耗的账号额度（Kiro 积分）累计值，估算量
-    pub used_credits: f64,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）
@@ -647,7 +637,6 @@ impl MultiTokenManager {
                     last_used_at: None,
                     input_tokens: 0,
                     output_tokens: 0,
-                    used_credits: 0.0,
                 }
             })
             .collect();
@@ -1221,7 +1210,6 @@ impl MultiTokenManager {
                 entry.last_used_at = s.last_used_at.clone();
                 entry.input_tokens = s.input_tokens;
                 entry.output_tokens = s.output_tokens;
-                entry.used_credits = s.used_credits;
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -1248,7 +1236,6 @@ impl MultiTokenManager {
                             last_used_at: e.last_used_at.clone(),
                             input_tokens: e.input_tokens,
                             output_tokens: e.output_tokens,
-                            used_credits: e.used_credits,
                         },
                     )
                 })
@@ -1340,41 +1327,6 @@ impl MultiTokenManager {
                 output_tokens,
                 entry.input_tokens,
                 entry.output_tokens
-            );
-        }
-        self.save_stats_debounced();
-    }
-
-    /// 累加指定凭据经本反代消耗的 Kiro 积分
-    ///
-    /// 数据来源是上游每次请求都会下发的 `meteringEvent`（形如
-    /// `{"unit":"credit","usage":0.0174}`），由流处理层在读完流后调用，
-    /// 与 `record_token_usage` 同一时机。这是实测量而非估算：只累加确实经过
-    /// 本反代的那些请求，号被原主或别的反代共用时这个数不会涨。
-    ///
-    /// 历史实现曾用 `/balance` 的账号累计额度做差分来倒推本反代消耗，前提是
-    /// 「AWS 不下发逐次扣减量」——该前提是错的。账号额度含别处共用该号的量，
-    /// 靠它做差分实测把 277 积分的真实消耗记成了 8781（偏高约 32 倍）。
-    ///
-    /// # Arguments
-    /// * `id` - 凭据 ID（来自 CallContext）
-    /// * `delta` - 本次请求的扣减量，必须为有限正数（其余一律忽略）
-    pub fn record_credit_usage(&self, id: u64, delta: f64) {
-        // NaN 一旦进累计，之后所有加法都是 NaN，整份统计就废了
-        if !delta.is_finite() || delta <= 0.0 {
-            return;
-        }
-        {
-            let mut entries = self.entries.lock();
-            let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
-                return;
-            };
-            entry.used_credits += delta;
-            tracing::debug!(
-                "凭据 #{} 本次消耗积分 {:.2}（累计 {:.2}）",
-                id,
-                delta,
-                entry.used_credits
             );
         }
         self.save_stats_debounced();
@@ -1683,7 +1635,6 @@ impl MultiTokenManager {
                     last_used_at: e.last_used_at.clone(),
                     input_tokens: e.input_tokens,
                     output_tokens: e.output_tokens,
-                    used_credits: e.used_credits,
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
                     refresh_failure_count: e.refresh_failure_count,
@@ -2003,7 +1954,6 @@ impl MultiTokenManager {
                 last_used_at: None,
                 input_tokens: 0,
                 output_tokens: 0,
-                used_credits: 0.0,
             });
         }
 
@@ -2971,17 +2921,6 @@ mod tests {
         assert_eq!(entry.success_count, 128);
         assert_eq!(entry.input_tokens, 0);
         assert_eq!(entry.output_tokens, 0);
-        assert_eq!(entry.used_credits, 0.0);
-    }
-
-    #[test]
-    fn test_stats_entry_reads_file_without_credit_field() {
-        // 只有 token 字段的中间版本（本次改动之前写出的文件）同样要能读。
-        let previous =
-            r#"{"success_count":5,"last_used_at":null,"input_tokens":10,"output_tokens":2}"#;
-        let entry: StatsEntry = serde_json::from_str(previous).expect("上一版格式应能解析");
-        assert_eq!(entry.input_tokens, 10);
-        assert_eq!(entry.used_credits, 0.0);
     }
 
     #[test]
@@ -2991,14 +2930,12 @@ mod tests {
             last_used_at: None,
             input_tokens: 12_345,
             output_tokens: 678,
-            used_credits: 26.4,
         };
         let json = serde_json::to_string(&entry).expect("序列化应成功");
         let parsed: StatsEntry = serde_json::from_str(&json).expect("反序列化应成功");
         assert_eq!(parsed.success_count, 7);
         assert_eq!(parsed.input_tokens, 12_345);
         assert_eq!(parsed.output_tokens, 678);
-        assert_eq!(parsed.used_credits, 26.4);
     }
 
     #[tokio::test]
@@ -3039,46 +2976,6 @@ mod tests {
         let entry = snapshot.entries.iter().find(|e| e.id == id).unwrap();
         assert_eq!(entry.input_tokens, 0);
         assert_eq!(entry.output_tokens, 0);
-    }
-
-    #[tokio::test]
-    async fn test_record_credit_usage_accumulates_per_credential() {
-        let config = Config::default();
-        let mut cred = KiroCredentials::default();
-        cred.refresh_token = Some("rt-1".to_string());
-        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
-
-        let id = manager.snapshot().entries[0].id;
-        manager.record_credit_usage(id, 8.5);
-        manager.record_credit_usage(id, 1.25);
-
-        let snapshot = manager.snapshot();
-        let entry = snapshot.entries.iter().find(|e| e.id == id).unwrap();
-        assert_eq!(entry.used_credits, 9.75);
-        // 与 token 一样，记积分不该动成功计数
-        assert_eq!(entry.success_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_record_credit_usage_rejects_non_positive_and_nan() {
-        let config = Config::default();
-        let mut cred = KiroCredentials::default();
-        cred.refresh_token = Some("rt-1".to_string());
-        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
-        let id = manager.snapshot().entries[0].id;
-
-        // 额度按月重置会让差分为负，不能记成「消耗了负数」
-        manager.record_credit_usage(id, -100.0);
-        manager.record_credit_usage(id, 0.0);
-        // NaN 一旦进累计，之后所有加法都是 NaN，整份统计就废了
-        manager.record_credit_usage(id, f64::NAN);
-        manager.record_credit_usage(id, f64::INFINITY);
-        // 未知 id（凭据已被删除）不应 panic
-        manager.record_credit_usage(id + 9999, 5.0);
-
-        let snapshot = manager.snapshot();
-        let entry = snapshot.entries.iter().find(|e| e.id == id).unwrap();
-        assert_eq!(entry.used_credits, 0.0);
     }
 
 }

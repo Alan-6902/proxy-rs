@@ -57,12 +57,6 @@ pub struct CredentialStatusItem {
     pub input_tokens: u64,
     /// 经本反代成功调用累计的输出 tokens
     pub output_tokens: u64,
-    /// 经本反代消耗的账号额度（Kiro 积分）累计值
-    ///
-    /// 估算量：AWS 不下发逐次扣减量，这个数由 `/balance` 的累计额度做差分、
-    /// 并只在两次观测之间本反代确实有成功调用时才累加得到。同一观测窗口内
-    /// 号被别处共用时，那部分消耗分不出来，会混进这个数。
-    pub used_credits: f64,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）

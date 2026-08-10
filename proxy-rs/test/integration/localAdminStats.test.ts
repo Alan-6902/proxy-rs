@@ -32,10 +32,7 @@ import {
   toCredentialStats,
   toCredentialUsage
 } from '../../src/main/localAdminStats/statsClient'
-import {
-  normalizeCursorsPayload,
-  normalizeSamplesPayload
-} from '../../src/main/localAdminStats/samplesStore'
+import { normalizeSamplesPayload } from '../../src/main/localAdminStats/samplesStore'
 import { LocalAdminStatsManager } from '../../src/main/localAdminStats/statsManager'
 import type { KskAutomationFetch } from '../../src/main/kskAutomation/localAdminClient'
 
@@ -175,27 +172,6 @@ describe('反代统计 · 响应解析', () => {
     })
     expect(stats!.inputTokens).toBeUndefined()
     expect(stats!.outputTokens).toBeUndefined()
-  })
-
-  it('解析积分统计时保留小数，不像 token 那样取整', () => {
-    // 上游给的是 currentUsageWithPrecision 口径的差分累计，取整会把零头抹掉
-    const stats = toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: 8_456.31 })
-    expect(stats!.usedCredits).toBe(8_456.31)
-  })
-
-  it('旧版 kiro-rs 不返回积分字段时保持 undefined，而不是 0', () => {
-    const stats = toCredentialStats(REMOTE_CREDENTIAL)
-    expect(stats!.usedCredits).toBeUndefined()
-  })
-
-  it('积分字段为负数或非法值时按缺失处理', () => {
-    expect(
-      toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: -1 })!.usedCredits
-    ).toBeUndefined()
-    expect(
-      toCredentialStats({ ...REMOTE_CREDENTIAL, usedCredits: 'x' as unknown as number })!
-        .usedCredits
-    ).toBeUndefined()
   })
 })
 
@@ -994,7 +970,6 @@ describe('反代统计 · 报表窗口', () => {
         usageDelta: 0,
         inputTokenDelta: 0,
         outputTokenDelta: 0,
-        creditDelta: 0,
         successDelta: 0,
         failureDelta: 0,
         refreshFailureDelta: 0,
@@ -1052,12 +1027,12 @@ describe('反代统计 · 报表窗口', () => {
     expect(report.rows.find((row) => row.id === '2')?.email).toBeUndefined()
   })
 
-  it('id 复用时按号分行，旧号的积分不算到新号头上', () => {
+  it('id 复用时按号分行，旧号的消耗不算到新号头上', () => {
     // 实测场景：一天内 id 2 换过多个号，旧号烧了 3737 分，当前占用该 id 的新号一分没花
     const report = buildLocalAdminReport({
       buckets: [
-        bucketAt(AT, [{ id: '2', maskedKey: 'ksk_...maxa', creditDelta: 3737, successDelta: 18 }]),
-        bucketAt(AT + HOUR, [{ id: '2', maskedKey: 'ksk_...4zLc', creditDelta: 0 }])
+        bucketAt(AT, [{ id: '2', maskedKey: 'ksk_...maxa', usageDelta: 3737, successDelta: 18 }]),
+        bucketAt(AT + HOUR, [{ id: '2', maskedKey: 'ksk_...4zLc', usageDelta: 0 }])
       ],
       range: { date: '2026-08-08', hour: LOCAL_ADMIN_REPORT_ALL_HOURS },
       now: AT,
@@ -1067,20 +1042,20 @@ describe('反代统计 · 报表窗口', () => {
     expect(report.rows).toHaveLength(2)
     const current = report.rows.find((row) => row.maskedKey === 'ksk_...4zLc')
     const rotated = report.rows.find((row) => row.maskedKey === 'ksk_...maxa')
-    expect(current?.creditDelta).toBe(0)
-    expect(rotated?.creditDelta).toBe(3737)
+    expect(current?.usageDelta).toBe(0)
+    expect(rotated?.usageDelta).toBe(3737)
     // 被换掉的旧号要标成已移除，即使它的 id 仍被新号占用
     expect(current?.present).toBe(true)
     expect(rotated?.present).toBe(false)
     // 合计不变：拆行只改归属，不改总量
-    expect(report.creditDelta).toBe(3737)
+    expect(report.usageDelta).toBe(3737)
   })
 
   it('老桶没有 maskedKey 时仍按 id 聚合，不因改键把旧数据拆散', () => {
     const report = buildLocalAdminReport({
       buckets: [
-        bucketAt(AT, [{ id: '1', creditDelta: 100 }]),
-        bucketAt(AT + HOUR, [{ id: '1', creditDelta: 50 }])
+        bucketAt(AT, [{ id: '1', usageDelta: 100 }]),
+        bucketAt(AT + HOUR, [{ id: '1', usageDelta: 50 }])
       ],
       range: { date: '2026-08-08', hour: LOCAL_ADMIN_REPORT_ALL_HOURS },
       now: AT,
@@ -1088,7 +1063,7 @@ describe('反代统计 · 报表窗口', () => {
     })
 
     expect(report.rows).toHaveLength(1)
-    expect(report.rows[0].creditDelta).toBe(150)
+    expect(report.rows[0].usageDelta).toBe(150)
     expect(report.rows[0].present).toBe(true)
   })
 
@@ -1121,7 +1096,6 @@ describe('反代统计 · 报表窗口', () => {
               usageDelta: 10,
               inputTokenDelta: 0,
               outputTokenDelta: 0,
-              creditDelta: 0,
               successDelta: 0,
               failureDelta: 0,
               refreshFailureDelta: 0,
@@ -1274,152 +1248,6 @@ describe('反代统计 · token 差分', () => {
 
     expect(totals.inputTokens).toBe(1_020)
     expect(totals.outputTokens).toBe(55)
-  })
-})
-
-describe('反代统计 · 积分差分', () => {
-  const AT = new Date(2026, 7, 8, 10, 30).getTime()
-
-  function credential(patch: Partial<LocalAdminCredentialStats> = {}): LocalAdminCredentialStats {
-    return statsFixture({ maskedKey: 'ksk_...aaaa', ...patch })
-  }
-
-  it('两轮观测按差值累加积分，保留小数', () => {
-    const first = accumulateHourlyUsage({
-      buckets: [],
-      cursors: [],
-      credentials: [credential({ usedCredits: 100.5 })],
-      at: AT
-    })
-    const second = accumulateHourlyUsage({
-      buckets: first.buckets,
-      cursors: first.cursors,
-      credentials: [credential({ usedCredits: 126.94 })],
-      at: AT + 60_000
-    })
-
-    // 积分是小数口径，取整会把零头抹掉
-    expect(second.buckets[0].credentials[0].creditDelta).toBeCloseTo(26.44, 2)
-  })
-
-  it('kiro-rs 重启使积分归零时记 0，不出现负值', () => {
-    const first = accumulateHourlyUsage({
-      buckets: [],
-      cursors: [],
-      credentials: [credential({ usedCredits: 8_456.31 })],
-      at: AT
-    })
-    const second = accumulateHourlyUsage({
-      buckets: first.buckets,
-      cursors: first.cursors,
-      credentials: [credential({ usedCredits: 12.5 })],
-      at: AT + 60_000
-    })
-
-    expect(second.buckets[0].credentials[0].creditDelta).toBe(0)
-    // 新基线要跟上，否则下一轮会把 12.5 之后的增长当成从 8456.31 起跳
-    expect(second.cursors[0].usedCredits).toBe(12.5)
-  })
-
-  it('kiro-rs 不支持积分时不记增量，也不把基线写成 0', () => {
-    const state = accumulateHourlyUsage({
-      buckets: [],
-      cursors: [],
-      credentials: [credential({ usedCredits: undefined })],
-      at: AT
-    })
-
-    expect(state.buckets[0].credentials[0].creditDelta).toBe(0)
-    expect(state.cursors[0].usedCredits).toBeUndefined()
-  })
-
-  it('换号时作废旧基线，不把新号的历史累计算成本轮消耗', () => {
-    const first = accumulateHourlyUsage({
-      buckets: [],
-      cursors: [],
-      credentials: [credential({ maskedKey: 'ksk_...old', usedCredits: 5_000 })],
-      at: AT
-    })
-    // 同一个 id 换成另一个号，新号自己已经消耗了 3000 分
-    const second = accumulateHourlyUsage({
-      buckets: first.buckets,
-      cursors: first.cursors,
-      credentials: [credential({ maskedKey: 'ksk_...new', usedCredits: 3_000 })],
-      at: AT + 60_000
-    })
-
-    expect(second.buckets[0].credentials[0].creditDelta).toBe(0)
-    expect(second.cursors[0].usedCredits).toBe(3_000)
-  })
-
-  it('游标经过持久化往返后仍带 maskedKey，重启后换号检测不失效', () => {
-    const first = accumulateHourlyUsage({
-      buckets: [],
-      cursors: [],
-      credentials: [credential({ maskedKey: 'ksk_...old', usedCredits: 5_000 })],
-      at: AT
-    })
-    // 模拟落盘再读回：normalizeCursorsPayload 漏读 maskedKey 时，下面的换号判定会失效
-    const reloaded = normalizeCursorsPayload({ cursors: first.cursors })
-    expect(reloaded[0].maskedKey).toBe('ksk_...old')
-
-    const second = accumulateHourlyUsage({
-      buckets: first.buckets,
-      cursors: reloaded,
-      credentials: [credential({ maskedKey: 'ksk_...new', usedCredits: 3_000 })],
-      at: AT + 60_000
-    })
-    expect(second.buckets[0].credentials[0].creditDelta).toBe(0)
-  })
-
-  it('总览把各凭据的积分相加，缺字段的按 0 计', () => {
-    const totals = aggregateLocalAdminStats([
-      statsFixture({ id: '1', usedCredits: 26.44 }),
-      statsFixture({ id: '2', usedCredits: 3.5 }),
-      statsFixture({ id: '3' })
-    ])
-
-    expect(totals.usedCredits).toBeCloseTo(29.94, 2)
-  })
-
-  it('报表按积分降序排，积分缺失时退回按 token 排', () => {
-    const withCredits = buildLocalAdminReport({
-      buckets: [
-        {
-          hour: toHourStart(AT),
-          credentials: [
-            {
-              id: '1',
-              usageDelta: 0,
-              inputTokenDelta: 900_000,
-              outputTokenDelta: 0,
-              creditDelta: 5,
-              successDelta: 0,
-              failureDelta: 0,
-              refreshFailureDelta: 0,
-              lastSeenAt: AT
-            },
-            {
-              id: '2',
-              usageDelta: 0,
-              inputTokenDelta: 10,
-              outputTokenDelta: 0,
-              creditDelta: 80,
-              successDelta: 0,
-              failureDelta: 0,
-              refreshFailureDelta: 0,
-              lastSeenAt: AT
-            }
-          ]
-        }
-      ],
-      range: { date: toLocalDateKey(AT), hour: new Date(AT).getHours() },
-      now: AT
-    })
-
-    // 积分多的排前面，即使它的 token 少得多
-    expect(withCredits.rows.map((row) => row.id)).toEqual(['2', '1'])
-    expect(withCredits.creditDelta).toBe(85)
   })
 })
 

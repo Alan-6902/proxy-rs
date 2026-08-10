@@ -67,8 +67,11 @@ pub enum Event {
     AssistantResponse(super::AssistantResponseEvent),
     /// 工具使用
     ToolUse(super::ToolUseEvent),
-    /// 计费：本次请求的实际扣减量，见 [`super::MeteringEvent`]
-    Metering(super::MeteringEvent),
+    /// 计费
+    ///
+    /// payload 不解析：上游给的 `usage` 与实际扣减的积分不是同一口径（实测差约
+    /// 26 倍，且低于官方声明的 0.01 积分最小计费单位），拿它记账会系统性偏低。
+    Metering(()),
     /// 上下文使用率
     ContextUsage(super::ContextUsageEvent),
     /// 未知事件 (保留原始帧数据)
@@ -116,10 +119,7 @@ impl Event {
                 let payload = super::ToolUseEvent::from_frame(&frame)?;
                 Ok(Self::ToolUse(payload))
             }
-            EventType::Metering => {
-                let payload = super::MeteringEvent::from_frame(&frame)?;
-                Ok(Self::Metering(payload))
-            }
+            EventType::Metering => Ok(Self::Metering(())),
             EventType::ContextUsage => {
                 let payload = super::ContextUsageEvent::from_frame(&frame)?;
                 Ok(Self::ContextUsage(payload))

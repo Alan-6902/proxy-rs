@@ -113,7 +113,6 @@ describe.runIf(BASE_URL && API_KEY)('反代统计 · 真实 Admin 消耗差分',
       expect(row.failureDelta).toBeGreaterThanOrEqual(0)
       expect(row.inputTokenDelta).toBeGreaterThanOrEqual(0)
       expect(row.outputTokenDelta).toBeGreaterThanOrEqual(0)
-      expect(row.creditDelta).toBeGreaterThanOrEqual(0)
     }
     expect(report.usageDelta).toBeGreaterThanOrEqual(0)
     expect(report.rows.length).toBe(second.length)

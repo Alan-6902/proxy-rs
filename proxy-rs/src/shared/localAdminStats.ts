@@ -344,8 +344,6 @@ export interface LocalAdminHourlyCredentialDelta {
   inputTokenDelta: number
   /** 该小时经本机反代新增的输出 tokens */
   outputTokenDelta: number
-  /** 该小时经本机反代新增消耗的 Kiro 积分（估算，不含别处共用该号的量） */
-  creditDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -446,7 +444,6 @@ export function accumulateHourlyUsage(input: {
       usageDelta: 0,
       inputTokenDelta: 0,
       outputTokenDelta: 0,
-      creditDelta: 0,
       successDelta: 0,
       failureDelta: 0,
       refreshFailureDelta: 0,
@@ -466,9 +463,6 @@ export function accumulateHourlyUsage(input: {
     }
     if (credential.outputTokens !== undefined) {
       entry.outputTokenDelta += diffLocalAdminCounter(cursor?.outputTokens, credential.outputTokens)
-    }
-    if (credential.usedCredits !== undefined) {
-      entry.creditDelta += diffLocalAdminCounter(cursor?.usedCredits, credential.usedCredits)
     }
     if (usageCurrent !== undefined) {
       entry.usageDelta += diffLocalAdminCounter(cursor?.usageCurrent, usageCurrent)
@@ -529,8 +523,6 @@ export interface LocalAdminReportRow {
   inputTokenDelta: number
   /** 窗口内经本机反代的输出 tokens */
   outputTokenDelta: number
-  /** 窗口内经本机反代消耗的 Kiro 积分（估算，我的消耗） */
-  creditDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -552,8 +544,6 @@ export interface LocalAdminReport {
   /** 窗口内经本机反代的输入/输出 tokens 合计 */
   inputTokenDelta: number
   outputTokenDelta: number
-  /** 窗口内经本机反代消耗的 Kiro 积分合计（估算） */
-  creditDelta: number
   successDelta: number
   failureDelta: number
   refreshFailureDelta: number
@@ -640,7 +630,6 @@ export function buildLocalAdminReport(input: {
         usageDelta: 0,
         inputTokenDelta: 0,
         outputTokenDelta: 0,
-        creditDelta: 0,
         successDelta: 0,
         failureDelta: 0,
         refreshFailureDelta: 0,
@@ -652,7 +641,6 @@ export function buildLocalAdminReport(input: {
       // 老桶没有这几个字段，按 0 计而不是让整行变 NaN
       row.inputTokenDelta += item.inputTokenDelta ?? 0
       row.outputTokenDelta += item.outputTokenDelta ?? 0
-      row.creditDelta += item.creditDelta ?? 0
       row.successDelta += item.successDelta
       row.failureDelta += item.failureDelta
       row.refreshFailureDelta += item.refreshFailureDelta
@@ -673,7 +661,6 @@ export function buildLocalAdminReport(input: {
    */
   const rows = [...rowById.values()].sort(
     (a, b) =>
-      b.creditDelta - a.creditDelta ||
       b.inputTokenDelta + b.outputTokenDelta - (a.inputTokenDelta + a.outputTokenDelta) ||
       b.usageDelta - a.usageDelta ||
       Number(a.id) - Number(b.id) ||
@@ -687,7 +674,6 @@ export function buildLocalAdminReport(input: {
     usageDelta: rows.reduce((sum, row) => sum + row.usageDelta, 0),
     inputTokenDelta: rows.reduce((sum, row) => sum + row.inputTokenDelta, 0),
     outputTokenDelta: rows.reduce((sum, row) => sum + row.outputTokenDelta, 0),
-    creditDelta: rows.reduce((sum, row) => sum + row.creditDelta, 0),
     successDelta: rows.reduce((sum, row) => sum + row.successDelta, 0),
     failureDelta: rows.reduce((sum, row) => sum + row.failureDelta, 0),
     refreshFailureDelta: rows.reduce((sum, row) => sum + row.refreshFailureDelta, 0),

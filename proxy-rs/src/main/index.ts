@@ -2154,7 +2154,7 @@ async function syncKskLedgerFromAccounts(): Promise<void> {
 
 async function readKskAccountsForLocalAdmin(
   groupId: string
-): Promise<Array<{ kiroApiKey: string; region: string }>> {
+): Promise<Array<{ kiroApiKey: string; region: string; email?: string }>> {
   return await accountStoreCoordinator.runExclusive(async () => {
     await initStore()
     const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
@@ -2169,7 +2169,9 @@ async function readKskAccountsForLocalAdmin(
       ) {
         return []
       }
-      return [{ kiroApiKey: key, region }]
+      // email 带过去给 Admin 当凭据标题；拿不到 userInfo.email 的号那里是占位串，
+      // 由 normalizeLocalAdminEmail 在推送前丢掉
+      return [{ kiroApiKey: key, region, email: account.email }]
     })
   })
 }

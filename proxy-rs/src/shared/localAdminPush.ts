@@ -19,7 +19,10 @@ export type LocalAdminAuthMethod =
 /** 新建凭据的默认优先级，与自动同步链路保持一致。 */
 export const LOCAL_ADMIN_DEFAULT_PRIORITY = 0
 
-/** 推送所需的账号凭据字段，取自 AccountCredentials 的子集。 */
+/**
+ * 推送所需的账号字段：凭据部分取自 AccountCredentials 的子集，
+ * email 例外——它挂在 Account 上而不在 credentials 里，由调用方单独带进来。
+ */
 export interface LocalAdminPushCandidate {
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
@@ -29,6 +32,8 @@ export interface LocalAdminPushCandidate {
   region?: string
   /** 账号登记的认证方式；决定 Admin 该用 social 还是 OIDC 端点刷这个 refreshToken。 */
   authMethod?: 'IdC' | 'social'
+  /** 账号邮箱，仅用于 Admin 侧展示，见 normalizeLocalAdminEmail。 */
+  email?: string
 }
 
 /** Admin 创建凭据的请求体。 */
@@ -41,6 +46,22 @@ export interface LocalAdminCredentialPayload {
   clientSecret?: string
   authRegion?: string
   apiRegion?: string
+  /** 账号邮箱，Admin 拿它当凭据卡片的标题（缺失时它显示「凭据 #id」）。 */
+  email?: string
+}
+
+/**
+ * 归一化要推给 Admin 的邮箱：不像邮箱就当没有。
+ *
+ * 本地账号库里的 `email` 字段是「展示名」而不是严格的邮箱：抢号入库的 KSK 拿不到
+ * userInfo.email 时会退化成 `Kiro API Key ••••abcd`（见 importProviderKskCredential）。
+ * 把那种占位串推给 Admin，卡片标题就从「凭据 #2」变成一串跟 maskedApiKey 重复的东西，
+ * 对不上账号反而更费解。所以只在真是邮箱时才推。
+ */
+export function normalizeLocalAdminEmail(value?: string): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed) return undefined
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed) ? trimmed : undefined
 }
 
 export type LocalAdminPayloadResult =
@@ -64,12 +85,16 @@ export type LocalAdminPayloadResult =
  *
  * 实测（凭据 #6，mosaic.ma1）：补上 apiRegion=us-east-1 后 balance 200
  * （KIRO POWER 805.76/10000），且经 Admin 发消息拿到 200 + "pong"。
+ *
+ * email 一律带上（Admin 侧 `AddCredentialRequest.email` 收）：不推的话 Admin 的凭据
+ * 卡片只能显示「凭据 #2」，跟本地账号完全对不上号，出问题时无从下手。
  */
 export function resolveLocalAdminCredentialPayload(
   candidate: LocalAdminPushCandidate
 ): LocalAdminPayloadResult {
   const kiroApiKey = candidate.kiroApiKey?.trim() ?? ''
   const region = candidate.region?.trim() ?? ''
+  const email = normalizeLocalAdminEmail(candidate.email)
 
   if (candidate.credentialKind === 'kiro_api_key' || kiroApiKey) {
     if (!isValidKiroApiKey(kiroApiKey)) return { ok: false, reason: '账号的 Kiro API Key 无效' }
@@ -81,7 +106,8 @@ export function resolveLocalAdminCredentialPayload(
         priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
         kiroApiKey,
         authRegion: region,
-        apiRegion: region
+        apiRegion: region,
+        email
       }
     }
   }
@@ -105,7 +131,8 @@ export function resolveLocalAdminCredentialPayload(
         priority: LOCAL_ADMIN_DEFAULT_PRIORITY,
         refreshToken,
         authRegion: credentialRegion,
-        apiRegion: credentialRegion
+        apiRegion: credentialRegion,
+        email
       }
     }
   }
@@ -125,7 +152,8 @@ export function resolveLocalAdminCredentialPayload(
       clientId: isIdc ? clientId : undefined,
       clientSecret: isIdc ? clientSecret : undefined,
       authRegion: credentialRegion,
-      apiRegion: credentialRegion
+      apiRegion: credentialRegion,
+      email
     }
   }
 }

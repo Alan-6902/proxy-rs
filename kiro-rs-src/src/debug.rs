@@ -135,11 +135,8 @@ pub fn print_event_verbose(event: &Event) {
             println!("  input: {:?}", e.input());
             println!("  stop: {}", e.is_complete());
         }
-        Event::Metering(e) => {
-            println!("\n[事件] Metering");
-            println!("  unit: {:?}", e.unit);
-            println!("  unit_plural: {:?}", e.unit_plural);
-            println!("  usage: {}", e.usage);
+        Event::Metering(_) => {
+            println!("\n[事件] Metering（payload 不解析）");
         }
         Event::ContextUsage(e) => {
             println!("\n[事件] ContextUsage");
@@ -185,8 +182,8 @@ pub fn print_event(event: &Event) {
                 println!("  [调用结束]");
             }
         }
-        Event::Metering(e) => {
-            println!("\n[计费] {}", e);
+        Event::Metering(_) => {
+            println!("\n[计费] （payload 不解析）");
         }
         Event::ContextUsage(e) => {
             println!("\n[上下文使用率] {}", e);

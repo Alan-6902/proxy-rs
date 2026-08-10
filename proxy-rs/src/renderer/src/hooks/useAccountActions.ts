@@ -53,9 +53,10 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   const [pushState, setPushState] = useState<AdminPushState>('idle')
   const [pushError, setPushError] = useState<string>()
 
+  // email 在 Account 上而不在 credentials 里，得单独拼进 candidate
   const resolved = useMemo(
-    () => resolveLocalAdminCredentialPayload(account.credentials),
-    [account.credentials]
+    () => resolveLocalAdminCredentialPayload({ ...account.credentials, email: account.email }),
+    [account.credentials, account.email]
   )
 
   const runLiveness = useCallback(() => {
@@ -75,7 +76,9 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
-          authMethod: account.credentials.authMethod
+          authMethod: account.credentials.authMethod,
+          // Admin 靠它把凭据卡片标成邮箱，否则那边只显示「凭据 #2」
+          email: account.email
         })
         // 只有明确永久失效才会回滚并抛错；transient 会保留凭据并作为成功返回
         if (!response.success) throw new Error(response.error)
@@ -93,7 +96,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
         setPushError(error instanceof Error ? error.message : String(error))
       }
     })()
-  }, [resolved, pushState, account.credentials])
+  }, [resolved, pushState, account.credentials, account.email])
 
   const dismissPushError = useCallback(() => {
     setPushState('idle')

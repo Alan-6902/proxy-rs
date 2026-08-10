@@ -171,7 +171,7 @@ describe('本机 Admin 地址与同步验活', () => {
     const result = await syncKskAccountsToLocalAdmin({
       accounts: [
         { kiroApiKey: KSK_ONE, region: 'us-east-1' },
-        { kiroApiKey: KSK_TWO, region: 'eu-central-1' }
+        { kiroApiKey: KSK_TWO, region: 'eu-central-1', email: 'jacob_roberts68252@gmail.com' }
       ],
       baseUrl: 'http://127.0.0.1:12888/admin',
       adminApiKey: 'admin_secret',
@@ -196,8 +196,37 @@ describe('本机 Admin 地址与同步验活', () => {
       kiroApiKey: KSK_TWO,
       authRegion: 'eu-central-1',
       apiRegion: 'eu-central-1',
-      priority: 0
+      priority: 0,
+      // Admin 用它当凭据卡片标题，不带就只显示「凭据 #id」
+      email: 'jacob_roberts68252@gmail.com'
     })
+  })
+
+  it('展示名不是邮箱时不写 email，避免 Admin 卡片标题变成一串占位符', async () => {
+    const bodies: unknown[] = []
+    const fetchImpl: KskAutomationFetch = async (url, init) => {
+      if (url.endsWith('/credentials') && init.method === 'GET') {
+        return jsonResponse({ credentials: [] })
+      }
+      if (url.endsWith('/credentials') && init.method === 'POST') {
+        bodies.push(init.body ? (JSON.parse(init.body) as unknown) : undefined)
+        return jsonResponse({ credentialId: 42 })
+      }
+      if (url.endsWith('/credentials/42/balance')) return jsonResponse({ currentUsage: 1 })
+      return jsonResponse({}, 404)
+    }
+
+    await syncKskAccountsToLocalAdmin({
+      // 抢号入库时拿不到 userInfo.email 的号，本地 email 是这种占位串
+      accounts: [{ kiroApiKey: KSK_ONE, region: 'us-east-1', email: 'Kiro API Key ••••AAAA' }],
+      baseUrl: 'http://127.0.0.1:12888/admin',
+      adminApiKey: 'admin_secret',
+      timeoutSeconds: 5,
+      fetchImpl
+    })
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).not.toHaveProperty('email')
   })
 
   it('删除 Admin 上本地已不存在的 api_key 残留，且不碰 oauth 凭据', async () => {
@@ -581,8 +610,30 @@ describe('单账号推送到本机 Admin', () => {
 
   it.each([
     [
-      'ksk 账号映射为 api_key 并双写区域',
-      { credentialKind: 'kiro_api_key' as const, kiroApiKey: KSK_ONE, region: 'eu-central-1' },
+      'ksk 账号映射为 api_key 并双写区域，同时带上 email',
+      {
+        credentialKind: 'kiro_api_key' as const,
+        kiroApiKey: KSK_ONE,
+        region: 'eu-central-1',
+        email: 'jacob_roberts68252@gmail.com'
+      },
+      {
+        authMethod: 'api_key',
+        priority: 0,
+        kiroApiKey: KSK_ONE,
+        authRegion: 'eu-central-1',
+        apiRegion: 'eu-central-1',
+        email: 'jacob_roberts68252@gmail.com'
+      }
+    ],
+    [
+      'email 是占位展示名时不写进 payload',
+      {
+        credentialKind: 'kiro_api_key' as const,
+        kiroApiKey: KSK_ONE,
+        region: 'eu-central-1',
+        email: 'Kiro API Key ••••AAAA'
+      },
       {
         authMethod: 'api_key',
         priority: 0,
@@ -835,39 +886,40 @@ describe('单账号推送到本机 Admin', () => {
     expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
   })
 
-  it.each([
-    ['账号已失效', 'permanently_invalid', '账号已失效']
-  ])('发消息验活明确永久失效才删凭据并抛错：%s', async (_name, verdict, error) => {
-    const calls: string[] = []
-    const fetchImpl: KskAutomationFetch = async (url, init) => {
-      calls.push(`${init.method} ${url}`)
-      if (url.endsWith('/credentials') && init.method === 'GET') {
-        return jsonResponse({ credentials: [] })
+  it.each([['账号已失效', 'permanently_invalid', '账号已失效']])(
+    '发消息验活明确永久失效才删凭据并抛错：%s',
+    async (_name, verdict, error) => {
+      const calls: string[] = []
+      const fetchImpl: KskAutomationFetch = async (url, init) => {
+        calls.push(`${init.method} ${url}`)
+        if (url.endsWith('/credentials') && init.method === 'GET') {
+          return jsonResponse({ credentials: [] })
+        }
+        if (url.endsWith('/credentials') && init.method === 'POST') {
+          return jsonResponse({ credentialId: 9 })
+        }
+        if (url.endsWith('/credentials/9/balance')) return jsonResponse({ balance: 1 })
+        if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
+          return jsonResponse({})
+        }
+        if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
+        return jsonResponse({}, 404)
       }
-      if (url.endsWith('/credentials') && init.method === 'POST') {
-        return jsonResponse({ credentialId: 9 })
-      }
-      if (url.endsWith('/credentials/9/balance')) return jsonResponse({ balance: 1 })
-      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
-        return jsonResponse({})
-      }
-      if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
-      return jsonResponse({}, 404)
-    }
 
-    await expect(
-      pushAccountToLocalAdmin({
-        candidate: { refreshToken: REFRESH_TOKEN },
-        baseUrl: 'http://127.0.0.1:12888/admin',
-        adminApiKey: 'admin_secret',
-        timeoutSeconds: 5,
-        fetchImpl,
-        probeLiveness: (async () => ({ verdict, error })) as never
-      })
-    ).rejects.toThrow(new RegExp(`发消息验活未通过.*${error}.*已从 Admin 删除该凭据`))
-    expect(calls).toContain('POST http://127.0.0.1:12888/api/admin/credentials/9/disabled')
-    expect(calls).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
-  })
+      await expect(
+        pushAccountToLocalAdmin({
+          candidate: { refreshToken: REFRESH_TOKEN },
+          baseUrl: 'http://127.0.0.1:12888/admin',
+          adminApiKey: 'admin_secret',
+          timeoutSeconds: 5,
+          fetchImpl,
+          probeLiveness: (async () => ({ verdict, error })) as never
+        })
+      ).rejects.toThrow(new RegExp(`发消息验活未通过.*${error}.*已从 Admin 删除该凭据`))
+      expect(calls).toContain('POST http://127.0.0.1:12888/api/admin/credentials/9/disabled')
+      expect(calls).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+    }
+  )
 
   it('余额接口临时 5xx 但发消息验活成功时仍推送成功并保留凭据', async () => {
     const probe = vi.fn(async () => ({ verdict: 'alive' }))

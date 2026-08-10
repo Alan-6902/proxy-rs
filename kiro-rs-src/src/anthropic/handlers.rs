@@ -438,11 +438,10 @@ async fn handle_stream_request(
         .unwrap()
 }
 
-/// 把流式请求的 token 与积分消耗归到服务本次请求的凭据上
+/// 把流式请求的 token 消耗归到服务本次请求的凭据上
 ///
 /// 与账号额度（`/balance`）的区别：这里只累加经本反代的请求，抢来的号被原主或
-/// 其他反代共用时不会混进来，因此能回答「我自己消耗了多少」。积分取自上游
-/// `meteringEvent` 的实测扣减量，不再由账号额度差分倒推。
+/// 其他反代共用时不会混进来，因此能回答「我自己消耗了多少 token」。
 fn record_stream_usage(
     usage_sink: &Option<(std::sync::Arc<crate::kiro::provider::KiroProvider>, u64)>,
     ctx: &StreamContext,
@@ -452,10 +451,6 @@ fn record_stream_usage(
         provider
             .token_manager()
             .record_token_usage(*credential_id, input_tokens, output_tokens);
-        // 上游没报计费事件时为 0，record_credit_usage 会忽略，不会污染累计
-        provider
-            .token_manager()
-            .record_credit_usage(*credential_id, ctx.final_credit_usage());
     }
 }
 
@@ -469,9 +464,6 @@ fn record_buffered_usage(
         provider
             .token_manager()
             .record_token_usage(*credential_id, input_tokens, output_tokens);
-        provider
-            .token_manager()
-            .record_credit_usage(*credential_id, ctx.final_credit_usage());
     }
 }
 
@@ -628,8 +620,6 @@ async fn handle_non_stream_request(
     let mut stop_reason = "end_turn".to_string();
     // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
-    // 上游 meteringEvent 报告的积分扣减量累计
-    let mut credit_usage: f64 = 0.0;
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -680,14 +670,6 @@ async fn handle_non_stream_request(
                                 }));
                             }
                         }
-                        Event::Metering(metering) => match metering.credit_usage() {
-                            Some(usage) => credit_usage += usage,
-                            None => tracing::warn!(
-                                "跳过 meteringEvent（单位或数值不可用）: unit={} usage={}",
-                                metering.unit,
-                                metering.usage
-                            ),
-                        },
                         Event::ContextUsage(context_usage) => {
                             // 从上下文使用百分比计算实际的 input_tokens
                             let window_size = get_context_window_size(model);
@@ -768,10 +750,6 @@ async fn handle_non_stream_request(
         final_input_tokens.max(0) as u64,
         output_tokens.max(0) as u64,
     );
-    // 积分用上游实测的扣减量；没报时为 0，record_credit_usage 会忽略
-    provider
-        .token_manager()
-        .record_credit_usage(credential_id, credit_usage);
 
     // 构建 Anthropic 响应
     let response_body = json!({

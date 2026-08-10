@@ -24,6 +24,7 @@ import type {
 } from '../shared/kskHunter'
 import type { HunterReport } from '../shared/hunterReport'
 import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
+import type { DownstreamReport } from '../shared/downstreamSettlement'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminExhaustedCleanupSummary,
@@ -960,6 +961,11 @@ interface KiroApi {
   ) => Promise<IdcIpcResult<KskLedgerReport>>
   kskHunterClearLedger: () => Promise<IdcIpcResult<KskLedgerReport>>
   kskHunterRevealLedgerFile: () => Promise<IdcIpcResult<string>>
+  downstreamReport: (date?: string, days?: number) => Promise<IdcIpcResult<DownstreamReport>>
+  downstreamExportDay: (date: string) => Promise<IdcIpcResult<string>>
+  downstreamSettleNow: () => Promise<IdcIpcResult<DownstreamReport>>
+  downstreamPickCsvDir: () => Promise<IdcIpcResult<string | null>>
+  downstreamOpenCsvDir: () => Promise<IdcIpcResult<string>>
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void) => () => void
   localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>

@@ -260,6 +260,13 @@ export interface KskHunterConfig {
   allowUnknownPriceOrder: boolean
   /** 是否启用余额查询。关掉则不查余额、不按余额拦单。 */
   balanceCheckEnabled: boolean
+  /**
+   * 下游对账 CSV 的存放目录（绝对路径）；空表示落 userData 下的默认子目录。
+   *
+   * ⚠️ 那些 CSV 含完整 KSK 明文（对账需要）。指到云同步目录会把号上传到云端。
+   * 只接受绝对路径：相对路径的基准取决于进程 cwd，打包后不可预测。
+   */
+  csvExportDir?: string
 }
 
 export interface KskHunterSecretInput {
@@ -420,7 +427,8 @@ export const DEFAULT_KSK_HUNTER_CONFIG: KskHunterConfig = {
   dailyLimitCny: 0,
   billing: DEFAULT_KSK_HUNTER_BILLING,
   allowUnknownPriceOrder: false,
-  balanceCheckEnabled: false
+  balanceCheckEnabled: false,
+  csvExportDir: undefined
 }
 
 /** 抢到的号是否落在该链接的区域白名单内。空白名单表示不限。 */

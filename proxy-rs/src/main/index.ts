@@ -93,8 +93,16 @@ import { KskHunterManager } from './kskHunter/hunterRunner'
 import { hunterLocalDateKey, KSK_HUNTER_CHANNEL_LABEL } from '../shared/kskHunter'
 import { loadKskHunterStore } from './kskHunter/configStore'
 import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
-import { KSK_LEDGER_RETIRE_REASON } from '../shared/kskLedger'
-import { markKskLedgerRetired, updateKskLedgerFromAccounts } from './kskHunter/ledgerStore'
+import { KSK_LEDGER_RETIRE_REASON, resolveLedgerState } from '../shared/kskLedger'
+import {
+  loadKskLedger,
+  markKskLedgerRetired,
+  updateKskLedgerFromAccounts
+} from './kskHunter/ledgerStore'
+import { updateKskHunterConfig } from './kskHunter/configStore'
+import { DownstreamSettlementManager } from './downstreamSettlement/settlementManager'
+import { registerDownstreamSettlementIpcHandlers } from './downstreamSettlement/ipc-handlers'
+import type { DownstreamLedgerUsage } from '../shared/downstreamSettlement'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
   LocalNotificationService,
@@ -2293,6 +2301,43 @@ const kskHunterManager = new KskHunterManager({
   log: (message) => console.log(message)
 })
 
+/**
+ * 下游对账：把交付账本 + 台账消耗结算成每日 CSV 与可查报表。
+ *
+ * 积分口径来自抢号台账（它已经处理过按月重置的结转），这里只做区间差分，
+ * 不自己再拉一遍 usage——账号页 5 分钟一轮的刷新已经在更新台账了。
+ */
+const downstreamSettlementManager = new DownstreamSettlementManager({
+  readCsvDir: async () => (await loadKskHunterStore()).config.csvExportDir,
+  userDataDir: () => app.getPath('userData'),
+  readLedgerUsage: async () => {
+    const entries = await loadKskLedger()
+    return Object.fromEntries(
+      entries.map((entry): [string, DownstreamLedgerUsage] => [
+        entry.accountId,
+        {
+          accountId: entry.accountId,
+          usedCredits: entry.usedCredits,
+          usageLimit: entry.usageLimit,
+          state: resolveLedgerState(entry)
+        }
+      ])
+    )
+  },
+  // 分组名要现查：交付账本只存 id，分组随时可能改名或被删
+  readGroupNames: async () =>
+    accountStoreCoordinator.runExclusive(async () => {
+      await initStore()
+      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
+        groups?: Record<string, { name?: string }>
+      }
+      return Object.fromEntries(
+        Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
+      )
+    }),
+  log: (message) => console.log(message)
+})
+
 async function initStoreInternal(): Promise<void> {
   const Store = (await import('electron-store')).default
   const path = await import('path')
@@ -3004,6 +3049,18 @@ app.whenReady().then(async () => {
   })
   void kskHunterManager.start().catch((err) => {
     console.warn('[KskHunter] Failed to start:', err)
+  })
+
+  // ============ 下游对账（交付账本、每日 CSV 存档）IPC ============
+  registerDownstreamSettlementIpcHandlers({
+    getManager: () => downstreamSettlementManager,
+    getMainWindow: () => mainWindow,
+    saveCsvDir: async (dir) => {
+      await updateKskHunterConfig({ csvExportDir: dir }, undefined)
+    }
+  })
+  void downstreamSettlementManager.start().catch((err) => {
+    console.warn('[DownstreamSettlement] Failed to start:', err)
   })
 
   // ============ 托盘相关 IPC ============

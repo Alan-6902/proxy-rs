@@ -15,6 +15,7 @@ import {
   TaskManagerPage,
   HunterPage,
   KskLedgerPage,
+  DownstreamSettlementPage,
   ProxyStatsPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
@@ -250,6 +251,8 @@ function App(): React.JSX.Element {
         return <HunterPage />
       case 'kskLedger':
         return <KskLedgerPage />
+      case 'downstream':
+        return <DownstreamSettlementPage />
       case 'proxyStats':
         return <ProxyStatsPage />
       case 'proxyPool':

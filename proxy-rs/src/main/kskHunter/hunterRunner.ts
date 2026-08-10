@@ -46,6 +46,8 @@ import {
   type HunterReportEventType
 } from '../../shared/hunterReport'
 import { appendHunterReportEvent, loadHunterReportEvents } from './reportStore'
+import type { DownstreamDelivery } from '../../shared/downstreamSettlement'
+import { recordDownstreamDelivery } from '../downstreamSettlement/deliveryLedgerStore'
 import {
   KSK_LEDGER_RETIRE_REASON,
   summarizeKskLedger,
@@ -135,6 +137,13 @@ export interface KskHunterDeps {
    */
   recordLedgerPurchase?: (entry: KskLedgerEntry) => Promise<void>
   readLedger?: () => Promise<KskLedgerEntry[]>
+  /**
+   * 记一条交付到对账账本（推送下游成功那一刻）。
+   *
+   * 与台账分开注入：台账是**采购**维度、按账号 id 反复更新；这里是**交付**维度、
+   * 只追加，且含完整 key 必须加密落盘。默认走 userData 下的加密文件，测试换内存实现。
+   */
+  recordDownstreamDelivery?: (delivery: DownstreamDelivery) => Promise<void>
   /**
    * 读账号分组的 id → 名字表，供台账报表展示分组名。
    *
@@ -253,6 +262,46 @@ export class KskHunterManager {
     const record = this.deps.recordLedgerPurchase ?? recordKskLedgerPurchase
     void record(entry).catch((error) => {
       this.log(`台账写入失败：${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /**
+   * 记一条交付到对账账本。
+   *
+   * 只在推送下游**成功**后调：这份账本的语义就是「交给下游的号」，是收款依据。
+   * 验活判死与推送失败已由报表与台账覆盖，混进来会让对账多收钱。
+   *
+   * 吞掉写盘错误的理由同上：号已经交出去了，磁盘满了也不该让这条主流程失败。
+   * 但这里的失败比另外两处严重（丢的是收款依据），所以日志写明要人工核对。
+   */
+  private recordDownstreamDelivery(
+    delivery: PersistedKskHunterDelivery,
+    store: PersistedKskHunterStore,
+    attempts: number
+  ): void {
+    const record = this.deps.recordDownstreamDelivery ?? recordDownstreamDelivery
+    const link = deliveryReportLink(delivery, store)
+    void record({
+      id: delivery.id,
+      accountId: delivery.accountId,
+      key: delivery.key,
+      maskedKey: maskKiroApiKey(delivery.key),
+      region: delivery.region,
+      channel: link.channel,
+      linkId: delivery.linkId,
+      linkName: link.name,
+      groupId: delivery.groupId,
+      purchasedAt: delivery.createdAt,
+      deliveredAt: Date.now(),
+      attempts,
+      costUnit: delivery.costUnit,
+      costCny: delivery.costCny,
+      unitLabel: delivery.unitLabel
+    }).catch((error) => {
+      this.log(
+        `交付账本写入失败（${maskKiroApiKey(delivery.key)} 已交付但未记账，需人工核对）：` +
+          `${error instanceof Error ? error.message : String(error)}`
+      )
     })
   }
 
@@ -711,6 +760,8 @@ export class KskHunterManager {
       channel: link.channel,
       key: credential.key,
       region: credential.region,
+      // 对账要按分组汇总，而配置里的 targetGroupId 随时会改，推送时回读可能已经不是这个
+      groupId: store.config.targetGroupId,
       state: KSK_HUNTER_DELIVERY_STATE.PENDING,
       attempts: 0,
       createdAt: now,
@@ -765,6 +816,13 @@ export class KskHunterManager {
         groupId: store.config.targetGroupId
       })
       if (result.added) this.deps.notifyAccountsChanged()
+      /*
+       * 账号 id 写回推送记录：交付账本靠它关联台账取积分消耗，而 deliverOne 只拿到
+       * 推送记录，不该再去账号库按 key 反查一遍。
+       */
+      if (result.accountId) {
+        await patchKskHunterDelivery(delivery.id, { accountId: result.accountId })
+      }
       /*
        * 建档：入库时拉到的 usage 就是**买入时的额度基线**。二手号买来可能已经烧掉
        * 一部分，记进基线才不会把前主的消耗算成下游的产出。
@@ -936,6 +994,7 @@ export class KskHunterManager {
       this.recordReportEvent(HUNTER_REPORT_EVENT.DELIVERED, deliveryReportLink(delivery, store), {
         region: delivery.region || undefined
       })
+      this.recordDownstreamDelivery(delivery, store, attempts)
       this.status = { ...this.status, totalDelivered: this.status.totalDelivered + 1 }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

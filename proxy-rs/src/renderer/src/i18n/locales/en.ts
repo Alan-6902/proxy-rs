@@ -47,6 +47,7 @@ const en = {
     tasks: 'Tasks',
     hunter: 'KSK Hunter',
     kskLedger: 'KSK Ledger',
+    downstream: 'Settlement',
     proxyStats: 'Proxy Stats',
     proxyPool: 'Proxy Pool',
     diagnose: 'Diagnostics',

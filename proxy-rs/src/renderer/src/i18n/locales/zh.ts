@@ -47,6 +47,7 @@ const zh = {
     tasks: '任务管理',
     hunter: '抢号监控',
     kskLedger: '抢号台账',
+    downstream: '下游对账',
     proxyStats: '反代统计',
     proxyPool: '代理池',
     diagnose: '一键诊断',

@@ -25,6 +25,7 @@ import type {
 } from '../shared/kskHunter'
 import type { HunterReport } from '../shared/hunterReport'
 import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
+import type { DownstreamReport } from '../shared/downstreamSettlement'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 import type {
   LocalAdminExhaustedCleanupSummary,
@@ -1239,6 +1240,25 @@ const api = {
 
   kskHunterRevealLedgerFile: (): Promise<IdcIpcResult<string>> =>
     ipcRenderer.invoke('ksk-hunter-reveal-ledger-file'),
+
+  /* ---- 下游对账 ---- */
+
+  downstreamReport: (date?: string, days?: number): Promise<IdcIpcResult<DownstreamReport>> =>
+    ipcRenderer.invoke('downstream-settlement-report', date, days),
+
+  /** 导出某天的 CSV，返回文件路径。纯读，不推进结算锚点，可以随便点。 */
+  downstreamExportDay: (date: string): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke('downstream-settlement-export-day', date),
+
+  downstreamSettleNow: (): Promise<IdcIpcResult<DownstreamReport>> =>
+    ipcRenderer.invoke('downstream-settlement-settle-now'),
+
+  /** 选 CSV 导出目录；用户取消时 data 为 null。 */
+  downstreamPickCsvDir: (): Promise<IdcIpcResult<string | null>> =>
+    ipcRenderer.invoke('downstream-settlement-pick-csv-dir'),
+
+  downstreamOpenCsvDir: (): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke('downstream-settlement-open-csv-dir'),
 
   onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: KskHunterStatusEvent): void => {

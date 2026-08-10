@@ -15,7 +15,8 @@ import {
   ListChecks,
   Crosshair,
   ChartLine,
-  BookOpenCheck
+  BookOpenCheck,
+  Handshake
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -29,6 +30,7 @@ export type PageType =
   | 'tasks'
   | 'hunter'
   | 'kskLedger'
+  | 'downstream'
   | 'proxyStats'
   | 'proxyPool'
   | 'register'
@@ -52,6 +54,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'hunter', labelKey: 'nav.hunter', icon: Crosshair },
   { id: 'kskLedger', labelKey: 'nav.kskLedger', icon: BookOpenCheck },
+  { id: 'downstream', labelKey: 'nav.downstream', icon: Handshake },
   { id: 'proxyStats', labelKey: 'nav.proxyStats', icon: ChartLine },
   { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
   { id: 'register', labelKey: 'nav.register', icon: UserPlus },

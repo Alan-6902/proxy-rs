@@ -71,6 +71,20 @@ export interface PersistedKskHunterDelivery {
   channel?: KskHunterChannel
   key: string
   region: string
+  /**
+   * 验活入库后拿到的本地账号 id。
+   *
+   * 交付账本靠它关联台账取积分消耗，而推送发生在入库之后，所以这里记一份，
+   * 免得 `deliverOne` 再去账号库按 key 反查。重复号（没建新档）时缺失。
+   */
+  accountId?: string
+  /**
+   * 下单时的目标账号分组 id。
+   *
+   * 与 channel 同理在记录上冗余：对账要按分组汇总（不同分组通常对应不同下游），
+   * 而配置里的 targetGroupId 随时会被改，推送时回读拿到的可能已不是当时那个。
+   */
+  groupId?: string
   state: KskHunterDeliveryState
   attempts: number
   createdAt: number
@@ -251,7 +265,8 @@ export function normalizeKskHunterConfig(
     dailyLimitCny: normalizeAmount(source.dailyLimitCny, 0, Number.MAX_SAFE_INTEGER),
     billing: normalizeBilling(source.billing),
     allowUnknownPriceOrder: source.allowUnknownPriceOrder === true,
-    balanceCheckEnabled: source.balanceCheckEnabled === true
+    balanceCheckEnabled: source.balanceCheckEnabled === true,
+    csvExportDir: normalizeString(source.csvExportDir) || undefined
   }
 }
 
@@ -291,6 +306,8 @@ function normalizeDelivery(value: unknown, now: number): PersistedKskHunterDeliv
     channel: normalizeChannelValue(source.channel) ?? undefined,
     key,
     region: normalizeString(source.region),
+    accountId: normalizeString(source.accountId) || undefined,
+    groupId: normalizeString(source.groupId) || undefined,
     state: normalizeDeliveryState(source.state),
     attempts: positiveInt(source.attempts, 0, 0, 1000),
     createdAt,

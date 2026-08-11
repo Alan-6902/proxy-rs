@@ -99,7 +99,7 @@ export const KSK_HUNTER_CHANNEL_REQUIRES_API_KEY: Record<KskHunterChannel, boole
   [KSK_HUNTER_CHANNEL.KIRO_MARKET]: false,
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: true,
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: false,
-  [KSK_HUNTER_CHANNEL.KIRO_APP]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: true,
   [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: true
 }
 
@@ -178,9 +178,9 @@ export const DEFAULT_KSK_HUNTER_BILLING: Record<KskHunterChannel, KskHunterChann
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0
   },
-  // KiroApp 的 /api/status 直接给 price/price_eu/price_us，实测是人民币整数（30 / 50）
+  // KiroApp 官方价格与余额单位是积分；兑换率未确认前，cnyPerUnit 保守保持 1
   [KSK_HUNTER_CHANNEL.KIRO_APP]: {
-    unitLabel: 'CNY',
+    unitLabel: '积分',
     cnyPerUnit: 1,
     dailyLimitUnit: 0,
     lowBalanceThresholdUnit: 0

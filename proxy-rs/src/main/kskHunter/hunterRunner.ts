@@ -971,6 +971,8 @@ export class KskHunterManager {
     } else if (!isUsableHunterCredential(credential)) {
       throw new Error('下单返回的 KSK 或区域不合法')
     }
+    // 只有拿到可用凭据才结束本单；2xx 但响应不可解析时重试必须复用同一个幂等键
+    this.clearIdempotencyKey(link.id)
 
     const unitLabel = store.config.billing[link.channel]?.unitLabel
     await appendKskHunterSpend({
@@ -1277,7 +1279,6 @@ export class KskHunterManager {
         channel: link.channel
       }
     )
-    this.clearIdempotencyKey(link.id)
     const credential = parseOrderedCredential(orderPayload, offer.region)
     await this.persistOrderedCredential(
       link,

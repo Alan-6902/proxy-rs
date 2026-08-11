@@ -26,7 +26,10 @@ export interface AccountCredentials {
   credentialRevision?: string
   clientId?: string
   clientSecret?: string
+  /** IdC/OAuth authentication region. */
   region?: string
+  /** Kiro usage API region when it differs from the authentication region. */
+  apiRegion?: string
   startUrl?: string
   expiresAt?: number
   authMethod?: 'IdC' | 'social'

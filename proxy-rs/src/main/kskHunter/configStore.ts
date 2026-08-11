@@ -54,8 +54,47 @@ const MAX_DELIVERY_RECORDS = 200
  */
 const SPEND_RETENTION_DAYS = 14
 
+export interface KskHunterPendingPurchase {
+  /** 稳定 id 让凭证领取重试时的花费、交付和台账写入保持幂等。 */
+  id: string
+  goodsId: string
+  title: string
+  region: string
+  price?: number
+  costCny: number
+  costUnit?: number
+  orderedAt: number
+  /** quick-board 返回的登车记录 id，仅用于审计与排障。 */
+  boardRecordId?: string
+  /** 下单时 API Key 的单向指纹；防止换 key 后误领到另一账户的 ride。 */
+  apiKeyFingerprint?: string
+  /** POST 响应丢失时为 true；只尝试领取凭证，绝不自动重复付费。 */
+  orderUncertain?: boolean
+  /**
+   * 当前进程已经观察到 POST 返回/抛错，可以自动尝试取证。
+   * 缺失表示进程可能在真正发出请求前崩溃，必须先由用户核对。
+   */
+  credentialRecoveryReady?: boolean
+  /** 需要用户到站点核对后重新保存链接，才允许继续自动取证。 */
+  recoveryRequiresConfirmation?: boolean
+  /** ORDERED 统计/事件已经登记，恢复 pending 时不得重复登记。 */
+  orderRecorded?: boolean
+  credentialEndpoint?: 'detail' | 'credential'
+  credentialAttempts: number
+  blockedReason?: string
+}
+
 export interface PersistedKskHunterLink extends KskHunterLink {
   secrets: KskHunterLinkSecrets
+  /**
+   * quick-board 已成交但凭证尚未安全入库时保留。
+   * 不含任何 token，可随 Hunter 配置持久化，重启后只重试领取而不重复付费。
+   */
+  pendingPurchase?: KskHunterPendingPurchase
+  /** 最近一次 quick-board 尝试时间；跨重启继续执行站点级 5 秒节流。 */
+  lastConvoyOrderAt?: number
+  /** 同一车次成功领取后不再重复付费；出现新车次 id 时自动恢复。 */
+  lastCompletedConvoyId?: string
 }
 
 /** 落盘的推送记录，含 ksk 明文（整个文件已加密）。 */
@@ -273,12 +312,58 @@ export function normalizeKskHunterConfig(
   }
 }
 
+function normalizePendingPurchase(value: unknown): KskHunterPendingPurchase | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const source = value as Partial<KskHunterPendingPurchase>
+  const id = normalizeString(source.id)
+  const goodsId = normalizeString(source.goodsId)
+  if (!id || !goodsId) return undefined
+  const priceValue =
+    typeof source.price === 'number' && Number.isFinite(source.price)
+      ? Math.max(0, source.price)
+      : undefined
+  const costUnitValue =
+    typeof source.costUnit === 'number' && Number.isFinite(source.costUnit)
+      ? Math.max(0, source.costUnit)
+      : undefined
+  const apiKeyFingerprintValue = normalizeString(source.apiKeyFingerprint).toLowerCase()
+  const apiKeyFingerprint = /^[a-f0-9]{64}$/.test(apiKeyFingerprintValue)
+    ? apiKeyFingerprintValue
+    : undefined
+  return {
+    id,
+    goodsId,
+    title: normalizeString(source.title) || goodsId,
+    region: normalizeString(source.region),
+    price: priceValue,
+    costCny: normalizeAmount(source.costCny, 0, Number.MAX_SAFE_INTEGER),
+    costUnit: costUnitValue,
+    orderedAt: positiveInt(source.orderedAt, Date.now(), 0, Number.MAX_SAFE_INTEGER),
+    boardRecordId: normalizeString(source.boardRecordId) || undefined,
+    apiKeyFingerprint,
+    orderUncertain: source.orderUncertain === true || undefined,
+    credentialRecoveryReady: source.credentialRecoveryReady === true || undefined,
+    recoveryRequiresConfirmation: source.recoveryRequiresConfirmation === true || undefined,
+    orderRecorded: source.orderRecorded === true || undefined,
+    credentialEndpoint: source.credentialEndpoint === 'credential' ? 'credential' : 'detail',
+    credentialAttempts: positiveInt(source.credentialAttempts, 0, 0, 100),
+    blockedReason: normalizeString(source.blockedReason) || undefined
+  }
+}
+
 function normalizeLink(value: unknown, now: number): PersistedKskHunterLink | null {
   if (!value || typeof value !== 'object') return null
   const source = value as Partial<PersistedKskHunterLink>
   const id = normalizeString(source.id)
   if (!id) return null
   const createdAt = positiveInt(source.createdAt, now, 0, Number.MAX_SAFE_INTEGER)
+  const lastCompletedConvoyId = normalizeString(source.lastCompletedConvoyId)
+  const lastConvoyOrderAt =
+    typeof source.lastConvoyOrderAt === 'number' &&
+    Number.isFinite(source.lastConvoyOrderAt) &&
+    source.lastConvoyOrderAt > 0
+      ? Math.floor(source.lastConvoyOrderAt)
+      : undefined
   return {
     id,
     name: normalizeString(source.name) || '未命名链接',
@@ -291,7 +376,10 @@ function normalizeLink(value: unknown, now: number): PersistedKskHunterLink | nu
     secrets: {
       listUrl: normalizeString(source.secrets?.listUrl),
       orderUrl: normalizeString(source.secrets?.orderUrl)
-    }
+    },
+    pendingPurchase: normalizePendingPurchase(source.pendingPurchase),
+    ...(lastConvoyOrderAt === undefined ? {} : { lastConvoyOrderAt }),
+    ...(lastCompletedConvoyId ? { lastCompletedConvoyId } : {})
   }
 }
 
@@ -494,13 +582,37 @@ function applyLinkInput(
   link: PersistedKskHunterLink,
   input: KskHunterLinkInput
 ): PersistedKskHunterLink {
+  const nextChannel = normalizeChannel(input.channel)
+  const nextOrderUrl =
+    input.orderUrl === undefined ? link.secrets.orderUrl : normalizeString(input.orderUrl)
+  if (link.pendingPurchase && nextChannel !== link.channel) {
+    throw new Error('该链接有待领取的拼车凭证，领取完成前不能切换渠道')
+  }
+  if (link.pendingPurchase && nextOrderUrl !== link.secrets.orderUrl) {
+    throw new Error('该链接有待领取的拼车凭证，领取完成前不能修改下单地址')
+  }
+
   link.name = normalizeString(input.name) || link.name
-  link.channel = normalizeChannel(input.channel)
+  link.channel = nextChannel
   link.enabled = input.enabled ?? link.enabled
   link.mode = normalizeMode(input.mode)
   link.regions = input.regions === undefined ? link.regions : normalizeRegions(input.regions)
   if (input.listUrl !== undefined) link.secrets.listUrl = normalizeString(input.listUrl)
-  if (input.orderUrl !== undefined) link.secrets.orderUrl = normalizeString(input.orderUrl)
+  if (input.orderUrl !== undefined) link.secrets.orderUrl = nextOrderUrl
+  if (link.pendingPurchase?.blockedReason) {
+    const confirmsAmbiguousRecovery = link.pendingPurchase.recoveryRequiresConfirmation === true
+    link.pendingPurchase = {
+      ...link.pendingPurchase,
+      credentialRecoveryReady: confirmsAmbiguousRecovery
+        ? true
+        : link.pendingPurchase.credentialRecoveryReady,
+      recoveryRequiresConfirmation: confirmsAmbiguousRecovery
+        ? undefined
+        : link.pendingPurchase.recoveryRequiresConfirmation,
+      credentialAttempts: 0,
+      blockedReason: undefined
+    }
+  }
   link.updatedAt = Date.now()
   return link
 }
@@ -538,6 +650,35 @@ export async function updateKskHunterLink(
   })
 }
 
+export async function setKskHunterPendingPurchase(
+  linkId: string,
+  pendingPurchase?: KskHunterPendingPurchase
+): Promise<void> {
+  return mutateKskHunterStore((store) => {
+    const link = store.links.find((item) => item.id === linkId)
+    if (!link) throw new Error('链接不存在或已删除')
+    link.pendingPurchase = pendingPurchase ? { ...pendingPurchase } : undefined
+    if (pendingPurchase) link.lastConvoyOrderAt = pendingPurchase.orderedAt
+  })
+}
+
+export async function completeKskHunterPendingPurchase(
+  linkId: string,
+  purchaseId: string,
+  goodsId: string
+): Promise<void> {
+  return mutateKskHunterStore((store) => {
+    const link = store.links.find((item) => item.id === linkId)
+    if (!link) throw new Error('链接不存在或已删除')
+    if (!link.pendingPurchase && link.lastCompletedConvoyId === goodsId) return
+    if (link.pendingPurchase?.id !== purchaseId) {
+      throw new Error('待领取的拼车订单已变化，拒绝清理当前状态')
+    }
+    link.pendingPurchase = undefined
+    link.lastCompletedConvoyId = goodsId
+  })
+}
+
 export async function setKskHunterLinkEnabled(
   linkId: string,
   enabled: boolean
@@ -555,13 +696,18 @@ export async function deleteKskHunterLink(linkId: string): Promise<void> {
   return mutateKskHunterStore((store) => {
     const index = store.links.findIndex((item) => item.id === linkId)
     if (index < 0) throw new Error('链接不存在或已删除')
+    if (store.links[index].pendingPurchase) {
+      throw new Error('该链接有待领取的拼车凭证，领取完成前不能删除')
+    }
     store.links.splice(index, 1)
   })
 }
 
 export async function appendKskHunterDelivery(delivery: PersistedKskHunterDelivery): Promise<void> {
   return mutateKskHunterStore((store) => {
-    store.deliveries.push(delivery)
+    if (!store.deliveries.some((item) => item.id === delivery.id)) {
+      store.deliveries.push(delivery)
+    }
     if (store.deliveries.length > MAX_DELIVERY_RECORDS) {
       store.deliveries.splice(0, store.deliveries.length - MAX_DELIVERY_RECORDS)
     }
@@ -576,7 +722,9 @@ export async function appendKskHunterDelivery(delivery: PersistedKskHunterDelive
  */
 export async function appendKskHunterSpend(entry: PersistedKskHunterSpend): Promise<void> {
   return mutateKskHunterStore((store) => {
-    store.spend.push(entry)
+    if (!store.spend.some((item) => item.id === entry.id)) {
+      store.spend.push(entry)
+    }
     const cutoff = Date.now() - SPEND_RETENTION_DAYS * 24 * 60 * 60_000
     store.spend = store.spend.filter((item) => item.at >= cutoff)
   })
@@ -627,6 +775,7 @@ export function toKskHunterConfigView(store: PersistedKskHunterStore): KskHunter
 export interface KskHunterLinkRuntime {
   lastInStock: boolean
   lastCheckedAt?: number
+  lastOrderAt?: number
   lastError?: string
   /** 当前链接是否在真实执行查询请求。 */
   running: boolean
@@ -691,7 +840,8 @@ export function toKskHunterDeliveryView(
  * 虽然 normalizeKskHunterStorePayload 会补上，但直接构造的 store 对象可能漏。
  */
 export function toKskHunterSpendEntries(store: PersistedKskHunterStore): KskHunterSpendEntry[] {
-  return (store.spend ?? []).map((entry) => ({
+  const persistedIds = new Set((store.spend ?? []).map((entry) => entry.id))
+  const persisted = (store.spend ?? []).map((entry) => ({
     channel: entry.channel,
     linkId: entry.linkId,
     linkName: entry.linkName,
@@ -699,6 +849,25 @@ export function toKskHunterSpendEntries(store: PersistedKskHunterStore): KskHunt
     amountCny: entry.amountCny,
     at: entry.at
   }))
+  const provisional = store.links.flatMap((link) => {
+    const pending = link.pendingPurchase
+    const mayHaveCharged =
+      pending?.orderUncertain !== true ||
+      pending.credentialRecoveryReady === true ||
+      pending.orderRecorded === true
+    if (!pending || !mayHaveCharged || persistedIds.has(pending.id)) return []
+    return [
+      {
+        channel: link.channel,
+        linkId: link.id,
+        linkName: link.name,
+        amountUnit: pending.costUnit ?? 0,
+        amountCny: pending.costCny,
+        at: pending.orderedAt
+      }
+    ]
+  })
+  return [...persisted, ...provisional]
 }
 
 /** 当前本地日期键，供主进程记账与统计对齐同一个日切口。 */

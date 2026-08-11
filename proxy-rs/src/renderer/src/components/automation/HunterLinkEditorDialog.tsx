@@ -4,6 +4,8 @@ import {
   KSK_HUNTER_CHANNEL,
   KSK_HUNTER_CHANNEL_LABEL,
   KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS,
+  KSK_HUNTER_CHANNEL_ORDER_MIN_INTERVAL_SECONDS,
+  KSK_HUNTER_INSECURE_HTTP_ORIGIN,
   KSK_HUNTER_MODE,
   KSK_HUNTER_POLL_INTERVAL_SECONDS,
   type KskHunterChannel,
@@ -72,6 +74,7 @@ export function HunterLinkEditorDialog({
   if (!isOpen) return null
 
   const channelMinInterval = KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS[channel]
+  const channelOrderMinInterval = KSK_HUNTER_CHANNEL_ORDER_MIN_INTERVAL_SECONDS[channel]
 
   const toggleRegion = (region: string): void => {
     setRegions((current) =>
@@ -114,6 +117,9 @@ export function HunterLinkEditorDialog({
                   所有启用链接每 {KSK_HUNTER_POLL_INTERVAL_SECONDS} 秒并行查一次库存
                   {channelMinInterval > KSK_HUNTER_POLL_INTERVAL_SECONDS
                     ? `；${KSK_HUNTER_CHANNEL_LABEL[channel]} 按站点要求最快 ${channelMinInterval} 秒一次`
+                    : ''}
+                  {channelOrderMinInterval > 0
+                    ? `；自动下单最快 ${channelOrderMinInterval} 秒一次`
                     : ''}
                   。
                 </p>
@@ -160,7 +166,9 @@ export function HunterLinkEditorDialog({
               className="font-mono text-xs"
             />
             <p className="mt-1 text-xs text-muted-foreground">
-              地址通过系统安全存储加密，列表里只显示脱敏形式。必须是 HTTPS。
+              {channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+                ? `该站点暂不支持 HTTPS，仅放行 ${KSK_HUNTER_INSECURE_HTTP_ORIGIN}；API Key 会经明文 HTTP 传输，请只在可信网络使用。`
+                : '地址通过系统安全存储加密，列表里只显示脱敏形式。必须是 HTTPS。'}
             </p>
           </div>
 
@@ -201,7 +209,9 @@ export function HunterLinkEditorDialog({
                 className="font-mono text-xs"
               />
               <p className="mt-1 text-xs text-muted-foreground">
-                下单响应里的 ksk_ 密钥会被自动提取，无需额外配置字段路径。
+                {channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+                  ? 'quick-board 成功后会继续领取 KSK 或 OAuth 凭证；OAuth 仅入本地账号库，不推送 KSK 下游。'
+                  : '下单响应里的 ksk_ 密钥会被自动提取，无需额外配置字段路径。'}
               </p>
             </div>
           )}

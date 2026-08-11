@@ -49,7 +49,8 @@ export const KSK_HUNTER_CHANNEL = {
   KIRO_MARKET: 'kiro_market',
   KIRO_CEO: 'kiro_ceo',
   KIRO_DROP: 'kiro_drop',
-  KIRO_APP: 'kiro_app'
+  KIRO_APP: 'kiro_app',
+  KIRO_CONVOY: 'kiro_convoy'
 } as const
 
 export type KskHunterChannel = (typeof KSK_HUNTER_CHANNEL)[keyof typeof KSK_HUNTER_CHANNEL]
@@ -58,7 +59,8 @@ export const KSK_HUNTER_CHANNEL_LABEL: Record<KskHunterChannel, string> = {
   [KSK_HUNTER_CHANNEL.KIRO_MARKET]: 'Kiro Market',
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: 'Kiro CEO',
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: 'Kiro Drop',
-  [KSK_HUNTER_CHANNEL.KIRO_APP]: 'KiroApp'
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: 'KiroApp',
+  [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: 'Kiro 拼车'
 }
 
 /**
@@ -74,7 +76,17 @@ export const KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS: Record<KskHunterChannel, n
   [KSK_HUNTER_CHANNEL.KIRO_MARKET]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: 30,
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
-  [KSK_HUNTER_CHANNEL.KIRO_APP]: KSK_HUNTER_POLL_INTERVAL_SECONDS
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: KSK_HUNTER_POLL_INTERVAL_SECONDS,
+  [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: 3
+}
+
+/** 各渠道两次下单请求之间的最短间隔；0 表示没有额外限制。 */
+export const KSK_HUNTER_CHANNEL_ORDER_MIN_INTERVAL_SECONDS: Record<KskHunterChannel, number> = {
+  [KSK_HUNTER_CHANNEL.KIRO_MARKET]: 0,
+  [KSK_HUNTER_CHANNEL.KIRO_CEO]: 0,
+  [KSK_HUNTER_CHANNEL.KIRO_DROP]: 0,
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: 0,
+  [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: 5
 }
 
 /**
@@ -87,11 +99,31 @@ export const KSK_HUNTER_CHANNEL_REQUIRES_API_KEY: Record<KskHunterChannel, boole
   [KSK_HUNTER_CHANNEL.KIRO_MARKET]: false,
   [KSK_HUNTER_CHANNEL.KIRO_CEO]: true,
   [KSK_HUNTER_CHANNEL.KIRO_DROP]: false,
-  [KSK_HUNTER_CHANNEL.KIRO_APP]: false
+  [KSK_HUNTER_CHANNEL.KIRO_APP]: false,
+  [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: true
 }
 
 /** 渠道请求头鉴权用的头名。 */
 export const KSK_HUNTER_CHANNEL_AUTH_HEADER = 'X-API-Key'
+
+/**
+ * 该站点当前 HTTPS 握手不可用，只对这个精确 origin 放行明文 HTTP。
+ * 任何其它 HTTP 地址仍由主进程与 IPC 双重拒绝。
+ */
+export const KSK_HUNTER_INSECURE_HTTP_ORIGIN = 'http://kiro.zhiqwc.top'
+export const KSK_HUNTER_CONVOY_HTTPS_ORIGIN = 'https://kiro.zhiqwc.top'
+
+export function isAllowedHunterEndpointUrl(value: string, channel?: KskHunterChannel): boolean {
+  const parsed = new URL(value)
+  if (parsed.username || parsed.password) return false
+  if (channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY) {
+    return (
+      parsed.origin === KSK_HUNTER_INSECURE_HTTP_ORIGIN ||
+      parsed.origin === KSK_HUNTER_CONVOY_HTTPS_ORIGIN
+    )
+  }
+  return parsed.protocol === 'https:'
+}
 
 /**
  * 每个渠道的计价单位与换算系数。
@@ -148,6 +180,13 @@ export const DEFAULT_KSK_HUNTER_BILLING: Record<KskHunterChannel, KskHunterChann
   },
   // KiroApp 的 /api/status 直接给 price/price_eu/price_us，实测是人民币整数（30 / 50）
   [KSK_HUNTER_CHANNEL.KIRO_APP]: {
+    unitLabel: 'CNY',
+    cnyPerUnit: 1,
+    dailyLimitUnit: 0,
+    lowBalanceThresholdUnit: 0
+  },
+  // 单趟车 fare 为人民币金额。
+  [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: {
     unitLabel: 'CNY',
     cnyPerUnit: 1,
     dailyLimitUnit: 0,
@@ -431,6 +470,33 @@ export interface HunterKskCredential {
   region: string
 }
 
+export interface HunterOAuthCredential {
+  type: 'oauth'
+  accessToken: string
+  refreshToken: string
+  profileArn?: string
+  /**
+   * 实站凭证可能只下发 token/profile/区域。缺少客户端注册信息时仍要保留已购凭证，
+   * 但账号到期后无法走现有 IdC 自动刷新链路。
+   */
+  clientId?: string
+  clientSecret?: string
+  /** 通用回退区域；优先使用 authRegion / apiRegion。 */
+  region: string
+  authRegion?: string
+  apiRegion?: string
+  endpoint?: string
+  expiresAt?: number
+}
+
+export type HunterOrderedCredential = HunterKskCredential | HunterOAuthCredential
+
+export function isHunterOAuthCredential(
+  credential: HunterOrderedCredential
+): credential is HunterOAuthCredential {
+  return 'type' in credential && credential.type === 'oauth'
+}
+
 /** 商品列表里的一个条目，由各站点适配器归一化后产出。 */
 export interface KskHunterOffer {
   /** 站点内的商品标识，下单时回传。 */
@@ -465,6 +531,13 @@ export function matchesHunterRegions(regions: readonly string[], region: string)
 /** 校验一个抢号结果是否可用；不可用的不写库也不推下游。 */
 export function isUsableHunterCredential(credential: HunterKskCredential): boolean {
   return isValidKiroApiKey(credential.key) && isValidKiroRegion(credential.region)
+}
+
+export function isUsableHunterOAuthCredential(credential: HunterOAuthCredential): boolean {
+  return (
+    Boolean(credential.accessToken && credential.refreshToken) &&
+    isValidKiroRegion(credential.region)
+  )
 }
 
 /** 第 attempt 次（1 基）失败后到下次重试的延迟。 */

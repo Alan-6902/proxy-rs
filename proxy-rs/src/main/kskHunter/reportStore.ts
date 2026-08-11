@@ -63,6 +63,7 @@ export function normalizeHunterReportEvent(value: unknown): HunterReportEvent | 
   const channel = readChannel(source.channel)
   if (at === undefined || at <= 0 || !type || !channel) return null
   return {
+    eventId: typeof source.eventId === 'string' && source.eventId ? source.eventId : undefined,
     at: Math.floor(at),
     type,
     channel,

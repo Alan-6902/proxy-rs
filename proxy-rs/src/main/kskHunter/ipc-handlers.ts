@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { ipcMain, shell, type BrowserWindow } from 'electron'
 import {
+  isAllowedHunterEndpointUrl,
+  KSK_HUNTER_CHANNEL,
   KSK_HUNTER_MODE,
+  type KskHunterChannel,
   type KskHunterConfig,
   type KskHunterLinkInput,
   type KskHunterRuntimeNotification,
@@ -102,14 +105,20 @@ export async function sendKskHunterStatus(
 function validateLinkInput(input: KskHunterLinkInput, hasExistingOrderUrl: boolean): void {
   if (!input.name.trim()) throw new Error('请输入链接名称')
   const listUrl = input.listUrl?.trim()
-  if (listUrl) {
-    const parsed = new URL(listUrl)
-    if (parsed.protocol !== 'https:') throw new Error('商品列表地址必须使用 HTTPS')
+  if (listUrl && !isAllowedHunterEndpointUrl(listUrl, input.channel)) {
+    throw new Error(
+      input.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+        ? 'Kiro 拼车列表地址只允许使用 kiro.zhiqwc.top'
+        : '商品列表地址必须使用 HTTPS'
+    )
   }
   const orderUrl = input.orderUrl?.trim()
-  if (orderUrl) {
-    const parsed = new URL(orderUrl)
-    if (parsed.protocol !== 'https:') throw new Error('下单地址必须使用 HTTPS')
+  if (orderUrl && !isAllowedHunterEndpointUrl(orderUrl, input.channel)) {
+    throw new Error(
+      input.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+        ? 'Kiro 拼车下单地址只允许使用 kiro.zhiqwc.top'
+        : '下单地址必须使用 HTTPS'
+    )
   }
   if (input.mode === KSK_HUNTER_MODE.AUTO_ORDER && !orderUrl && !hasExistingOrderUrl) {
     throw new Error('自动下单模式必须配置下单地址')
@@ -121,12 +130,17 @@ function validateConfig(
   secrets: KskHunterSecretInput | undefined,
   hasExistingApiKey: boolean
 ): void {
-  // 余额地址必须是 HTTPS：它带 token，且响应决定要不要花钱
-  for (const url of Object.values(secrets?.balanceUrls ?? {})) {
+  // 余额地址会携带渠道密钥；拼车必须锁定目标站点，其它渠道必须是 HTTPS。
+  for (const [channelValue, url] of Object.entries(secrets?.balanceUrls ?? {})) {
     const trimmed = url?.trim()
     if (!trimmed) continue
-    if (new URL(trimmed).protocol !== 'https:') {
-      throw new Error('余额查询地址必须使用 HTTPS')
+    const channel = channelValue as KskHunterChannel
+    if (!isAllowedHunterEndpointUrl(trimmed, channel)) {
+      throw new Error(
+        channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+          ? 'Kiro 拼车余额地址只允许使用 kiro.zhiqwc.top'
+          : '余额查询地址必须使用 HTTPS'
+      )
     }
   }
   if (!config.downstreamEnabled) return
@@ -192,10 +206,13 @@ export function registerKskHunterIpcHandlers(deps: KskHunterIpcDeps): void {
         const current = await loadKskHunterStore()
         const link = current.links.find((item) => item.id === linkId)
         if (!link) throw new Error('链接不存在或已删除')
-        if (input.listUrl !== undefined && !input.listUrl.trim() && !link.secrets.listUrl) {
-          throw new Error('请填写商品列表地址')
+        const effectiveInput: KskHunterLinkInput = {
+          ...input,
+          listUrl: input.listUrl === undefined ? link.secrets.listUrl : input.listUrl,
+          orderUrl: input.orderUrl === undefined ? link.secrets.orderUrl : input.orderUrl
         }
-        validateLinkInput(input, Boolean(link.secrets.orderUrl))
+        if (!effectiveInput.listUrl?.trim()) throw new Error('请填写商品列表地址')
+        validateLinkInput(effectiveInput, Boolean(effectiveInput.orderUrl))
         await updateKskHunterLink(linkId, input)
         await deps.getManager().reload()
         return await respondSnapshot()

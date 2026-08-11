@@ -9,9 +9,11 @@ const { deliveryStore, loadStore } = vi.hoisted(() => ({
     records: [] as Record<string, unknown>[],
     /** 记账账本：mock 掉落盘，但保留内容以便断言花费确实记上了。 */
     spend: [] as Record<string, unknown>[],
+    pending: {} as Record<string, Record<string, unknown> | undefined>,
     reset(): void {
       this.records = []
       this.spend = []
+      this.pending = {}
     }
   },
   loadStore: vi.fn()
@@ -23,15 +25,27 @@ vi.mock('../../src/main/kskHunter/configStore', async (importOriginal) => {
     ...actual,
     loadKskHunterStore: loadStore,
     appendKskHunterDelivery: vi.fn(async (delivery: Record<string, unknown>) => {
-      deliveryStore.records.push({ ...delivery })
+      if (!deliveryStore.records.some((item) => item.id === delivery.id)) {
+        deliveryStore.records.push({ ...delivery })
+      }
     }),
     // 记账也要 mock：真实实现会走 safeStorage 落盘，测试环境里会抛错并打断后续流程
     appendKskHunterSpend: vi.fn(async (entry: Record<string, unknown>) => {
-      deliveryStore.spend.push({ ...entry })
+      if (!deliveryStore.spend.some((item) => item.id === entry.id)) {
+        deliveryStore.spend.push({ ...entry })
+      }
     }),
     patchKskHunterDelivery: vi.fn(async (deliveryId: string, patch: Record<string, unknown>) => {
       const record = deliveryStore.records.find((item) => item.id === deliveryId)
       if (record) Object.assign(record, patch, { updatedAt: Date.now() })
+    }),
+    setKskHunterPendingPurchase: vi.fn(
+      async (linkId: string, pending?: Record<string, unknown>) => {
+        deliveryStore.pending[linkId] = pending ? { ...pending } : undefined
+      }
+    ),
+    completeKskHunterPendingPurchase: vi.fn(async (linkId: string) => {
+      deliveryStore.pending[linkId] = undefined
     })
   }
 })
@@ -59,9 +73,13 @@ import {
   type KskHunterRuntimeNotification,
   type KskHunterStatusEvent
 } from '../../src/shared/kskHunter'
+import { HUNTER_REPORT_EVENT, type HunterReportEvent } from '../../src/shared/hunterReport'
 import {
+  assertChannelOrderAccepted,
+  buildConvoyCredentialUrl,
   buildOrderRequestBody,
   parseChannelOffers,
+  parseKiroConvoyOrderReceipt,
   parseOrderedCredential,
   resolveOfferRegion
 } from '../../src/main/kskHunter/channelAdapters'
@@ -370,6 +388,740 @@ describe('站点响应解析', () => {
   it('Kiro CEO 缺幂等键时抛错，不发注定 400 的请求', () => {
     const offer = { goodsId: 'us', title: '美国区', region: 'us-east-1', stock: 5 }
     expect(() => buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_CEO, offer)).toThrow('幂等键')
+  })
+})
+
+describe('Kiro 拼车渠道', () => {
+  const convoyListUrl = 'http://kiro.zhiqwc.top/api/user/convoys'
+  const convoyOrderUrl = 'http://kiro.zhiqwc.top/api/user/convoys/quick-board'
+  const channelApiKey = 'test-convoy-api-key'
+
+  function convoyPayload(status = 'running', convoyId = 106): unknown[] {
+    return [
+      {
+        convoy: {
+          id: convoyId,
+          convoyNo: 'CV-20260811-0106',
+          title: '单次车 - 11:00发车（预定）',
+          scheduledAt: '2026-08-11T03:00:00.000Z',
+          tierGroups: [],
+          capacityMin: 7,
+          capacityMax: 14,
+          fare: 7,
+          warranted: true,
+          warrantyDurationSecs: 900,
+          warrantyRule: 'proportional',
+          status,
+          remark: '上车质保15分钟，按比例退',
+          createdAt: '2026-08-11T01:25:52.748264+00:00',
+          showFellows: false,
+          showCreditChart: false
+        },
+        passengerCount: 5
+      }
+    ]
+  }
+
+  function convoyOrderPayload(convoyId = 106): Record<string, unknown> {
+    return {
+      success: true,
+      convoy: { id: convoyId, fare: 7 },
+      passenger: { convoyId },
+      boardRecordId: `board-${convoyId}`
+    }
+  }
+
+  function convoyCredentialPayload(
+    credential: Record<string, unknown>,
+    convoyId = 106
+  ): Record<string, unknown> {
+    return {
+      ride: {
+        passenger: { convoyId, active: true, preBoarded: false },
+        convoy: { id: convoyId, status: 'running' }
+      },
+      credential
+    }
+  }
+
+  function convoyStore(
+    config: Partial<PersistedKskHunterStore['config']> = {}
+  ): PersistedKskHunterStore {
+    const store = hunterStore(
+      [
+        hunterLink({
+          name: 'Kiro 拼车',
+          channel: KSK_HUNTER_CHANNEL.KIRO_CONVOY,
+          regions: [],
+          secrets: { listUrl: convoyListUrl, orderUrl: convoyOrderUrl }
+        })
+      ],
+      config
+    )
+    store.secrets.apiKeys = { [KSK_HUNTER_CHANNEL.KIRO_CONVOY]: channelApiKey }
+    return store
+  }
+
+  it('按真实 convoys 结构计算余位，只把 running 车次视为有货', () => {
+    expect(parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CONVOY, convoyPayload())).toEqual([
+      {
+        goodsId: '106',
+        title: '单次车 - 11:00发车（预定）',
+        region: '',
+        stock: 9,
+        price: 7
+      }
+    ])
+    expect(
+      parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CONVOY, convoyPayload('pending'))[0].stock
+    ).toBe(0)
+  })
+
+  it('convoys 缺关键字段时失败关闭，不能伪装成无货', () => {
+    expect(() =>
+      parseChannelOffers(KSK_HUNTER_CHANNEL.KIRO_CONVOY, [
+        { convoy: { id: 106, status: 'running', fare: 7 }, passengerCount: 5 }
+      ])
+    ).toThrow('capacityMax')
+  })
+
+  it('quick-board 请求体、detail/credential 地址与业务拒绝均按站点契约处理', () => {
+    const offer = {
+      goodsId: '106',
+      title: '单次车 - 11:00发车（预定）',
+      region: '',
+      stock: 9,
+      price: 7
+    }
+    expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_CONVOY, offer)).toEqual({
+      departed: 'yes',
+      warranty: 'any',
+      maxFare: 7
+    })
+    expect(buildConvoyCredentialUrl(convoyOrderUrl)).toBe(
+      'http://kiro.zhiqwc.top/api/user/me/ride/detail'
+    )
+    expect(buildConvoyCredentialUrl(convoyOrderUrl, 'credential')).toBe(
+      'http://kiro.zhiqwc.top/api/user/me/ride/credential'
+    )
+    expect(buildConvoyCredentialUrl(`${convoyOrderUrl}/`)).toBe(
+      'http://kiro.zhiqwc.top/api/user/me/ride/detail'
+    )
+    expect(() => assertChannelOrderAccepted({ success: false, message: 'sold out' })).toThrow(
+      'sold out'
+    )
+  })
+
+  it('解析 AWS Kiro OAuth 凭证，不把它误当 KSK', () => {
+    expect(
+      parseOrderedCredential(
+        {
+          data: {
+            credential: {
+              type: 'oauth',
+              accessToken: 'fake-access-token',
+              refreshToken: 'fake-refresh-token',
+              clientId: 'fake-client-id',
+              clientSecret: 'fake-client-secret',
+              authRegion: 'us-east-1',
+              apiRegion: 'us-east-1',
+              endpoint: 'https://q.us-east-1.amazonaws.com'
+            }
+          }
+        },
+        ''
+      )
+    ).toEqual({
+      type: 'oauth',
+      accessToken: 'fake-access-token',
+      refreshToken: 'fake-refresh-token',
+      clientId: 'fake-client-id',
+      clientSecret: 'fake-client-secret',
+      region: 'us-east-1',
+      authRegion: 'us-east-1',
+      apiRegion: 'us-east-1',
+      endpoint: 'https://q.us-east-1.amazonaws.com',
+      expiresAt: undefined,
+      profileArn: undefined
+    })
+    expect(() =>
+      parseOrderedCredential(
+        {
+          type: 'oauth',
+          accessToken: 'fake-access-token',
+          refreshToken: 'fake-refresh-token',
+          clientId: 'fake-client-id',
+          clientSecret: 'fake-client-secret',
+          authRegion: 'us-east-1',
+          endpoint: 'https://attacker.execute-api.us-east-1.amazonaws.com'
+        },
+        ''
+      )
+    ).toThrow('BuilderId/IdC')
+  })
+
+  it('KSK 三步链路均带 X-API-Key，并只记一笔交付与花费', async () => {
+    const calls: Array<{ url: string; method: string; apiKey: string | null; body?: unknown }> = []
+    const imported: unknown[] = []
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url, init) => {
+          calls.push({
+            url,
+            method: init.method ?? 'GET',
+            apiKey: new Headers(init.headers).get('X-API-Key'),
+            body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+          })
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+          if (url.endsWith('/me/ride/detail')) {
+            return jsonResponse(
+              convoyCredentialPayload({
+                type: 'apiKey',
+                kiroApiKey: KSK_ONE,
+                region: 'eu-central-1'
+              })
+            )
+          }
+          return new Response('not found', { status: 404 })
+        },
+        importCredential: async (credential) => {
+          imported.push(credential)
+          return { added: true }
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
+      { url: convoyListUrl, method: 'GET' },
+      { url: convoyOrderUrl, method: 'POST' },
+      { url: 'http://kiro.zhiqwc.top/api/user/me/ride/detail', method: 'GET' }
+    ])
+    expect(calls.every((call) => call.apiKey === channelApiKey)).toBe(true)
+    expect(calls[1].body).toEqual({ departed: 'yes', warranty: 'any', maxFare: 7 })
+    expect(imported).toEqual([{ key: KSK_ONE, region: 'eu-central-1', groupId: undefined }])
+    expect(deliveryStore.records).toHaveLength(1)
+    expect(deliveryStore.spend).toHaveLength(1)
+    expect(store.links[0].pendingPurchase).toBeUndefined()
+  })
+
+  it('OAuth 只导入本地账号，不创建 KSK 交付也不推送 KSK 下游', async () => {
+    const imported: unknown[] = []
+    const downstreamCalls: string[] = []
+    let orderCalls = 0
+    const store = convoyStore({ downstreamEnabled: true })
+    const deps = makeDeps(store, {
+      fetchImpl: async (url) => {
+        if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+        if (url.endsWith('/convoys/quick-board')) {
+          orderCalls += 1
+          return jsonResponse(convoyOrderPayload())
+        }
+        return jsonResponse(
+          convoyCredentialPayload({
+            type: 'oauth',
+            accessToken: 'fake-access-token',
+            refreshToken: 'fake-refresh-token',
+            clientId: 'fake-client-id',
+            clientSecret: 'fake-client-secret',
+            authRegion: 'us-east-1',
+            apiRegion: 'us-east-1',
+            endpoint: 'https://q.us-east-1.amazonaws.com'
+          })
+        )
+      },
+      downstreamFetchImpl: async (url) => {
+        downstreamCalls.push(url)
+        return jsonResponse({ need: true })
+      },
+      importCredential: async (credential) => {
+        imported.push(credential)
+        return { added: true, accountId: 'oauth-account' }
+      }
+    })
+    const manager = new KskHunterManager(deps)
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(imported[0]).toMatchObject({
+      type: 'oauth',
+      refreshToken: 'fake-refresh-token',
+      region: 'us-east-1'
+    })
+    expect(deliveryStore.records).toHaveLength(0)
+    expect(deliveryStore.spend).toHaveLength(1)
+    expect(downstreamCalls.some((url) => url.endsWith('/ksk'))).toBe(false)
+    expect(store.links[0].lastCompletedConvoyId).toBe('106')
+
+    // 重启后同一 convoy 仍在 running，也不能再次付费购买 OAuth。
+    const restartedManager = new KskHunterManager(deps)
+    await restartedManager.runNow()
+    restartedManager.stop()
+    expect(orderCalls).toBe(1)
+    expect(imported).toHaveLength(1)
+  })
+
+  it('quick-board 网络结果不确定时持久化 pending，重启后只领取凭证不重复付费', async () => {
+    const calls: Array<{ url: string; method: string }> = []
+    let recovering = false
+    const store = convoyStore()
+    const deps = makeDeps(store, {
+      fetchImpl: async (url, init) => {
+        calls.push({ url, method: init.method ?? 'GET' })
+        if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+        if (url.endsWith('/convoys/quick-board')) throw new Error('socket closed')
+        if (recovering && url.endsWith('/me/ride/detail')) {
+          return jsonResponse(
+            convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' })
+          )
+        }
+        return new Response('not found', { status: 404 })
+      }
+    })
+    const firstManager = new KskHunterManager(deps)
+
+    const firstStatus = await firstManager.runNow()
+    firstManager.stop()
+    expect(firstStatus.state).toBe(KSK_HUNTER_STATE.DEGRADED)
+    expect(store.links[0].pendingPurchase).toMatchObject({ orderUncertain: true })
+
+    recovering = true
+    // pending 的恢复不能依赖仍然存在的列表 URL；付费后的取证优先级更高。
+    store.links[0].secrets.listUrl = ''
+    const secondManager = new KskHunterManager(deps)
+    await secondManager.runNow()
+    secondManager.stop()
+
+    expect(calls.filter((call) => call.url.endsWith('/convoys'))).toHaveLength(1)
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(calls.filter((call) => call.url.endsWith('/me/ride/detail'))).toHaveLength(1)
+    expect(deliveryStore.records).toHaveLength(1)
+    expect(deliveryStore.spend).toHaveLength(1)
+    expect(store.links[0].pendingPurchase).toBeUndefined()
+  })
+
+  it('凭证 GET 失败后重启只重试 GET，花费与交付保持幂等', async () => {
+    const calls: Array<{ url: string; method: string }> = []
+    let credentialAttempts = 0
+    const store = convoyStore()
+    const deps = makeDeps(store, {
+      fetchImpl: async (url, init) => {
+        calls.push({ url, method: init.method ?? 'GET' })
+        if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+        if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+        credentialAttempts += 1
+        return credentialAttempts === 1
+          ? new Response('temporary error', { status: 503 })
+          : jsonResponse(convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' }))
+      }
+    })
+    const firstManager = new KskHunterManager(deps)
+
+    await firstManager.runNow()
+    firstManager.stop()
+    expect(store.links[0].pendingPurchase).toMatchObject({ credentialAttempts: 1 })
+    expect(deliveryStore.spend).toHaveLength(1)
+
+    const secondManager = new KskHunterManager(deps)
+    await secondManager.runNow()
+    secondManager.stop()
+
+    expect(calls.filter((call) => call.url.endsWith('/convoys'))).toHaveLength(1)
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(credentialAttempts).toBe(2)
+    expect(deliveryStore.records).toHaveLength(1)
+    expect(deliveryStore.spend).toHaveLength(1)
+  })
+
+  it('detail 404 后重启改走 credential 兜底地址，不重新下单', async () => {
+    const calls: string[] = []
+    const store = convoyStore()
+    const deps = makeDeps(store, {
+      fetchImpl: async (url) => {
+        calls.push(url)
+        if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+        if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+        if (url.endsWith('/me/ride/detail')) return new Response('missing', { status: 404 })
+        return jsonResponse(
+          convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' })
+        )
+      }
+    })
+    const firstManager = new KskHunterManager(deps)
+    await firstManager.runNow()
+    firstManager.stop()
+
+    expect(store.links[0].pendingPurchase).toMatchObject({ credentialEndpoint: 'credential' })
+
+    const secondManager = new KskHunterManager(deps)
+    await secondManager.runNow()
+    secondManager.stop()
+
+    expect(calls.filter((url) => url.endsWith('/convoys/quick-board'))).toHaveLength(1)
+    expect(calls.at(-1)).toBe('http://kiro.zhiqwc.top/api/user/me/ride/credential')
+    expect(deliveryStore.records).toHaveLength(1)
+  })
+
+  it('多个链接共享同一渠道/API Key 时，全局串行查询和下单', async () => {
+    const store = convoyStore()
+    store.links.push({
+      ...store.links[0],
+      id: 'link-2',
+      name: 'Kiro 拼车备用链接',
+      pendingPurchase: undefined
+    })
+    const calls: Array<{ url: string; method: string }> = []
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url, init) => {
+          calls.push({ url, method: init.method ?? 'GET' })
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+          return jsonResponse(
+            convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' })
+          )
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(calls.filter((call) => call.url.endsWith('/convoys'))).toHaveLength(1)
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(calls.filter((call) => call.url.endsWith('/me/ride/detail'))).toHaveLength(1)
+  })
+
+  it('列表 3 秒与下单 5 秒分别节流，且缺 API Key 时零请求', async () => {
+    let now = 1_000_000
+    let convoyId = 106
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const calls: Array<{ url: string; method: string }> = []
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url, init) => {
+          calls.push({ url, method: init.method ?? 'GET' })
+          if (url.endsWith('/convoys')) {
+            return jsonResponse(convoyPayload('running', convoyId))
+          }
+          if (url.endsWith('/convoys/quick-board')) {
+            return jsonResponse(convoyOrderPayload(convoyId))
+          }
+          return jsonResponse(
+            convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' }, convoyId)
+          )
+        }
+      })
+    )
+    try {
+      await manager.runNow()
+      convoyId = 107
+      now += 3_100
+      await manager.runNow()
+      expect(calls.filter((call) => call.url.endsWith('/convoys'))).toHaveLength(2)
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+
+      now += 3_100
+      await manager.runNow()
+      expect(calls.filter((call) => call.url.endsWith('/convoys'))).toHaveLength(3)
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2)
+    } finally {
+      manager.stop()
+      nowSpy.mockRestore()
+    }
+
+    const missingKeyStore = convoyStore()
+    missingKeyStore.secrets.apiKeys = {}
+    const fetchImpl = vi.fn(async () => jsonResponse(convoyPayload()))
+    const missingKeyManager = new KskHunterManager(makeDeps(missingKeyStore, { fetchImpl }))
+    await missingKeyManager.runNow()
+    missingKeyManager.stop()
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(missingKeyManager.linkRuntimeOf('link-1').lastError).toContain('API Key')
+
+    const lookalikeStore = convoyStore()
+    lookalikeStore.links[0].secrets.listUrl =
+      'https://kiro.zhiqwc.top.evil.example/api/user/convoys'
+    const lookalikeFetch = vi.fn(async () => jsonResponse(convoyPayload()))
+    const lookalikeManager = new KskHunterManager(
+      makeDeps(lookalikeStore, { fetchImpl: lookalikeFetch })
+    )
+    await lookalikeManager.runNow()
+    lookalikeManager.stop()
+
+    expect(lookalikeFetch).not.toHaveBeenCalled()
+    expect(lookalikeManager.linkRuntimeOf('link-1').lastError).toContain('kiro.zhiqwc.top')
+  })
+
+  it('接受实站文档中的无 clientId/clientSecret OAuth，并保留认证与 API 区域', () => {
+    const credential = parseOrderedCredential(
+      convoyCredentialPayload({
+        type: 'oauth',
+        accessToken: 'access-token-example',
+        refreshToken: 'refresh-token-example',
+        profileArn: 'arn:aws:codewhisperer:us-east-1:123456789012:profile/example',
+        region: 'us-east-1',
+        authRegion: 'us-east-1',
+        apiRegion: 'us-west-2',
+        endpoint: 'https://q.us-east-1.amazonaws.com',
+        expiresAt: '2026-08-12T00:00:00.000Z'
+      }),
+      ''
+    )
+
+    expect(credential).toMatchObject({
+      type: 'oauth',
+      accessToken: 'access-token-example',
+      refreshToken: 'refresh-token-example',
+      region: 'us-east-1',
+      authRegion: 'us-east-1',
+      apiRegion: 'us-west-2',
+      expiresAt: Date.parse('2026-08-12T00:00:00.000Z')
+    })
+  })
+
+  it('quick-board 账务优先使用实站顶层 fare', () => {
+    expect(
+      parseKiroConvoyOrderReceipt({
+        convoy: { id: 106 },
+        passenger: { convoyId: 106 },
+        boardRecordId: 'board-106',
+        fare: 6,
+        ticketDeduct: 2,
+        walletDeduct: 4
+      })
+    ).toMatchObject({ convoyId: '106', boardRecordId: 'board-106', fare: 6 })
+  })
+
+  it('嵌套业务错误与 409 already_on_board 都是明确拒单，不保留 pending 或虚记花费', async () => {
+    expect(() =>
+      assertChannelOrderAccepted({
+        error: { type: 'already_on_board', message: 'already on board' }
+      })
+    ).toThrow('already_on_board')
+
+    const calls: Array<{ url: string; method: string }> = []
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url, init) => {
+          calls.push({ url, method: init.method ?? 'GET' })
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) {
+            return jsonResponse(
+              { error: { type: 'already_on_board', message: 'already on board' } },
+              409
+            )
+          }
+          throw new Error('明确拒单后不应领取凭证')
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(calls.some((call) => call.url.includes('/me/ride/'))).toBe(false)
+    expect(store.links[0].pendingPurchase).toBeUndefined()
+    expect(deliveryStore.pending['link-1']).toBeUndefined()
+    expect(deliveryStore.spend).toHaveLength(0)
+  })
+
+  it('detail 返回嵌套 pledge_required 时立即暂停并提示质保声明', async () => {
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+          return jsonResponse(
+            { error: { type: 'pledge_required', message: 'confirm pledge first' } },
+            403
+          )
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(store.links[0].pendingPurchase?.credentialAttempts).toBe(1)
+    expect(store.links[0].pendingPurchase?.blockedReason).toContain('质保声明')
+    expect(manager.linkRuntimeOf('link-1').lastError).toContain('质保声明')
+  })
+
+  it('detail 200 但 credential 为空时从 statusNote 识别未签承诺', async () => {
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) return jsonResponse(convoyOrderPayload())
+          return jsonResponse({
+            ...convoyCredentialPayload({}),
+            credential: null,
+            statusNote: '请先签署质保承诺后领取凭证'
+          })
+        }
+      })
+    )
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(store.links[0].pendingPurchase?.credentialAttempts).toBe(1)
+    expect(store.links[0].pendingPurchase?.blockedReason).toContain('质保声明')
+  })
+
+  it('网络不确定订单恢复后只补一次 ORDERED 统计和花费', async () => {
+    let now = 2_000_000
+    let postFailed = false
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const reportEvents: HunterReportEvent[] = []
+    const store = convoyStore()
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/convoys')) return jsonResponse(convoyPayload())
+          if (url.endsWith('/convoys/quick-board')) {
+            postFailed = true
+            throw new Error('socket closed after send')
+          }
+          return jsonResponse(
+            convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' })
+          )
+        },
+        appendReportEvent: async (event) => {
+          reportEvents.push(event)
+        },
+        readReportEvents: async () => reportEvents
+      })
+    )
+
+    try {
+      const uncertain = await manager.runNow()
+      expect(postFailed).toBe(true)
+      expect(uncertain.totalOrdered).toBe(0)
+      expect(deliveryStore.spend).toHaveLength(1)
+      expect(store.links[0].pendingPurchase?.orderUncertain).toBe(true)
+      expect(store.links[0].pendingPurchase?.credentialRecoveryReady).toBe(true)
+
+      now += 3_100
+      const recovered = await manager.runNow()
+      expect(recovered.totalOrdered).toBe(1)
+      expect(deliveryStore.spend).toHaveLength(1)
+      expect(store.links[0].pendingPurchase).toBeUndefined()
+
+      now += 3_100
+      const stable = await manager.runNow()
+      expect(stable.totalOrdered).toBe(1)
+      expect(
+        reportEvents.filter((event) => event.type === HUNTER_REPORT_EVENT.ORDERED)
+      ).toHaveLength(1)
+      const orderedEvent = reportEvents.find((event) => event.type === HUNTER_REPORT_EVENT.ORDERED)
+      expect(orderedEvent?.eventId).toBeTruthy()
+      reportEvents.push({ ...orderedEvent! })
+      expect((await manager.report(7)).totals.orders).toBe(1)
+    } finally {
+      manager.stop()
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('POST 前崩溃留下的模糊 pending 不自动取旧 ride、不虚记预算', async () => {
+    const store = convoyStore()
+    store.links[0].pendingPurchase = {
+      id: 'ambiguous-purchase',
+      goodsId: '106',
+      title: 'Kiro 拼车 106',
+      region: 'eu-central-1',
+      price: 7,
+      costCny: 7,
+      costUnit: 7,
+      orderedAt: 1_700_000_000_100,
+      orderUncertain: true,
+      credentialEndpoint: 'detail',
+      credentialAttempts: 0
+    }
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(convoyCredentialPayload({ kiroApiKey: KSK_ONE, region: 'eu-central-1' }))
+    )
+    const manager = new KskHunterManager(makeDeps(store, { fetchImpl }))
+
+    await manager.runNow()
+    manager.stop()
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(toKskHunterSpendEntries(store)).toHaveLength(0)
+    expect(store.links[0].pendingPurchase).toMatchObject({
+      recoveryRequiresConfirmation: true,
+      blockedReason: expect.stringContaining('核对订单')
+    })
+
+    // 用户到站点核对后重新保存链接会把这两个字段切到可恢复状态。
+    store.links[0].pendingPurchase = {
+      ...store.links[0].pendingPurchase!,
+      credentialRecoveryReady: true,
+      recoveryRequiresConfirmation: undefined,
+      blockedReason: undefined
+    }
+    expect(toKskHunterSpendEntries(store)).toHaveLength(1)
+
+    const confirmedManager = new KskHunterManager(makeDeps(store, { fetchImpl }))
+    await confirmedManager.runNow()
+    confirmedManager.stop()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(store.links[0].pendingPurchase).toBeUndefined()
+  })
+
+  it('pending、下单冷却和已完成车次经过 JSON 持久化后不丢失', () => {
+    const store = convoyStore()
+    store.links[0].lastConvoyOrderAt = 1_700_000_000_000
+    store.links[0].lastCompletedConvoyId = '105'
+    store.links[0].pendingPurchase = {
+      id: 'purchase-106',
+      goodsId: '106',
+      title: 'Kiro 拼车 106',
+      region: 'eu-central-1',
+      price: 7,
+      costCny: 7,
+      costUnit: 7,
+      orderedAt: 1_700_000_000_100,
+      boardRecordId: 'board-106',
+      apiKeyFingerprint: 'a'.repeat(64),
+      orderUncertain: true,
+      credentialRecoveryReady: true,
+      recoveryRequiresConfirmation: true,
+      orderRecorded: true,
+      credentialEndpoint: 'detail',
+      credentialAttempts: 2,
+      blockedReason: '等待人工处理'
+    }
+
+    const normalized = normalizeKskHunterStorePayload(JSON.parse(JSON.stringify(store)))
+    expect(normalized.links[0]).toMatchObject({
+      lastConvoyOrderAt: 1_700_000_000_000,
+      lastCompletedConvoyId: '105',
+      pendingPurchase: {
+        id: 'purchase-106',
+        goodsId: '106',
+        boardRecordId: 'board-106',
+        orderUncertain: true,
+        credentialRecoveryReady: true,
+        recoveryRequiresConfirmation: true,
+        orderRecorded: true,
+        credentialAttempts: 2,
+        blockedReason: '等待人工处理'
+      }
+    })
   })
 })
 
@@ -1088,6 +1840,7 @@ describe('余额查询与缓存', () => {
     const { impl } = balanceFetch([{ balance: 100 }])
     await expect(
       fetchChannelBalance({
+        channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
         url: 'http://site.example/balance',
         timeoutSeconds: 5,
         fetchImpl: impl
@@ -1095,10 +1848,25 @@ describe('余额查询与缓存', () => {
     ).rejects.toThrow('HTTPS')
   })
 
+  it('Kiro 拼车余额地址拒绝任意其它 HTTPS 主机，且不会泄露 API Key', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ balance: 100 }))
+    await expect(
+      fetchChannelBalance({
+        channel: KSK_HUNTER_CHANNEL.KIRO_CONVOY,
+        url: 'https://attacker.example/balance',
+        timeoutSeconds: 5,
+        fetchImpl,
+        apiKey: 'channel-api-key-example'
+      })
+    ).rejects.toThrow('kiro.zhiqwc.top')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('错误信息里的 token 被脱敏', async () => {
     const impl: KskHunterFetch = async () => new Response('bad', { status: 500 })
     await expect(
       fetchChannelBalance({
+        channel: KSK_HUNTER_CHANNEL.KIRO_CEO,
         url: 'https://site.example/balance?token=super_secret',
         timeoutSeconds: 5,
         fetchImpl: impl

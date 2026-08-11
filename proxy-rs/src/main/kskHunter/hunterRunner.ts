@@ -16,6 +16,7 @@ import {
   KSK_HUNTER_CHANNEL_AUTH_HEADER,
   KSK_HUNTER_CHANNEL_LABEL,
   KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS,
+  KSK_HUNTER_CHANNEL_ORDER_MIN_INTERVAL_SECONDS,
   KSK_HUNTER_CHANNEL_REQUIRES_API_KEY,
   KSK_HUNTER_DELIVERY_MAX_ATTEMPTS,
   KSK_HUNTER_DELIVERY_STATE,
@@ -26,10 +27,13 @@ import {
   exhaustedHunterChannels,
   hunterRetryDelayMs,
   hunterUnitToCny,
+  isAllowedHunterEndpointUrl,
+  isHunterOAuthCredential,
   isUsableHunterCredential,
+  isUsableHunterOAuthCredential,
   matchesHunterRegions,
   summarizeHunterSpend,
-  type HunterKskCredential,
+  type HunterOrderedCredential,
   type KskHunterBudgetBlock,
   type KskHunterChannel,
   type KskHunterChannelBalance,
@@ -60,18 +64,25 @@ import { loadKskLedger, recordKskLedgerPurchase } from './ledgerStore'
 import {
   appendKskHunterDelivery,
   appendKskHunterSpend,
+  completeKskHunterPendingPurchase,
   patchKskHunterDelivery,
+  setKskHunterPendingPurchase,
   toKskHunterDeliveryView,
   toKskHunterLinkView,
   toKskHunterSpendEntries,
   type KskHunterLinkRuntime,
+  type KskHunterPendingPurchase,
   type PersistedKskHunterDelivery,
   type PersistedKskHunterLink,
   type PersistedKskHunterStore
 } from './configStore'
 import {
+  assertChannelOrderAccepted,
+  assertKiroConvoyCredentialMatches,
+  buildConvoyCredentialUrl,
   buildOrderRequestBody,
   parseChannelOffers,
+  parseKiroConvoyOrderReceipt,
   parseOrderedCredential
 } from './channelAdapters'
 import {
@@ -82,10 +93,14 @@ import {
 import { HunterBalanceCache } from './balanceClient'
 
 /** 抢到号后的入库结果。 */
+import { createHash } from 'node:crypto'
+
 export interface HunterImportResult {
   added: boolean
+  /** Existing credential was rotated or repaired in place. */
+  changed?: boolean
   /**
-   * 新建的账号 id。台账按它关联，缺失（重复号）时不建档。
+   * 新建或更新后的账号 id。台账按它关联；完全重复且未变更时也可能返回已有 id。
    */
   accountId?: string
   /**
@@ -105,7 +120,7 @@ export interface KskHunterDeps {
   downstreamFetchImpl?: KskHunterFetch
   /** 发消息验活并写入账号库；抛错表示号不可用。 */
   importCredential: (
-    input: HunterKskCredential & { groupId?: string }
+    input: HunterOrderedCredential & { groupId?: string }
   ) => Promise<HunterImportResult>
   /** 弹系统通知。 */
   notifyInStock: (input: { linkName: string; title: string; region: string }) => void
@@ -187,6 +202,43 @@ const EMPTY_STATUS: KskHunterStatus = {
   budgetBlockedChannels: []
 }
 
+const KIRO_CONVOY_CREDENTIAL_MAX_ATTEMPTS = 5
+const KIRO_CONVOY_PLEDGE_REQUIRED_CODE = 'pledge_required'
+
+const KIRO_CONVOY_PLEDGE_STATUS_PATTERN = /pledge|承诺|质保/i
+
+function readKiroConvoyCredentialStatusNote(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
+  const source = payload as Record<string, unknown>
+  if (source.credential !== null) return undefined
+  return typeof source.statusNote === 'string' && source.statusNote.trim()
+    ? source.statusNote.trim()
+    : undefined
+}
+
+class HunterHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message = `请求失败: HTTP ${status}`
+  ) {
+    super(message)
+    this.name = 'HunterHttpError'
+  }
+}
+
+function isDeterministicOrderRejection(error: unknown): boolean {
+  return (
+    error instanceof HunterHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408
+  )
+}
+
+function fingerprintChannelApiKey(apiKey: string | undefined): string {
+  return apiKey ? createHash('sha256').update(apiKey).digest('hex') : ''
+}
+
 export class KskHunterManager {
   private timer: ReturnType<typeof setTimeout> | null = null
   private deliveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -197,6 +249,10 @@ export class KskHunterManager {
   /** 正在推送中的记录 id，防止定时器与手动重试重复推。 */
   private readonly inFlightDeliveries = new Set<string>()
   private readonly linkRuntime = new Map<string, KskHunterLinkRuntime>()
+  /** 站点限流按渠道/API 账户生效，不能只按链接分别计算。 */
+  private readonly channelLastCheckAt = new Map<KskHunterChannel, number>()
+  private readonly channelLastOrderAt = new Map<KskHunterChannel, number>()
+  private readonly recordedOrderIds = new Set<string>()
   /** 熔断发生在哪一天（本地日期键）。跨天后据此解除熔断，不需要额外定时器。 */
   private budgetBlockDate: string | null = null
   private readonly balanceCache = new HunterBalanceCache()
@@ -408,7 +464,9 @@ export class KskHunterManager {
 
     try {
       const store = await this.deps.readStore()
-      const activeLinks = store.links.filter((link) => link.enabled && link.secrets.listUrl)
+      const activeLinks = store.links.filter(
+        (link) => link.enabled && Boolean(link.secrets.listUrl || link.pendingPurchase)
+      )
       // async checkLink 会先同步建立 inFlight，再在首个 await 处挂起；统一通知可观察到整轮真实 Set。
       const checks = activeLinks.map((link) => this.checkLink(link, store))
       this.notifySnapshotSafely()
@@ -455,22 +513,22 @@ export class KskHunterManager {
     if (this.inFlightLinks.has(link.id)) return true
 
     /*
-     * 有的站点要求比全局轮询更长的间隔（如 Kiro CEO 的 30 秒），对这些渠道逐链接节流。
-     *
-     * 只对**严于全局间隔**的渠道生效：等于全局间隔的渠道不加这道门，否则手动「立即查询」
-     * 撞上刚跑完的定时轮询就会静默什么都不做，用户以为按钮坏了。
-     * 严格渠道则连手动查询也照样节流——绕过它就是去吃 429。
-     *
-     * 跳过不算失败：按站点限制节流是正常行为，算失败会把整体状态误判成 DEGRADED。
+     * Kiro 拼车的 3 秒限流属于整个渠道/API 账户；其它严格渠道维持原有逐链接节流。
+     * 手动“立即查询”也不能绕过站点硬限流。
      */
     const minIntervalMs = KSK_HUNTER_CHANNEL_MIN_INTERVAL_SECONDS[link.channel] * 1000
-    if (minIntervalMs > KSK_HUNTER_POLL_INTERVAL_SECONDS * 1000) {
-      const lastCheckedAt = this.linkRuntimeOf(link.id).lastCheckedAt
+    const enforcesMinInterval =
+      minIntervalMs > KSK_HUNTER_POLL_INTERVAL_SECONDS * 1000 ||
+      link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+    if (enforcesMinInterval) {
+      const lastCheckedAt =
+        link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+          ? this.channelLastCheckAt.get(link.channel)
+          : this.linkRuntimeOf(link.id).lastCheckedAt
       if (lastCheckedAt !== undefined && Date.now() - lastCheckedAt < minIntervalMs) return true
     }
 
     // 要求请求头鉴权的渠道没配密钥就别发请求：必然 401，还会把密钥错误伪装成站点故障。
-    // 刻意不在 IPC 层硬拦——用户常先加链接再填密钥，硬拦会让人卡在表单上。
     const apiKey = this.channelApiKey(link.channel, store)
     if (KSK_HUNTER_CHANNEL_REQUIRES_API_KEY[link.channel] && !apiKey) {
       this.linkRuntime.set(link.id, {
@@ -481,21 +539,45 @@ export class KskHunterManager {
       return false
     }
 
+    if (link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY) {
+      // 在首个 await 前占住渠道时间窗，多个同渠道链接同轮也只会发一个请求。
+      this.channelLastCheckAt.set(link.channel, Date.now())
+    }
     this.inFlightLinks.add(link.id)
     try {
+      /*
+       * quick-board 已经成交时，优先续领凭证，绝不再查库存或重复 POST。
+       * pendingPurchase 持久化在链接上，因此应用重启后仍走这里。
+       */
+      if (link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY && link.pendingPurchase) {
+        if (link.pendingPurchase.blockedReason) {
+          throw new Error(link.pendingPurchase.blockedReason)
+        }
+        await this.resumeConvoyPurchase(link, store, link.pendingPurchase)
+        this.linkRuntime.set(link.id, {
+          ...this.linkRuntimeOf(link.id),
+          lastInStock: false,
+          lastCheckedAt: Date.now(),
+          lastError: undefined
+        })
+        return true
+      }
+
       const payload = await this.fetchJson(
         link.secrets.listUrl,
         store.config.requestTimeoutSeconds,
-        { method: 'GET', apiKey }
+        { method: 'GET', apiKey, channel: link.channel }
       )
       const offers = parseChannelOffers(link.channel, payload).filter(
-        (offer) => offer.stock > 0 && matchesHunterRegions(link.regions, offer.region)
+        (offer) =>
+          offer.stock > 0 &&
+          matchesHunterRegions(link.regions, offer.region) &&
+          !(
+            link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY &&
+            offer.goodsId === link.lastCompletedConvoyId
+          )
       )
-      // 放货只记「无货 → 有货」这一刻：一批货会被连着几十轮都发现，逐轮记会把
-      // 事件流刷爆，也会让「放货次数」这个指标失去意义
       const wasInStock = this.linkRuntimeOf(link.id).lastInStock
-      // 展开原有 runtime：pendingOrder 必须跨轮保留，整体替换会让下单重试换掉幂等键，
-      // 变成第二笔订单（重复扣费）
       this.linkRuntime.set(link.id, {
         ...this.linkRuntimeOf(link.id),
         lastInStock: offers.length > 0,
@@ -518,7 +600,6 @@ export class KskHunterManager {
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      // 同上：保留 pendingOrder。下单失败正是要复用幂等键的场景
       this.linkRuntime.set(link.id, {
         ...this.linkRuntimeOf(link.id),
         lastInStock: false,
@@ -556,6 +637,24 @@ export class KskHunterManager {
       return
     }
 
+    const orderMinIntervalMs = KSK_HUNTER_CHANNEL_ORDER_MIN_INTERVAL_SECONDS[link.channel] * 1000
+    const latestChannelOrderAt = (): number | undefined => {
+      const inMemory = this.channelLastOrderAt.get(link.channel) ?? 0
+      const persisted = store.links
+        .filter((item) => item.channel === link.channel)
+        .reduce((latest, item) => Math.max(latest, item.lastConvoyOrderAt ?? 0), 0)
+      const latest = Math.max(inMemory, persisted)
+      return latest > 0 ? latest : undefined
+    }
+    const lastOrderAt = latestChannelOrderAt()
+    if (
+      orderMinIntervalMs > 0 &&
+      lastOrderAt !== undefined &&
+      Date.now() - lastOrderAt < orderMinIntervalMs
+    ) {
+      return
+    }
+
     // 预算检查在最前面：超限时只停下单，通知已经在上面发过了
     const spend = summarizeHunterSpend(toKskHunterSpendEntries(store), store.config)
     const balanceUnit = await this.resolveBalanceUnit(link.channel, store)
@@ -580,6 +679,28 @@ export class KskHunterManager {
         fetchImpl: this.deps.downstreamFetchImpl ?? this.deps.fetchImpl
       })
       if (!needs) return
+    }
+
+    /*
+     * 预算/下游检查都含 await；在真正下单前重新检查并同步占住渠道时间窗，
+     * 保证多个同 API 账户的链接同轮最多一个 quick-board。
+     */
+    const latestBeforeOrder = latestChannelOrderAt()
+    if (
+      orderMinIntervalMs > 0 &&
+      latestBeforeOrder !== undefined &&
+      Date.now() - latestBeforeOrder < orderMinIntervalMs
+    ) {
+      return
+    }
+    const orderAttemptAt = Date.now()
+    if (orderMinIntervalMs > 0) this.channelLastOrderAt.set(link.channel, orderAttemptAt)
+    this.linkRuntime.set(link.id, {
+      ...this.linkRuntimeOf(link.id),
+      lastOrderAt: orderAttemptAt
+    })
+    if (link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY) {
+      link.lastConvoyOrderAt = orderAttemptAt
     }
 
     // 一轮只买一个：下游一次只说要不要，买多了没人接
@@ -727,117 +848,234 @@ export class KskHunterManager {
     })
   }
 
-  private async orderOne(
+  private async resumeConvoyPurchase(
     link: PersistedKskHunterLink,
-    offer: KskHunterOffer,
     store: PersistedKskHunterStore,
-    budget: { costCny: number; costUnit?: number }
+    pending: KskHunterPendingPurchase
   ): Promise<void> {
-    const idempotencyKey = this.resolveIdempotencyKey(link.id, offer.goodsId)
-    const orderPayload = await this.fetchJson(
-      link.secrets.orderUrl,
-      store.config.requestTimeoutSeconds,
-      {
-        method: 'POST',
-        body: buildOrderRequestBody(link.channel, offer, { idempotencyKey }),
-        apiKey: this.channelApiKey(link.channel, store)
+    if (!link.secrets.orderUrl) throw new Error('Kiro 拼车缺少下单地址，无法推导凭证地址')
+    if (pending.orderUncertain && !pending.credentialRecoveryReady) {
+      const blockedReason =
+        '下单进程在请求结果确认前中断；请先到拼车站点核对订单，再重新保存该链接以确认领取凭证'
+      const updated = {
+        ...pending,
+        recoveryRequiresConfirmation: true,
+        blockedReason
       }
-    )
-    // 请求成功即弃用这个幂等键：留着会让下一单被服务端当成本单的重放而不发货
-    this.clearIdempotencyKey(link.id)
-    const credential = parseOrderedCredential(orderPayload, offer.region)
-    if (!isUsableHunterCredential(credential)) {
+      await setKskHunterPendingPurchase(link.id, updated)
+      link.pendingPurchase = updated
+      throw new Error(blockedReason)
+    }
+    const currentApiKey = this.channelApiKey(link.channel, store)
+    if (
+      pending.apiKeyFingerprint &&
+      fingerprintChannelApiKey(currentApiKey) !== pending.apiKeyFingerprint
+    ) {
+      const blockedReason = '凭证领取已暂停：API Key 与下单时不一致，请恢复原 Key 后重试'
+      const updated = { ...pending, blockedReason }
+      await setKskHunterPendingPurchase(link.id, updated)
+      link.pendingPurchase = updated
+      throw new Error(blockedReason)
+    }
+
+    let currentPending = pending
+    try {
+      const payload = await this.fetchJson(
+        buildConvoyCredentialUrl(
+          link.secrets.orderUrl,
+          currentPending.credentialEndpoint ?? 'detail'
+        ),
+        store.config.requestTimeoutSeconds,
+        {
+          method: 'GET',
+          apiKey: currentApiKey,
+          channel: link.channel
+        }
+      )
+      assertKiroConvoyCredentialMatches(payload, currentPending.goodsId)
+      const statusNote = readKiroConvoyCredentialStatusNote(payload)
+      if (statusNote) {
+        if (KIRO_CONVOY_PLEDGE_STATUS_PATTERN.test(statusNote)) {
+          throw new Error(`${KIRO_CONVOY_PLEDGE_REQUIRED_CODE}: ${statusNote}`)
+        }
+        throw new Error(`凭证暂不可用：${statusNote}`)
+      }
+      const credential = parseOrderedCredential(payload, currentPending.region)
+      const orderAlreadyRecorded =
+        currentPending.orderRecorded === true ||
+        currentPending.orderUncertain !== true ||
+        this.recordedOrderIds.has(currentPending.id)
+      await this.persistOrderedCredential(
+        link,
+        store,
+        { costCny: currentPending.costCny, costUnit: currentPending.costUnit },
+        credential,
+        currentPending.id,
+        currentPending.orderedAt,
+        orderAlreadyRecorded
+      )
+      if (!orderAlreadyRecorded) {
+        /*
+         * ORDERED 事件先用稳定 purchaseId 写入，再落完成标记。若此处崩溃，重试可能
+         * 再追加同 eventId，但报表聚合会去重，不会漏单或重复统计。
+         */
+        currentPending = { ...currentPending, orderRecorded: true }
+        await setKskHunterPendingPurchase(link.id, currentPending)
+        link.pendingPurchase = currentPending
+      }
+      await completeKskHunterPendingPurchase(link.id, currentPending.id, currentPending.goodsId)
+      this.recordedOrderIds.delete(currentPending.id)
+      link.pendingPurchase = undefined
+      link.lastCompletedConvoyId = currentPending.goodsId
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const fallbackToCredential =
+        (currentPending.credentialEndpoint ?? 'detail') === 'detail' && message.includes('HTTP 404')
+      const credentialAttempts = fallbackToCredential
+        ? currentPending.credentialAttempts
+        : currentPending.credentialAttempts + 1
+      const pledgeRequired = message.includes(KIRO_CONVOY_PLEDGE_REQUIRED_CODE)
+      const exhausted =
+        !fallbackToCredential && credentialAttempts >= KIRO_CONVOY_CREDENTIAL_MAX_ATTEMPTS
+      const blockedReason = pledgeRequired
+        ? '凭证领取已暂停：请先到拼车站点确认质保声明，再重新保存该链接以重试'
+        : exhausted
+          ? `凭证领取连续失败 ${credentialAttempts} 次，已暂停自动重试以避免触发站点限流`
+          : undefined
+      const updated: KskHunterPendingPurchase = {
+        ...currentPending,
+        credentialEndpoint: fallbackToCredential ? 'credential' : currentPending.credentialEndpoint,
+        credentialAttempts,
+        blockedReason
+      }
+      await setKskHunterPendingPurchase(link.id, updated)
+      link.pendingPurchase = updated
+      if (blockedReason) throw new Error(blockedReason)
+      throw error
+    }
+  }
+
+  private async persistOrderedCredential(
+    link: PersistedKskHunterLink,
+    store: PersistedKskHunterStore,
+    budget: { costCny: number; costUnit?: number },
+    credential: HunterOrderedCredential,
+    purchaseId: string,
+    purchasedAt: number,
+    orderAlreadyRecorded: boolean
+  ): Promise<void> {
+    if (isHunterOAuthCredential(credential)) {
+      if (!isUsableHunterOAuthCredential(credential)) {
+        throw new Error('下单返回的 OAuth 凭证不完整')
+      }
+    } else if (!isUsableHunterCredential(credential)) {
       throw new Error('下单返回的 KSK 或区域不合法')
     }
 
-    this.status = { ...this.status, totalOrdered: this.status.totalOrdered + 1 }
-    // 钱已扣，余额缓存立即失效，下一单按真实余额判断
-    this.balanceCache.invalidate(link.channel)
-    const maskedKey = maskKiroApiKey(credential.key)
     const unitLabel = store.config.billing[link.channel]?.unitLabel
-
-    // 钱已花出去，先落盘再做验活与推送，中途崩了也不会丢号
-    const now = Date.now()
-    const delivery: PersistedKskHunterDelivery = {
-      id: randomUUID(),
-      linkId: link.id,
-      linkName: link.name,
-      channel: link.channel,
-      key: credential.key,
-      region: credential.region,
-      // 对账要按分组汇总，而配置里的 targetGroupId 随时会改，推送时回读可能已经不是这个
-      groupId: store.config.targetGroupId,
-      state: KSK_HUNTER_DELIVERY_STATE.PENDING,
-      attempts: 0,
-      createdAt: now,
-      updatedAt: now,
-      costUnit: budget.costUnit,
-      costCny: budget.costCny,
-      unitLabel
-    }
-    await appendKskHunterDelivery(delivery)
-
-    // 钱已经花了，账必须记上。哪怕后面验活失败也算花费——这才是真实支出。
     await appendKskHunterSpend({
-      id: randomUUID(),
+      id: purchaseId,
       channel: link.channel,
       linkId: link.id,
       linkName: link.name,
       amountUnit: budget.costUnit ?? 0,
       amountCny: budget.costCny,
-      at: now
+      at: purchasedAt
     })
+    const shouldRecordOrder = !orderAlreadyRecorded && !this.recordedOrderIds.has(purchaseId)
+    if (shouldRecordOrder) {
+      this.status = { ...this.status, totalOrdered: this.status.totalOrdered + 1 }
+      this.balanceCache.invalidate(link.channel)
+      this.recordReportEvent(HUNTER_REPORT_EVENT.ORDERED, link, {
+        eventId: purchaseId,
+        region: credential.region,
+        costUnit: budget.costUnit,
+        costCny: budget.costCny,
+        unitLabel
+      })
+      this.recordedOrderIds.add(purchaseId)
+    }
 
-    this.recordReportEvent(HUNTER_REPORT_EVENT.ORDERED, link, {
+    if (isHunterOAuthCredential(credential)) {
+      const result = await this.deps.importCredential({
+        ...credential,
+        groupId: store.config.targetGroupId
+      })
+      if (result.added || result.changed) this.deps.notifyAccountsChanged()
+      if (store.config.notifyOnAutoOrder) {
+        this.deps.notifyOrdered({
+          linkName: link.name,
+          maskedKey: 'OAuth 凭证',
+          region: credential.region
+        })
+      }
+      if (result.accountId) {
+        this.recordLedgerPurchase({
+          accountId: result.accountId,
+          maskedKey: 'OAuth 凭证',
+          region: credential.region,
+          channel: link.channel,
+          linkId: link.id,
+          linkName: link.name,
+          groupId: store.config.targetGroupId,
+          purchasedAt,
+          costUnit: budget.costUnit,
+          costCny: budget.costCny,
+          unitLabel,
+          baselineUsage: result.usageCurrent,
+          currentUsage: result.usageCurrent,
+          usageLimit: result.usageLimit,
+          carriedCredits: 0,
+          usedCredits: 0
+        })
+      }
+      return
+    }
+
+    const maskedKey = maskKiroApiKey(credential.key)
+    const delivery: PersistedKskHunterDelivery = {
+      id: purchaseId,
+      linkId: link.id,
+      linkName: link.name,
+      channel: link.channel,
+      key: credential.key,
       region: credential.region,
+      groupId: store.config.targetGroupId,
+      state: KSK_HUNTER_DELIVERY_STATE.PENDING,
+      attempts: 0,
+      createdAt: purchasedAt,
+      updatedAt: purchasedAt,
       costUnit: budget.costUnit,
       costCny: budget.costCny,
       unitLabel
-    })
+    }
+    // 稳定 purchaseId + append 去重让重启恢复不会重复落交付与花费。
+    await appendKskHunterDelivery(delivery)
     if (store.config.notifyOnAutoOrder) {
       this.deps.notifyOrdered({ linkName: link.name, maskedKey, region: credential.region })
     }
 
-    /*
-     * 台账建档的共同字段。真正落账要等验活入库拿到账号 id——台账按账号 id 关联，
-     * 号还没进账号库时没有可用的主键。
-     */
     const purchase = {
       maskedKey,
       region: credential.region,
       channel: link.channel,
       linkId: link.id,
       linkName: link.name,
-      // 抢到的号会落进这个分组；不同分组通常对应不同下游，报表按它汇总
       groupId: store.config.targetGroupId,
-      purchasedAt: now,
+      purchasedAt,
       costUnit: budget.costUnit,
       costCny: budget.costCny,
       unitLabel
     }
 
-    // 验活兼入库：验活失败的号不推给下游，但记录保留供人工处理
     try {
       const result = await this.deps.importCredential({
         ...credential,
         groupId: store.config.targetGroupId
       })
-      if (result.added) this.deps.notifyAccountsChanged()
-      /*
-       * 账号 id 写回推送记录：交付账本靠它关联台账取积分消耗，而 deliverOne 只拿到
-       * 推送记录，不该再去账号库按 key 反查一遍。
-       */
+      if (result.added || result.changed) this.deps.notifyAccountsChanged()
       if (result.accountId) {
         await patchKskHunterDelivery(delivery.id, { accountId: result.accountId })
-      }
-      /*
-       * 建档：入库时拉到的 usage 就是**买入时的额度基线**。二手号买来可能已经烧掉
-       * 一部分，记进基线才不会把前主的消耗算成下游的产出。
-       *
-       * accountId 缺失时不记（重复号，或旧版 importCredential 不回这个字段）：
-       * 没有主键的条目参与不了任何聚合，记了只会变成一行空数据。
-       */
-      if (result.accountId) {
         this.recordLedgerPurchase({
           ...purchase,
           accountId: result.accountId,
@@ -855,11 +1093,6 @@ export class KskHunterManager {
         lastError: `验活失败：${message}`
       })
       this.recordReportEvent(HUNTER_REPORT_EVENT.DEAD_KEY, link, { region: credential.region })
-      /*
-       * 钱花了号不能用。台账仍要记这笔采购——这是真实支出，不记就等于账目缺一块；
-       * 但它没有账号 id（没进账号库），所以用一个带 `dead:` 前缀的合成主键，
-       * 保证它永远匹配不上任何账号观测，会一直停在「买到即废」。
-       */
       this.recordLedgerPurchase({
         ...purchase,
         accountId: `dead:${delivery.id}`,
@@ -874,6 +1107,187 @@ export class KskHunterManager {
     }
 
     this.scheduleDeliveryDrain(0)
+  }
+
+  private async orderOne(
+    link: PersistedKskHunterLink,
+    offer: KskHunterOffer,
+    store: PersistedKskHunterStore,
+    budget: { costCny: number; costUnit?: number }
+  ): Promise<void> {
+    const apiKey = this.channelApiKey(link.channel, store)
+
+    if (link.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY) {
+      /*
+       * 所有本地可判定错误都必须发生在 pending 落盘前；否则错误 URL 会被误判为
+       * “可能已扣费”并永久锁住链接。
+       */
+      buildConvoyCredentialUrl(link.secrets.orderUrl)
+      if (!isAllowedHunterEndpointUrl(link.secrets.orderUrl, link.channel)) {
+        throw new Error('Kiro 拼车下单地址只允许使用 kiro.zhiqwc.top')
+      }
+
+      const orderedAt = link.lastConvoyOrderAt ?? Date.now()
+      const pendingBase: KskHunterPendingPurchase = {
+        id: randomUUID(),
+        goodsId: offer.goodsId,
+        title: offer.title,
+        region: offer.region,
+        price: offer.price,
+        costCny: budget.costCny,
+        costUnit: budget.costUnit,
+        orderedAt,
+        apiKeyFingerprint: fingerprintChannelApiKey(apiKey),
+        credentialEndpoint: 'detail',
+        credentialAttempts: 0
+      }
+      const attemptingPending: KskHunterPendingPurchase = {
+        ...pendingBase,
+        orderUncertain: true
+      }
+      /*
+       * quick-board 没有幂等键。先持久化“准备发单”，再 POST；即使进程在远端扣费后
+       * 立即崩溃，重启也只会领取凭证，不会再次付费。
+       */
+      await setKskHunterPendingPurchase(link.id, attemptingPending)
+      link.pendingPurchase = attemptingPending
+
+      const clearRejectedAttempt = async (): Promise<void> => {
+        await setKskHunterPendingPurchase(link.id, undefined)
+        link.pendingPurchase = undefined
+      }
+      const markCredentialRecoveryReady = async (): Promise<KskHunterPendingPurchase> => {
+        const recoverablePending = {
+          ...attemptingPending,
+          credentialRecoveryReady: true
+        }
+        await setKskHunterPendingPurchase(link.id, recoverablePending)
+        link.pendingPurchase = recoverablePending
+        return recoverablePending
+      }
+
+      let orderPayload: unknown
+      try {
+        orderPayload = await this.fetchJson(
+          link.secrets.orderUrl,
+          store.config.requestTimeoutSeconds,
+          {
+            method: 'POST',
+            body: buildOrderRequestBody(link.channel, offer),
+            apiKey,
+            channel: link.channel
+          }
+        )
+      } catch (error) {
+        if (isDeterministicOrderRejection(error)) {
+          await clearRejectedAttempt()
+          throw error
+        }
+        /*
+         * 网络断开、超时、5xx 或成功响应无法解析时，服务端可能已经扣费。
+         * 保留 preflight pending，后续只尝试 GET 当前 ride 的凭证。
+         */
+        const recoverablePending = await markCredentialRecoveryReady()
+        await appendKskHunterSpend({
+          id: recoverablePending.id,
+          channel: link.channel,
+          linkId: link.id,
+          linkName: link.name,
+          amountUnit: budget.costUnit ?? 0,
+          amountCny: budget.costCny,
+          at: orderedAt
+        })
+        throw new Error('quick-board 结果不确定，已停止重复下单并改为只尝试领取凭证')
+      }
+
+      try {
+        assertChannelOrderAccepted(orderPayload)
+      } catch (error) {
+        // 收到明确业务拒绝，服务端没有成交，可安全解除 pending。
+        await clearRejectedAttempt()
+        throw error
+      }
+
+      let receipt: ReturnType<typeof parseKiroConvoyOrderReceipt>
+      try {
+        receipt = parseKiroConvoyOrderReceipt(orderPayload)
+      } catch {
+        // 2xx 却缺订单关联字段时仍可能已扣费，只能保留 uncertain 并转凭证恢复。
+        const recoverablePending = await markCredentialRecoveryReady()
+        await appendKskHunterSpend({
+          id: recoverablePending.id,
+          channel: link.channel,
+          linkId: link.id,
+          linkName: link.name,
+          amountUnit: budget.costUnit ?? 0,
+          amountCny: budget.costCny,
+          at: orderedAt
+        })
+        throw new Error('quick-board 已响应但缺少订单关联字段，已停止重复下单')
+      }
+      const actualCostUnit = receipt.fare ?? budget.costUnit
+      const actualCostCny =
+        actualCostUnit === undefined
+          ? budget.costCny
+          : hunterUnitToCny(actualCostUnit, store.config.billing[link.channel]?.cnyPerUnit ?? 1)
+      const pending: KskHunterPendingPurchase = {
+        ...pendingBase,
+        goodsId: receipt.convoyId,
+        price: receipt.fare ?? offer.price,
+        costUnit: actualCostUnit,
+        costCny: actualCostCny,
+        boardRecordId: receipt.boardRecordId,
+        orderRecorded: true
+      }
+      // 将 preflight 状态升级成“已明确成交、待领凭证”。
+      await setKskHunterPendingPurchase(link.id, pending)
+      link.pendingPurchase = pending
+
+      this.status = { ...this.status, totalOrdered: this.status.totalOrdered + 1 }
+      this.balanceCache.invalidate(link.channel)
+      await appendKskHunterSpend({
+        id: pending.id,
+        channel: link.channel,
+        linkId: link.id,
+        linkName: link.name,
+        amountUnit: actualCostUnit ?? 0,
+        amountCny: actualCostCny,
+        at: orderedAt
+      })
+      this.recordReportEvent(HUNTER_REPORT_EVENT.ORDERED, link, {
+        eventId: pending.id,
+        region: offer.region || undefined,
+        costUnit: actualCostUnit,
+        costCny: actualCostCny,
+        unitLabel: store.config.billing[link.channel]?.unitLabel
+      })
+      this.recordedOrderIds.add(pending.id)
+      await this.resumeConvoyPurchase(link, store, pending)
+      return
+    }
+
+    const idempotencyKey = this.resolveIdempotencyKey(link.id, offer.goodsId)
+    const orderPayload = await this.fetchJson(
+      link.secrets.orderUrl,
+      store.config.requestTimeoutSeconds,
+      {
+        method: 'POST',
+        body: buildOrderRequestBody(link.channel, offer, { idempotencyKey }),
+        apiKey,
+        channel: link.channel
+      }
+    )
+    this.clearIdempotencyKey(link.id)
+    const credential = parseOrderedCredential(orderPayload, offer.region)
+    await this.persistOrderedCredential(
+      link,
+      store,
+      budget,
+      credential,
+      randomUUID(),
+      Date.now(),
+      false
+    )
   }
 
   /**
@@ -917,10 +1331,18 @@ export class KskHunterManager {
   private async fetchJson(
     url: string,
     timeoutSeconds: number,
-    init: { method: string; body?: unknown; apiKey?: string } = { method: 'GET' }
+    init: { method: string; body?: unknown; apiKey?: string; channel?: KskHunterChannel } = {
+      method: 'GET'
+    }
   ): Promise<unknown> {
     const parsed = new URL(url)
-    if (parsed.protocol !== 'https:') throw new Error('商品站点接口必须使用 HTTPS')
+    if (!isAllowedHunterEndpointUrl(parsed.toString(), init.channel)) {
+      throw new Error(
+        init.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+          ? 'Kiro 拼车接口只允许访问 kiro.zhiqwc.top'
+          : '商品站点接口必须使用 HTTPS'
+      )
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), Math.max(3, timeoutSeconds) * 1000)
     try {
@@ -935,8 +1357,41 @@ export class KskHunterManager {
         signal: controller.signal
       })
       const text = await response.text()
-      if (!response.ok) throw new Error(`请求失败: HTTP ${response.status}`)
-      return text ? (JSON.parse(text) as unknown) : {}
+      let payload: unknown = {}
+      if (text) {
+        try {
+          payload = JSON.parse(text) as unknown
+        } catch (error) {
+          // 错误响应常是纯文本；此时 HTTP 状态比 JSON 解析异常更有诊断价值。
+          if (response.ok) throw error
+        }
+      }
+      if (!response.ok) {
+        const errorPayload =
+          payload && typeof payload === 'object' && !Array.isArray(payload)
+            ? (payload as Record<string, unknown>).error
+            : undefined
+        const code =
+          payload && typeof payload === 'object' && !Array.isArray(payload)
+            ? String(
+                (payload as Record<string, unknown>).code ??
+                  (errorPayload && typeof errorPayload === 'object' && !Array.isArray(errorPayload)
+                    ? (errorPayload as Record<string, unknown>).type
+                    : '')
+              )
+            : ''
+        if (response.status === 403 && code === 'pledge_required') {
+          throw new HunterHttpError(
+            response.status,
+            '凭证领取需要先在站点确认质保声明（pledge_required）'
+          )
+        }
+        throw new HunterHttpError(
+          response.status,
+          code ? `请求失败: HTTP ${response.status} (${code})` : undefined
+        )
+      }
+      return payload
     } finally {
       clearTimeout(timer)
     }

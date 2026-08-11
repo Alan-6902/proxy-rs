@@ -52,6 +52,8 @@ export type HunterReportEventType = (typeof HUNTER_REPORT_EVENT)[keyof typeof HU
 
 /** 事件流里的一条记录。字段随类型可选，聚合时按类型取用。 */
 export interface HunterReportEvent {
+  /** Stable id for de-duplicating crash-recovery events. */
+  eventId?: string
   at: number
   type: HunterReportEventType
   channel: KskHunterChannel
@@ -210,7 +212,14 @@ export function summarizeHunterReport(input: {
   const days = Math.max(1, Math.floor(input.days ?? HUNTER_REPORT_WINDOW_DAYS))
   const dateRange = hunterReportDateRange(days, now)
   const fromAt = dateRange[0].at
-  const windowed = input.events.filter((event) => event.at >= fromAt)
+  const seenEventIds = new Set<string>()
+  const events = input.events.filter((event) => {
+    if (!event.eventId) return true
+    if (seenEventIds.has(event.eventId)) return false
+    seenEventIds.add(event.eventId)
+    return true
+  })
+  const windowed = events.filter((event) => event.at >= fromAt)
 
   const dayByDate = new Map<string, HunterReportDay>()
   for (const entry of dateRange) {
@@ -336,9 +345,8 @@ export function summarizeHunterReport(input: {
     byChannel,
     byLink,
     restockByHour,
-    earliestEventAt:
-      input.events.length > 0 ? Math.min(...input.events.map((event) => event.at)) : undefined,
-    totalEventCount: input.events.length
+    earliestEventAt: events.length > 0 ? Math.min(...events.map((event) => event.at)) : undefined,
+    totalEventCount: events.length
   }
 }
 

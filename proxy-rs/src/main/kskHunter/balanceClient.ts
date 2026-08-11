@@ -11,6 +11,8 @@
  */
 
 import {
+  isAllowedHunterEndpointUrl,
+  KSK_HUNTER_CHANNEL,
   KSK_HUNTER_CHANNEL_AUTH_HEADER,
   parseHunterBalance,
   type KskHunterChannel
@@ -40,6 +42,7 @@ function redactBalanceError(value: string): string {
 }
 
 export async function fetchChannelBalance(input: {
+  channel: KskHunterChannel
   url: string
   timeoutSeconds: number
   fetchImpl: KskHunterFetch
@@ -47,7 +50,13 @@ export async function fetchChannelBalance(input: {
   apiKey?: string
 }): Promise<number> {
   const parsed = new URL(input.url)
-  if (parsed.protocol !== 'https:') throw new Error('余额查询地址必须使用 HTTPS')
+  if (!isAllowedHunterEndpointUrl(parsed.toString(), input.channel)) {
+    throw new Error(
+      input.channel === KSK_HUNTER_CHANNEL.KIRO_CONVOY
+        ? 'Kiro 拼车余额查询地址只允许使用 kiro.zhiqwc.top'
+        : '余额查询地址必须使用 HTTPS'
+    )
+  }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), Math.max(3, input.timeoutSeconds) * 1000)
@@ -112,6 +121,7 @@ export class HunterBalanceCache {
 
     try {
       const amountUnit = await fetchChannelBalance({
+        channel: input.channel,
         url: input.url,
         timeoutSeconds: input.timeoutSeconds,
         fetchImpl: input.fetchImpl,

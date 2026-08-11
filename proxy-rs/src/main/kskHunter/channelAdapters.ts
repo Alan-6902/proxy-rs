@@ -12,6 +12,8 @@ import { isValidKiroApiKey, isValidKiroRegion } from '../../shared/kiroApiKey'
 import {
   KSK_HUNTER_CHANNEL,
   type HunterKskCredential,
+  type HunterOAuthCredential,
+  type HunterOrderedCredential,
   type KskHunterChannel,
   type KskHunterOffer
 } from '../../shared/kskHunter'
@@ -111,6 +113,52 @@ function assertBusinessOk(payload: unknown): void {
     throw new Error(
       readString(payload.msg || payload.message) || `接口返回 code=${readString(code)}`
     )
+  }
+}
+
+export function assertChannelOrderAccepted(payload: unknown): void {
+  assertBusinessOk(payload)
+  if (!isRecord(payload)) return
+  const nestedError = isRecord(payload.error) ? payload.error : undefined
+  const nestedType = nestedError ? readString(nestedError.type) : ''
+  if (nestedType) {
+    const message = readString(nestedError?.message) || '站点拒绝了下单请求'
+    throw new Error(`${nestedType}: ${message}`)
+  }
+  if (payload.success === false || payload.ok === false) {
+    throw new Error(readString(payload.msg || payload.message) || '站点拒绝了下单请求')
+  }
+}
+
+export interface KiroConvoyOrderReceipt {
+  convoyId: string
+  boardRecordId?: string
+  fare?: number
+}
+
+export function parseKiroConvoyOrderReceipt(payload: unknown): KiroConvoyOrderReceipt {
+  assertChannelOrderAccepted(payload)
+  if (!isRecord(payload)) throw new Error('quick-board 成功响应缺少订单对象')
+  const convoy = isRecord(payload.convoy) ? payload.convoy : undefined
+  const passenger = isRecord(payload.passenger) ? payload.passenger : undefined
+  const convoyId = readString(convoy?.id) || readString(passenger?.convoyId)
+  if (!convoyId) throw new Error('quick-board 成功但响应缺少 convoy.id')
+  return {
+    convoyId,
+    boardRecordId: readString(payload.boardRecordId) || undefined,
+    fare: readNumber(payload.fare) ?? readNumber(convoy?.fare)
+  }
+}
+
+export function assertKiroConvoyCredentialMatches(payload: unknown, convoyId: string): void {
+  if (!isRecord(payload) || !isRecord(payload.ride)) {
+    throw new Error('拼车凭证响应缺少 ride 对象，无法关联已付订单')
+  }
+  const passenger = isRecord(payload.ride.passenger) ? payload.ride.passenger : undefined
+  const convoy = isRecord(payload.ride.convoy) ? payload.ride.convoy : undefined
+  const receivedConvoyId = readString(passenger?.convoyId) || readString(convoy?.id)
+  if (!receivedConvoyId || receivedConvoyId !== convoyId) {
+    throw new Error('拼车凭证所属 convoy 与待领取订单不一致')
   }
 }
 
@@ -233,6 +281,48 @@ function parseKiroAppOffers(payload: unknown): KskHunterOffer[] {
 }
 
 /** 解析某站点的商品列表响应。 */
+const KIRO_CONVOY_RUNNING_STATUS = 'running'
+
+function parseKiroConvoyOffers(payload: unknown): KskHunterOffer[] {
+  if (!Array.isArray(payload)) {
+    throw new Error('Kiro 拼车库存接口未返回车次数组')
+  }
+  return payload.map((item, index) => {
+    if (!isRecord(item) || !isRecord(item.convoy)) {
+      throw new Error(`Kiro 拼车车次第 ${index + 1} 项缺少 convoy 对象`)
+    }
+    const convoy = item.convoy
+    const goodsId = readString(convoy.id)
+    const capacityMax = readNumber(convoy.capacityMax)
+    const passengerCount = readNumber(item.passengerCount)
+    const status = readString(convoy.status)
+    const price = readNumber(convoy.fare)
+    if (
+      !goodsId ||
+      capacityMax === undefined ||
+      capacityMax < 0 ||
+      passengerCount === undefined ||
+      passengerCount < 0 ||
+      !status ||
+      price === undefined ||
+      price < 0
+    ) {
+      throw new Error(
+        `Kiro 拼车车次第 ${index + 1} 项缺少有效的 id、capacityMax、passengerCount、status 或 fare`
+      )
+    }
+    const stock =
+      status === KIRO_CONVOY_RUNNING_STATUS ? Math.max(0, capacityMax - passengerCount) : 0
+    return {
+      goodsId,
+      title: readString(convoy.title) || `单趟车 · ${goodsId}`,
+      region: resolveOfferRegion(convoy.title, convoy.remark),
+      stock,
+      price
+    }
+  })
+}
+
 export function parseChannelOffers(channel: KskHunterChannel, payload: unknown): KskHunterOffer[] {
   assertBusinessOk(payload)
   switch (channel) {
@@ -244,6 +334,8 @@ export function parseChannelOffers(channel: KskHunterChannel, payload: unknown):
       return parseKiroDropOffers(payload)
     case KSK_HUNTER_CHANNEL.KIRO_APP:
       return parseKiroAppOffers(payload)
+    case KSK_HUNTER_CHANNEL.KIRO_CONVOY:
+      return parseKiroConvoyOffers(payload)
   }
 }
 
@@ -284,7 +376,39 @@ export function buildOrderRequestBody(
      */
     case KSK_HUNTER_CHANNEL.KIRO_APP:
       return { zone: offer.goodsId, count: 1 }
+    /*
+     * quick-board 不接受车次 id，而是按筛选条件选择一趟车。
+     * departed=yes 保证只购买已经发车、能立刻领取凭证的车次；maxFare 防止列表与
+     * 下单之间价格上涨时买到超预算订单。
+     */
+    case KSK_HUNTER_CHANNEL.KIRO_CONVOY:
+      return {
+        departed: 'yes',
+        warranty: 'any',
+        ...(offer.price === undefined ? {} : { maxFare: offer.price })
+      }
   }
+}
+
+const KIRO_CONVOY_ORDER_PATH = '/convoys/quick-board'
+const KIRO_CONVOY_CREDENTIAL_PATH = '/me/ride/detail'
+const KIRO_CONVOY_CREDENTIAL_FALLBACK_PATH = '/me/ride/credential'
+
+export function buildConvoyCredentialUrl(
+  orderUrl: string,
+  endpoint: 'detail' | 'credential' = 'detail'
+): string {
+  const parsed = new URL(orderUrl)
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '')
+  if (!parsed.pathname.endsWith(KIRO_CONVOY_ORDER_PATH)) {
+    throw new Error(`Kiro 拼车下单地址必须以 ${KIRO_CONVOY_ORDER_PATH} 结尾`)
+  }
+  const credentialPath =
+    endpoint === 'credential' ? KIRO_CONVOY_CREDENTIAL_FALLBACK_PATH : KIRO_CONVOY_CREDENTIAL_PATH
+  parsed.pathname = parsed.pathname.slice(0, -KIRO_CONVOY_ORDER_PATH.length) + credentialPath
+  parsed.search = ''
+  parsed.hash = ''
+  return parsed.toString()
 }
 
 /**
@@ -320,6 +444,9 @@ function findCredentialInPayload(payload: unknown, depth = 0): HunterKskCredenti
     const region = resolveOfferRegion(
       payload.region,
       payload.aws_region,
+      payload.authRegion,
+      payload.apiRegion,
+      payload.endpoint,
       payload.zone,
       payload.tag,
       payload.title,
@@ -335,7 +462,15 @@ function findCredentialInPayload(payload: unknown, depth = 0): HunterKskCredenti
     if (found.region) return found
     return {
       key: found.key,
-      region: resolveOfferRegion(payload.region, payload.aws_region, payload.zone, payload.tag)
+      region: resolveOfferRegion(
+        payload.region,
+        payload.aws_region,
+        payload.authRegion,
+        payload.apiRegion,
+        payload.endpoint,
+        payload.zone,
+        payload.tag
+      )
     }
   }
   return undefined
@@ -345,13 +480,108 @@ function findCredentialInPayload(payload: unknown, depth = 0): HunterKskCredenti
  * 解析下单响应，返回抢到的 ksk。
  * fallbackRegion 用于站点不回区域的情况（用下单时那条商品的区域）。
  */
+function findOAuthCredentialRecord(
+  payload: unknown,
+  depth = 0
+): Record<string, unknown> | undefined {
+  if (depth > 6) return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findOAuthCredentialRecord(item, depth + 1)
+      if (found) return found
+    }
+    return undefined
+  }
+  if (!isRecord(payload)) return undefined
+  if (readString(payload.type).toLowerCase() === 'oauth') return payload
+  for (const value of Object.values(payload)) {
+    const found = findOAuthCredentialRecord(value, depth + 1)
+    if (found) return found
+  }
+  return undefined
+}
+
+function isTrustedKiroOAuthEndpoint(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    const hostname = parsed.hostname.toLowerCase()
+    return (
+      parsed.protocol === 'https:' &&
+      (hostname === 'app.kiro.dev' ||
+        hostname.endsWith('.kiro.dev') ||
+        /^q\.[a-z0-9-]+\.amazonaws\.com$/.test(hostname))
+    )
+  } catch {
+    return false
+  }
+}
+
+function parseOAuthExpiresAt(payload: Record<string, unknown>): number | undefined {
+  const numeric = readNumber(payload.expiresAt)
+  if (numeric !== undefined && numeric > 0) {
+    return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric
+  }
+  const text = readString(payload.expiresAt)
+  if (text) {
+    const parsed = Date.parse(text)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  const expiresIn = readNumber(payload.expiresIn)
+  return expiresIn !== undefined && expiresIn > 0 ? Date.now() + expiresIn * 1000 : undefined
+}
+
+function parseOAuthCredential(
+  payload: Record<string, unknown>,
+  fallbackRegion: string
+): HunterOAuthCredential {
+  const accessToken = readString(payload.accessToken)
+  const refreshToken = readString(payload.refreshToken)
+  const clientId = readString(payload.clientId)
+  const clientSecret = readString(payload.clientSecret)
+  const authRegion = readString(payload.authRegion)
+  const apiRegion = readString(payload.apiRegion)
+  const endpoint = readString(payload.endpoint)
+  const provider = readString(payload.provider || payload.idp).toLowerCase()
+  const authMethod = readString(payload.authMethod).toLowerCase()
+  const region = resolveOfferRegion(authRegion, apiRegion, payload.region, endpoint, fallbackRegion)
+  if (!accessToken || !refreshToken) {
+    throw new Error('OAuth 凭证缺少 accessToken 或 refreshToken')
+  }
+  if (
+    (provider && provider !== 'builderid') ||
+    (authMethod && authMethod !== 'idc') ||
+    !isTrustedKiroOAuthEndpoint(endpoint)
+  ) {
+    throw new Error('仅支持来自 AWS Kiro BuilderId/IdC 的 OAuth 凭证')
+  }
+  if (!isValidKiroRegion(region)) {
+    throw new Error('OAuth 凭证缺少可识别的 AWS 区域')
+  }
+  return {
+    type: 'oauth',
+    accessToken,
+    refreshToken,
+    profileArn: readString(payload.profileArn) || undefined,
+    clientId: clientId || undefined,
+    clientSecret: clientSecret || undefined,
+    region,
+    authRegion: authRegion || undefined,
+    apiRegion: apiRegion || undefined,
+    endpoint,
+    expiresAt: parseOAuthExpiresAt(payload)
+  }
+}
+
 export function parseOrderedCredential(
   payload: unknown,
   fallbackRegion: string
-): HunterKskCredential {
+): HunterOrderedCredential {
   assertBusinessOk(payload)
+  const oauth = findOAuthCredentialRecord(payload)
+  if (oauth) return parseOAuthCredential(oauth, fallbackRegion)
+
   const found = findCredentialInPayload(payload)
-  if (!found) throw new Error('下单响应里没有找到 ksk_ 开头的密钥')
+  if (!found) throw new Error('下单响应里没有找到 ksk_ 或 OAuth 凭证')
   const region = found.region || fallbackRegion
   if (!isValidKiroRegion(region)) {
     throw new Error(`下单成功但无法确定区域（key ••••${found.key.slice(-4)}）`)

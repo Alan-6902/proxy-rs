@@ -203,6 +203,7 @@ describe('KiroApp 渠道端到端', () => {
     const store = kiroAppStore({ downstreamEnabled: true, downstreamBaseUrl: DOWNSTREAM_BASE })
     const manager = makeManager(store, events, {
       importCredential: async (input) => {
+        if (!('key' in input)) throw new Error('KiroApp 测试预期返回 KSK')
         imported.push({ key: input.key, region: input.region })
         return { added: true }
       }

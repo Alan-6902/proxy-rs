@@ -92,7 +92,9 @@ import {
 import { KskHunterManager } from './kskHunter/hunterRunner'
 import {
   hunterLocalDateKey,
+  isHunterOAuthCredential,
   KSK_HUNTER_CHANNEL_LABEL,
+  type HunterOAuthCredential,
   type KskHunterRuntimeNotification
 } from '../shared/kskHunter'
 import { loadKskHunterStore } from './kskHunter/configStore'
@@ -1562,20 +1564,43 @@ interface KskAutomationAccountData {
 
 type KskAutomationSubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise' | 'Teams'
 
+interface KskAutomationStoredKskCredentials {
+  credentialKind: 'kiro_api_key'
+  kiroApiKey: string
+  region: string
+  provider: 'BuilderId'
+}
+
+interface KskAutomationStoredOAuthCredentials {
+  credentialKind: 'oauth'
+  accessToken: string
+  refreshToken: string
+  clientId?: string
+  clientSecret?: string
+  /** IdC 刷新区域；沿用现有账号字段语义。 */
+  region: string
+  /** Kiro usage API 区域，可能与 IdC 刷新区域不同。 */
+  apiRegion?: string
+  authMethod: 'IdC'
+  provider: 'BuilderId'
+  profileArn?: string
+  expiresAt?: number
+}
+
+type KskAutomationStoredCredentials =
+  | KskAutomationStoredKskCredentials
+  | KskAutomationStoredOAuthCredentials
+
 interface KskAutomationStoredAccount {
   id: string
   email: string
   userId?: string
   nickname?: string
   idp: 'BuilderId'
+  profileArn?: string
   groupId?: string
   tags: string[]
-  credentials: {
-    credentialKind: 'kiro_api_key'
-    kiroApiKey: string
-    region: string
-    provider: 'BuilderId'
-  }
+  credentials: KskAutomationStoredCredentials
   subscription: Record<string, unknown> & { type: KskAutomationSubscriptionType }
   usage: Record<string, unknown> & {
     current: number
@@ -1583,11 +1608,22 @@ interface KskAutomationStoredAccount {
     percentUsed: number
     lastUpdated: number
   }
-  status: 'active'
+  status: 'active' | 'error'
+  lastError?: string
   isActive: boolean
   createdAt: number
   lastUsedAt: number
   lastCheckedAt: number
+}
+
+type KskAutomationStoredKskAccount = KskAutomationStoredAccount & {
+  credentials: KskAutomationStoredKskCredentials
+}
+
+function isKskAutomationStoredAccount(
+  account: KskAutomationStoredAccount
+): account is KskAutomationStoredKskAccount {
+  return account.credentials?.credentialKind === 'kiro_api_key'
 }
 
 function resolveKskSubscriptionType(title: string): KskAutomationSubscriptionType {
@@ -1604,6 +1640,38 @@ function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boole
     (account) =>
       account.credentials?.credentialKind === 'kiro_api_key' &&
       account.credentials.kiroApiKey === key
+  )
+}
+
+function findStoredOAuthAccount(
+  data: KskAutomationAccountData,
+  input: HunterOAuthCredential
+): KskAutomationStoredAccount | undefined {
+  return Object.values(data.accounts ?? {}).find(
+    (account) =>
+      account.credentials?.credentialKind === 'oauth' &&
+      (account.credentials.refreshToken === input.refreshToken ||
+        (Boolean(input.profileArn) && account.credentials.profileArn === input.profileArn))
+  )
+}
+
+function hasSameStoredOAuthCredential(
+  account: KskAutomationStoredAccount | undefined,
+  input: HunterOAuthCredential
+): account is KskAutomationStoredAccount & {
+  credentials: KskAutomationStoredOAuthCredentials
+} {
+  if (account?.credentials.credentialKind !== 'oauth') return false
+  return (
+    account.credentials.accessToken === input.accessToken &&
+    account.credentials.refreshToken === input.refreshToken &&
+    (input.clientId === undefined || account.credentials.clientId === input.clientId) &&
+    (input.clientSecret === undefined || account.credentials.clientSecret === input.clientSecret) &&
+    (input.authRegion === undefined || account.credentials.region === input.authRegion) &&
+    (input.apiRegion === undefined ||
+      (account.credentials.apiRegion || account.credentials.region) === input.apiRegion) &&
+    (input.profileArn === undefined || account.credentials.profileArn === input.profileArn) &&
+    (input.expiresAt === undefined || account.credentials.expiresAt === input.expiresAt)
   )
 }
 
@@ -1755,6 +1823,229 @@ async function importProviderKskCredential(
     return {
       ...input,
       added: true,
+      accountId: account.id,
+      usageCurrent: totalCurrent,
+      usageLimit: totalLimit
+    }
+  })
+}
+
+async function importProviderOAuthCredential(
+  input: HunterOAuthCredential & { groupId?: string }
+): Promise<{
+  added: boolean
+  changed?: boolean
+  accountId?: string
+  usageCurrent?: number
+  usageLimit?: number
+}> {
+  const duplicate = await accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    return findStoredOAuthAccount(data, input)
+  })
+  if (hasSameStoredOAuthCredential(duplicate, input)) {
+    return {
+      added: false,
+      accountId: duplicate.id,
+      usageCurrent: duplicate.usage.current,
+      usageLimit: duplicate.usage.limit
+    }
+  }
+
+  let usage: UnifiedUsageResponse | undefined
+  try {
+    usage = await getUsageAndLimits(
+      input.accessToken,
+      'BuilderId',
+      input.profileArn,
+      input.apiRegion || input.region
+    )
+  } catch {
+    /*
+     * quick-board 已经付费，验活失败不能丢弃凭证；但未确认可用的 token 也不能进入账号池。
+     * 先加密入库为 error，后续用户可在账号页重试检查。
+     */
+  }
+
+  const creditUsage = usage?.usageBreakdownList?.find(
+    (item) => item.resourceType === 'CREDIT' || item.displayName === 'Credits'
+  )
+  const baseLimit = creditUsage?.usageLimitWithPrecision ?? creditUsage?.usageLimit ?? 0
+  const baseCurrent = creditUsage?.currentUsageWithPrecision ?? creditUsage?.currentUsage ?? 0
+  const freeTrialActive = creditUsage?.freeTrialInfo?.freeTrialStatus === 'ACTIVE'
+  const freeTrialLimit = freeTrialActive
+    ? (creditUsage?.freeTrialInfo?.usageLimitWithPrecision ??
+      creditUsage?.freeTrialInfo?.usageLimit ??
+      0)
+    : 0
+  const freeTrialCurrent = freeTrialActive
+    ? (creditUsage?.freeTrialInfo?.currentUsageWithPrecision ??
+      creditUsage?.freeTrialInfo?.currentUsage ??
+      0)
+    : 0
+  const bonuses = (creditUsage?.bonuses ?? [])
+    .filter((bonus) => bonus.status === 'ACTIVE')
+    .map((bonus) => ({
+      code: bonus.bonusCode || '',
+      name: bonus.displayName || '',
+      current: bonus.currentUsageWithPrecision ?? bonus.currentUsage ?? 0,
+      limit: bonus.usageLimitWithPrecision ?? bonus.usageLimit ?? 0,
+      expiresAt: bonus.expiresAt
+    }))
+  const totalLimit =
+    baseLimit + freeTrialLimit + bonuses.reduce((sum, bonus) => sum + bonus.limit, 0)
+  const totalCurrent =
+    baseCurrent + freeTrialCurrent + bonuses.reduce((sum, bonus) => sum + bonus.current, 0)
+  const subscriptionTitle = usage?.subscriptionInfo?.subscriptionTitle || 'Free'
+  const subscriptionExpiresAt = usage?.nextDateReset
+    ? new Date(usage.nextDateReset).getTime()
+    : undefined
+  const now = Date.now()
+  const displayName = usage?.userInfo?.email || `Kiro OAuth · ${input.region}`
+  const refreshCapable = Boolean(input.clientId && input.clientSecret)
+  const lastError = !usage
+    ? 'OAuth 验活未完成，凭证已保留但不会进入可用账号池'
+    : !refreshCapable
+      ? 'OAuth 凭证缺少 clientId/clientSecret，到期后无法自动刷新'
+      : undefined
+  const status: KskAutomationStoredAccount['status'] = usage ? 'active' : 'error'
+  const credentials: KskAutomationStoredOAuthCredentials = {
+    credentialKind: 'oauth',
+    accessToken: input.accessToken,
+    refreshToken: input.refreshToken,
+    clientId: input.clientId,
+    clientSecret: input.clientSecret,
+    region: input.authRegion || input.region,
+    apiRegion: input.apiRegion || input.region,
+    authMethod: 'IdC',
+    provider: 'BuilderId',
+    profileArn: input.profileArn,
+    expiresAt: input.expiresAt
+  }
+  const subscription: KskAutomationStoredAccount['subscription'] = {
+    type: resolveKskSubscriptionType(subscriptionTitle),
+    title: subscriptionTitle,
+    rawType: usage?.subscriptionInfo?.type,
+    expiresAt: subscriptionExpiresAt,
+    daysRemaining: subscriptionExpiresAt
+      ? Math.max(0, Math.ceil((subscriptionExpiresAt - now) / (1000 * 60 * 60 * 24)))
+      : undefined,
+    managementTarget: usage?.subscriptionInfo?.subscriptionManagementTarget,
+    upgradeCapability: usage?.subscriptionInfo?.upgradeCapability,
+    overageCapability: usage?.subscriptionInfo?.overageCapability
+  }
+  const usageSnapshot: KskAutomationStoredAccount['usage'] = {
+    current: totalCurrent,
+    limit: totalLimit,
+    percentUsed: totalLimit > 0 ? (totalCurrent / totalLimit) * 100 : 0,
+    lastUpdated: now,
+    baseLimit,
+    baseCurrent,
+    freeTrialLimit,
+    freeTrialCurrent,
+    freeTrialExpiry: creditUsage?.freeTrialInfo?.freeTrialExpiry,
+    bonuses,
+    nextResetDate: usage?.nextDateReset
+  }
+
+  return accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
+    if (input.groupId && !current.groups?.[input.groupId]) {
+      throw new Error('自动拉取目标分组已不存在，请重新选择分组')
+    }
+
+    const existing = findStoredOAuthAccount(current, input)
+    if (hasSameStoredOAuthCredential(existing, input)) {
+      return {
+        added: false,
+        accountId: existing.id,
+        usageCurrent: existing.usage.current,
+        usageLimit: existing.usage.limit
+      }
+    }
+
+    if (existing?.credentials.credentialKind === 'oauth') {
+      const updatedRefreshCapable = Boolean(
+        (input.clientId ?? existing.credentials.clientId) &&
+        (input.clientSecret ?? existing.credentials.clientSecret)
+      )
+      const updatedLastError = !usage
+        ? 'OAuth 验活未完成，凭证已保留但不会进入可用账号池'
+        : !updatedRefreshCapable
+          ? 'OAuth 凭证缺少 clientId/clientSecret，到期后无法自动刷新'
+          : undefined
+      const updated: KskAutomationStoredAccount = {
+        ...existing,
+        email: usage?.userInfo?.email || existing.email,
+        userId: usage?.userInfo?.userId || existing.userId,
+        nickname: usage?.userInfo?.email || existing.nickname,
+        profileArn: input.profileArn ?? existing.profileArn,
+        groupId: input.groupId ?? existing.groupId,
+        credentials: {
+          ...existing.credentials,
+          ...credentials,
+          clientId: input.clientId ?? existing.credentials.clientId,
+          clientSecret: input.clientSecret ?? existing.credentials.clientSecret,
+          region: input.authRegion ?? existing.credentials.region,
+          apiRegion:
+            input.apiRegion ?? existing.credentials.apiRegion ?? existing.credentials.region,
+          profileArn: input.profileArn ?? existing.credentials.profileArn,
+          expiresAt: input.expiresAt ?? existing.credentials.expiresAt
+        },
+        subscription: usage ? subscription : existing.subscription,
+        usage: usage ? usageSnapshot : existing.usage,
+        status,
+        lastError: updatedLastError,
+        isActive: status === 'active' ? existing.isActive : false,
+        lastCheckedAt: now
+      }
+      const next = {
+        ...current,
+        accounts: { ...(current.accounts ?? {}), [updated.id]: updated }
+      }
+      store!.set('accountData', next)
+      lastSavedData = next
+      await createBackup(next)
+      return {
+        added: false,
+        changed: true,
+        accountId: updated.id,
+        usageCurrent: updated.usage.current,
+        usageLimit: updated.usage.limit
+      }
+    }
+
+    const account: KskAutomationStoredAccount = {
+      id: randomUUID(),
+      email: displayName,
+      userId: usage?.userInfo?.userId || undefined,
+      nickname: displayName,
+      idp: 'BuilderId',
+      profileArn: input.profileArn,
+      groupId: input.groupId,
+      tags: [],
+      credentials,
+      subscription,
+      usage: usageSnapshot,
+      status,
+      lastError,
+      isActive: false,
+      createdAt: now,
+      lastUsedAt: now,
+      lastCheckedAt: now
+    }
+    const next = {
+      ...current,
+      accounts: { ...(current.accounts ?? {}), [account.id]: account }
+    }
+    store!.set('accountData', next)
+    lastSavedData = next
+    await createBackup(next)
+    return {
+      added: true,
+      changed: true,
       accountId: account.id,
       usageCurrent: totalCurrent,
       usageLimit: totalLimit
@@ -1933,9 +2224,9 @@ async function cleanupInvalidStoredKskAccounts(
     await initStore()
     const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
     return Object.values(data.accounts ?? {}).filter(
-      (account) =>
+      (account): account is KskAutomationStoredKskAccount =>
+        isKskAutomationStoredAccount(account) &&
         account.groupId === groupId &&
-        account.credentials?.credentialKind === 'kiro_api_key' &&
         Boolean(account.credentials.kiroApiKey && account.credentials.region)
     )
   })
@@ -2024,8 +2315,9 @@ async function removeStoredKskAccountsByHash(
     const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
     const doomed = new Map<string, { key: string; groupId?: string }>()
     for (const account of Object.values(current.accounts ?? {})) {
-      const key = account.credentials?.kiroApiKey
-      if (account.credentials?.credentialKind !== 'kiro_api_key' || !key) continue
+      if (!isKskAutomationStoredAccount(account)) continue
+      const key = account.credentials.kiroApiKey
+      if (!key) continue
       if (!hashes.has(sha256Hex(key))) continue
       doomed.set(account.id, { key, groupId: account.groupId })
     }
@@ -2163,16 +2455,12 @@ async function readKskAccountsForLocalAdmin(
     await initStore()
     const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
     return Object.values(data.accounts ?? {}).flatMap((account) => {
-      const key = account.credentials?.kiroApiKey?.trim()
-      const region = account.credentials?.region?.trim()
-      if (
-        account.groupId !== groupId ||
-        account.credentials?.credentialKind !== 'kiro_api_key' ||
-        !key ||
-        !region
-      ) {
+      if (account.groupId !== groupId || !isKskAutomationStoredAccount(account)) {
         return []
       }
+      const key = account.credentials.kiroApiKey.trim()
+      const region = account.credentials.region.trim()
+      if (!key || !region) return []
       // email 带过去给 Admin 当凭据标题；拿不到 userInfo.email 的号那里是占位串，
       // 由 normalizeLocalAdminEmail 在推送前丢掉
       return [{ kiroApiKey: key, region, email: account.email }]
@@ -2260,6 +2548,9 @@ const kskHunterManager = new KskHunterManager({
   // 下游是 loopback，必须绕开系统代理；与本机 Admin 复用同一个直连 agent
   downstreamFetchImpl: localAdminFetchImpl,
   importCredential: async (input) => {
+    if (isHunterOAuthCredential(input)) {
+      return importProviderOAuthCredential(input)
+    }
     const result = await importProviderKskCredential(input)
     // 验活判死的号必须抛错：抢号器据此把记录标 dead_key 并拒绝推给下游
     if (result.rejected) throw new Error('发消息验活未通过，该号已不可用')
@@ -2280,7 +2571,7 @@ const kskHunterManager = new KskHunterManager({
   notifyOrdered: ({ linkName, maskedKey, region }) => {
     localNotifications.notify(LocalNoticeKind.KskHunterOrdered, {
       hunterKey: `${linkName}:${maskedKey}`,
-      bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并推送下游。`
+      bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并入库。`
     })
   },
   // 台账报表要显示分组名；台账只存 id，分组可改名，所以每次现查
@@ -4083,6 +4374,7 @@ app.whenReady().then(async () => {
         clientId,
         clientSecret,
         region,
+        apiRegion,
         authMethod,
         provider,
         profileArn,
@@ -4130,7 +4422,7 @@ app.whenReady().then(async () => {
             upstreamCredential,
             idp,
             account.profileArn || profileArn,
-            region,
+            apiRegion || region,
             account?.email,
             boundProxyUrl
           )
@@ -4188,7 +4480,7 @@ app.whenReady().then(async () => {
                     refreshResult.accessToken,
                     idp,
                     undefined,
-                    region,
+                    apiRegion || region,
                     account?.email,
                     boundProxyUrl
                   )

@@ -353,8 +353,13 @@ describe('站点响应解析', () => {
       quantity: 1
     })
     // KiroApp 的 goodsId 是区域短码（eu / us），不是商品 id
-    expect(buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_APP, { ...offer, goodsId: 'eu' })).toEqual(
-      { zone: 'eu', count: 1 }
+    const idempotencyKey = '0123456789abcdef0123456789abcdef'
+    const kiroAppOffer = { ...offer, goodsId: 'eu' }
+    expect(
+      buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_APP, kiroAppOffer, { idempotencyKey })
+    ).toEqual({ count: 1, region: 'eu', client_order_id: idempotencyKey })
+    expect(() => buildOrderRequestBody(KSK_HUNTER_CHANNEL.KIRO_APP, kiroAppOffer)).toThrow(
+      'KiroApp 下单缺少幂等键'
     )
   })
 
@@ -1449,6 +1454,69 @@ describe('抢号调度', () => {
       region: 'eu-central-1',
       linkId: 'link-1'
     })
+  })
+
+  it('2xx 下单响应不可解析时复用 client_order_id，成功后下一单换新 id', async () => {
+    const clientOrderIds: string[] = []
+    const importedKeys: string[] = []
+    let orderCount = 0
+    const store = hunterStore([
+      hunterLink({
+        name: 'KiroApp · eu',
+        channel: KSK_HUNTER_CHANNEL.KIRO_APP,
+        regions: ['eu-central-1']
+      })
+    ])
+    store.secrets.apiKeys[KSK_HUNTER_CHANNEL.KIRO_APP] = 'km_test'
+    const manager = new KskHunterManager(
+      makeDeps(store, {
+        fetchImpl: async (_url, init) => {
+          if (init.method !== 'POST') {
+            return jsonResponse({ stock_eu: 1, price_eu: 30, stock_us: 0, price_us: 50 })
+          }
+
+          const body = JSON.parse(String(init.body)) as { client_order_id?: unknown }
+          if (typeof body.client_order_id !== 'string') {
+            throw new Error('测试下单请求缺少 client_order_id')
+          }
+          clientOrderIds.push(body.client_order_id)
+          orderCount += 1
+          if (orderCount === 1) return jsonResponse({ code: 0, data: { purchased: 1 } })
+
+          return jsonResponse({
+            code: 0,
+            data: {
+              key: orderCount === 2 ? KSK_ONE : KSK_TWO,
+              region: 'eu-central-1'
+            }
+          })
+        },
+        importCredential: async (input) => {
+          importedKeys.push(input.key)
+          return { added: true }
+        }
+      })
+    )
+
+    try {
+      await manager.runNow()
+      expect(clientOrderIds).toHaveLength(1)
+      expect(clientOrderIds[0]).toMatch(/^[0-9a-f]{32}$/)
+      expect(importedKeys).toEqual([])
+
+      await manager.runNow()
+      expect(clientOrderIds).toHaveLength(2)
+      expect(clientOrderIds[1]).toBe(clientOrderIds[0])
+      expect(importedKeys).toEqual([KSK_ONE])
+
+      await manager.runNow()
+      expect(clientOrderIds).toHaveLength(3)
+      expect(clientOrderIds[2]).toMatch(/^[0-9a-f]{32}$/)
+      expect(clientOrderIds[2]).not.toBe(clientOrderIds[1])
+      expect(importedKeys).toEqual([KSK_ONE, KSK_TWO])
+    } finally {
+      manager.stop()
+    }
   })
 
   it('验活失败的号标为 dead_key，不推给下游', async () => {

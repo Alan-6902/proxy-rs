@@ -6,11 +6,11 @@
  * - 下游起 downstream-example/server.mjs
  * 中间是真实的 KskHunterManager。
  *
- * 目的：证明「查 /api/status → 认出有货 → 问下游要不要 → 下单 → 拿到 ksk → 验活 → 推送」
+ * 目的：证明「查 /api/me/stock → 认出有货 → 问下游要不要 → 下单 → 拿到 ksk → 验活 → 推送」
  * 整条链路在真实 HTTP 上确实通，而不只是单侧 mock 自说自话。
  *
- * 上游为什么是 mock 而不是真站点：不真花钱是明确要求；且真站点的下单契约拿不到
- * （/api-docs 需登录），mock 按 buildOrderRequestBody 的假设实现，拿到文档后一起改。
+ * 上游为什么是 mock 而不是真站点：不真花钱是明确要求。mock 按登录后的官方
+ * /api-docs 实现 X-API-Key、client_order_id 与幂等重放契约。
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -65,10 +65,10 @@ const DOWNSTREAM_PORT = 12899
 const UPSTREAM_BASE = `https://127.0.0.1:${UPSTREAM_PORT}`
 const DOWNSTREAM_BASE = `http://127.0.0.1:${DOWNSTREAM_PORT}`
 const DOWNSTREAM_KEY = 'kiroapp-e2e-key'
-const MOCK_TOKEN = 'mock-token'
+const MOCK_TOKEN = 'km_mock_token'
 
-const LIST_URL = `${UPSTREAM_BASE}/api/status`
-const ORDER_URL = `${UPSTREAM_BASE}/api/order?token=${MOCK_TOKEN}`
+const LIST_URL = `${UPSTREAM_BASE}/api/me/stock`
+const ORDER_URL = `${UPSTREAM_BASE}/api/me/purchase`
 
 let upstream: Server
 let downstream: Server
@@ -102,8 +102,20 @@ const downstreamFetch: KskHunterFetch = async (url, init) =>
 
 /** 断言用的直接读取。KskHunterFetch 的 init 必填 headers/signal，测试里不必凑齐。 */
 async function readUpstreamStatus(): Promise<Record<string, unknown>> {
-  const response = await undiciFetch(LIST_URL, { dispatcher: upstreamAgent })
+  const response = await undiciFetch(LIST_URL, {
+    headers: { 'x-api-key': MOCK_TOKEN },
+    dispatcher: upstreamAgent
+  })
   return (await response.json()) as Record<string, unknown>
+}
+
+async function purchaseUpstream(body: Record<string, unknown>): Promise<Response> {
+  return (await undiciFetch(ORDER_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': MOCK_TOKEN },
+    body: JSON.stringify(body),
+    dispatcher: upstreamAgent
+  })) as unknown as Response
 }
 
 beforeAll(async () => {
@@ -141,7 +153,11 @@ function kiroAppStore(config: Partial<KskHunterConfig> = {}): PersistedKskHunter
   return {
     version: KSK_HUNTER_STORE_VERSION,
     config: { ...DEFAULT_KSK_HUNTER_CONFIG, ...config },
-    secrets: { downstreamApiKey: DOWNSTREAM_KEY, balanceUrls: {}, apiKeys: {} },
+    secrets: {
+      downstreamApiKey: DOWNSTREAM_KEY,
+      balanceUrls: {},
+      apiKeys: { [KSK_HUNTER_CHANNEL.KIRO_APP]: MOCK_TOKEN }
+    },
     links: [
       {
         id: 'link-kiroapp',
@@ -184,7 +200,7 @@ function makeManager(
 }
 
 describe('KiroApp 渠道端到端', () => {
-  it('真实 HTTPS 拉 /api/status，认出 eu 有货与价格', async () => {
+  it('真实 HTTPS 拉 /api/me/stock，认出 eu 有货与价格', async () => {
     resetUpstream({ stock_eu: 2, stock_us: 0, price_eu: 30, price_us: 50 })
     // 形状与真站点一致，字段名不能走偏
     expect(await readUpstreamStatus()).toMatchObject({
@@ -193,6 +209,24 @@ describe('KiroApp 渠道端到端', () => {
       price_eu: 30,
       price_us: 50
     })
+  })
+
+  it('同一 client_order_id 重放不重复扣库存，参数冲突返回 409', async () => {
+    resetUpstream({ stock_eu: 2 })
+    const clientOrderId = '0123456789abcdef0123456789abcdef'
+    const body = { count: 1, region: 'eu', client_order_id: clientOrderId }
+
+    const first = await purchaseUpstream(body)
+    expect(first.status).toBe(200)
+    expect(await first.json()).toMatchObject({ purchased: 1, replayed: false })
+
+    const replay = await purchaseUpstream(body)
+    expect(replay.status).toBe(200)
+    expect(await replay.json()).toMatchObject({ purchased: 1, replayed: true })
+    expect(await readUpstreamStatus()).toMatchObject({ stock_eu: 1 })
+
+    const conflict = await purchaseUpstream({ ...body, region: 'us' })
+    expect(conflict.status).toBe(409)
   })
 
   it('全链路：查状态 → 问下游 → 下单 → 验活 → 推送 → 下游落库', async () => {
@@ -219,7 +253,7 @@ describe('KiroApp 渠道端到端', () => {
     expect(isValidKiroApiKey(imported[0].key)).toBe(true)
     expect(imported[0].region).toBe('eu-central-1')
 
-    // 花费按 price_eu 记账（渠道系数 1，原币即人民币）
+    // 花费按 price_eu 的积分记账；cnyPerUnit 保守为 1，所以金额计算仍是 30
     expect(deliveryStore.spend[0]).toMatchObject({
       channel: KSK_HUNTER_CHANNEL.KIRO_APP,
       amountUnit: 30,
@@ -249,7 +283,7 @@ describe('KiroApp 渠道端到端', () => {
       HUNTER_REPORT_EVENT.ORDERED,
       HUNTER_REPORT_EVENT.DELIVERED
     ])
-    expect(events[1]).toMatchObject({ costUnit: 30, costCny: 30, unitLabel: 'CNY' })
+    expect(events[1]).toMatchObject({ costUnit: 30, costCny: 30, unitLabel: '积分' })
   })
 
   it('无货时不下单，库存不动', async () => {
@@ -318,12 +352,12 @@ describe('KiroApp 渠道端到端', () => {
     expect(await readUpstreamStatus()).toMatchObject({ stock_eu: 2 })
   })
 
-  it('下单地址 token 不对时报可读错误，且不留下交付记录', async () => {
+  it('API Key 不对时报可读错误，且不留下交付记录', async () => {
     resetUpstream({ stock_eu: 1 })
     resetDownstream({ wanted: 1 })
     const events: HunterReportEvent[] = []
     const store = kiroAppStore({ downstreamEnabled: true, downstreamBaseUrl: DOWNSTREAM_BASE })
-    store.links[0].secrets.orderUrl = `${UPSTREAM_BASE}/api/order?token=wrong`
+    store.secrets.apiKeys[KSK_HUNTER_CHANNEL.KIRO_APP] = 'km_wrong'
     const manager = makeManager(store, events)
 
     await manager.runNow()
@@ -362,7 +396,7 @@ describe('KiroApp 渠道端到端', () => {
     resetUpstream({ stock_eu: 1 })
     const events: HunterReportEvent[] = []
     const store = kiroAppStore()
-    store.links[0].secrets.listUrl = `http://127.0.0.1:${UPSTREAM_PORT}/api/status`
+    store.links[0].secrets.listUrl = `http://127.0.0.1:${UPSTREAM_PORT}/api/me/stock`
     const manager = makeManager(store, events)
 
     await manager.runNow()

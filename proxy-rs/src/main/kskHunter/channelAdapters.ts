@@ -271,19 +271,10 @@ export function buildOrderRequestBody(
       return { count: 1, zone: offer.goodsId, client_order_id: options.idempotencyKey }
     case KSK_HUNTER_CHANNEL.KIRO_DROP:
       return { item_id: offer.goodsId, quantity: 1 }
-    /*
-     * KiroApp 的下单请求体是**按假设写的，待核对**。
-     *
-     * /api/status 是实测的（未登录可 GET），但下单接口挖不到：站点的 /api-docs 需要登录
-     * 才渲染，JS chunk 里只有它自己前端用的 cookie + CSRF 接口（/api/auth/*、/api/status），
-     * 没有第三方下单路径。
-     *
-     * 这里按该站点已暴露的字段命名习惯（zone / region 后缀那套）取名。拿到文档后
-     * 大概率只需要改这两个键名；若它要求鉴权走请求头而不是 URL query，
-     * 还得改 hunterRunner 的 fetchJson —— 那超出渠道适配范围，需要另行处理。
-     */
+    // KiroApp 官方契约：region 为区域，client_order_id 为必填幂等键。
     case KSK_HUNTER_CHANNEL.KIRO_APP:
-      return { zone: offer.goodsId, count: 1 }
+      if (!options.idempotencyKey) throw new Error('KiroApp 下单缺少幂等键')
+      return { count: 1, region: offer.goodsId, client_order_id: options.idempotencyKey }
   }
 }
 

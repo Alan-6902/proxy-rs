@@ -738,12 +738,12 @@ export class KskHunterManager {
         apiKey: this.channelApiKey(link.channel, store)
       }
     )
-    // 请求成功即弃用这个幂等键：留着会让下一单被服务端当成本单的重放而不发货
-    this.clearIdempotencyKey(link.id)
     const credential = parseOrderedCredential(orderPayload, offer.region)
     if (!isUsableHunterCredential(credential)) {
       throw new Error('下单返回的 KSK 或区域不合法')
     }
+    // 只有拿到可用凭据才结束本单；2xx 但响应不可解析时重试必须复用同一个幂等键
+    this.clearIdempotencyKey(link.id)
 
     this.status = { ...this.status, totalOrdered: this.status.totalOrdered + 1 }
     // 钱已扣，余额缓存立即失效，下一单按真实余额判断

@@ -15,41 +15,43 @@ node kiroapp-mock/server.mjs
 
 ## 接口
 
-| 方法 | 路径                        | 说明 |
-| ---- | --------------------------- | ---- |
-| GET  | `/api/status`               | 商品状态。**形状照抄真实站点**，字段名一个都没改。不校验 token（真站点未登录也能 GET）。 |
-| POST | `/api/order?token=xxx`      | 下单，扣库存并返回一个格式合法的假 `ksk_`。token 不对回 401，售罄回 409。 |
-| POST | `/admin/stock`              | 联调辅助：改 `stock_eu` / `stock_us` / `price_eu` / `price_us`。 |
-| GET  | `/admin/sold`               | 联调辅助：看已卖出的号（脱敏）。 |
+| 方法 | 路径               | 说明                                                                                 |
+| ---- | ------------------ | ------------------------------------------------------------------------------------ |
+| GET  | `/api/me/stock`    | 商品状态。按官方文档返回库存、价格与余额；必须带 `X-API-Key`。                       |
+| POST | `/api/me/purchase` | 下单并返回格式合法的假 `ksk_`；必须带 `X-API-Key`，支持 `client_order_id` 幂等重放。 |
+| POST | `/admin/stock`     | 联调辅助：改 `stock_eu` / `stock_us` / `price_eu` / `price_us`。                     |
+| GET  | `/admin/sold`      | 联调辅助：看已卖出的号（脱敏）。                                                     |
 
-### /api/status 的真实性
+### `/api/me/stock` 的契约
 
-这个响应是 2026-08 实测抓的（`curl https://kiroapp.io/api/status`，未登录可访问）：
+登录后的官方 `/api-docs` 给出的核心响应为：
 
 ```json
 {
-  "auto_check": true, "auto_generate": false,
-  "captcha_app_id": "199244242", "captcha_enabled": true, "generating": false,
-  "price": 50, "price_eu": 30, "price_us": 50,
-  "started_at": "2026-08-06T10:30:23Z",
-  "stock": 0, "stock_eu": 0, "stock_us": 0, "uptime_seconds": 235806
+  "stock": 0,
+  "price": 30,
+  "price_min": 30,
+  "price_max": 50,
+  "balance": 1000,
+  "stock_eu": 0,
+  "stock_us": 0
 }
 ```
 
 注意它**不是商品列表形状**：没有商品数组，库存与价格按区域拆成平铺字段。
 所以 `parseKiroAppOffers` 走的是「按区域合成 offer」而不是 `readOfferArray`。
+mock 额外保留 `price_eu` / `price_us`，用于覆盖区域价格解析；真实接口只给 `price` 时
+解析器会自动回退到这个统一价格。
 
-### /api/order 是推测的 ⚠️
+### `/api/me/purchase` 的契约
 
-真实站点的下单契约**没拿到**：`/api-docs` 需要登录才渲染，JS chunk 里只有它自己
-前端用的 cookie + CSRF 接口（`/api/auth/*`、`/api/status`），没有第三方下单路径。
+请求体为 `{count, region, client_order_id}`；`client_order_id` 必须是 32 位小写 hex。
+同一幂等键和相同参数重放时返回原订单、`replayed: true`，不重复扣库存；同一幂等键
+配不同参数返回 409。成功响应包含 `purchased`、`requested`、`remaining`、
+`unit_price`、`total_debit`、`order_id` 与 `keys[]`。
 
-这里的请求体 `{zone, count}` 与 `channelAdapters.ts` 里 `buildOrderRequestBody` 的
-`KIRO_APP` 分支一致，两边都是同一个假设。拿到真实文档后：
-
-- 只是键名不同 → 改 `buildOrderRequestBody` 与本 mock 两处即可；
-- 若鉴权要走请求头而不是 URL query → 还得改 `hunterRunner.ts` 的 `fetchJson`，
-  那超出渠道适配范围。
+官方令牌以 `km_` 开头，可用 `Authorization: Bearer` 或 `X-API-Key`；抢号器复用现有
+渠道鉴权能力，统一发送 `X-API-Key`。
 
 ## 自测
 
@@ -57,7 +59,7 @@ node kiroapp-mock/server.mjs
 node kiroapp-mock/selftest.mjs
 ```
 
-32 项，覆盖字段完整性、token 校验、库存扣减、售罄、key 不重复、并发不超卖。
+覆盖字段完整性、API Key 校验、库存扣减、幂等重放、售罄、key 不重复与并发不超卖。
 
 抢号器与它的对接验证在 `test/integration/ksk-hunter-kiroapp.test.ts`——那边用真实的
 `KskHunterManager` 打这个同一个 server，不 mock fetch。
@@ -79,12 +81,13 @@ NODE_EXTRA_CA_CERTS=$(pwd)/kiroapp-mock/.cert/mock-cert.pem npm run dev
 
 UI 里在「抢号监控」页加一条链接：
 
-| 字段         | 填 |
-| ------------ | -- |
-| 渠道         | KiroApp |
-| 商品列表地址 | `https://127.0.0.1:12890/api/status` |
-| 下单地址     | `https://127.0.0.1:12890/api/order?token=mock-token` |
-| 处置方式     | 先「仅提醒」跑通读取，再切「自动下单」 |
+| 字段         | 填                                        |
+| ------------ | ----------------------------------------- |
+| 渠道         | KiroApp                                   |
+| API Key      | `km_mock_token`                           |
+| 商品列表地址 | `https://127.0.0.1:12890/api/me/stock`    |
+| 下单地址     | `https://127.0.0.1:12890/api/me/purchase` |
+| 处置方式     | 先「仅提醒」跑通读取，再切「自动下单」    |
 
 放货（触发一次抢号）：
 

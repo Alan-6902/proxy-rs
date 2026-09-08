@@ -17,6 +17,7 @@ import {
   extractAuthIdFromAccessToken,
   extractWorkosUserId,
   normalizeCursorSignUpType,
+  parseCreditGrantsBalance,
   resolveMembershipFromStripeProfile
 } from '../../src/main/cursorAccounts/cursorApi'
 import {
@@ -99,6 +100,46 @@ describe('Cursor 用量解析', () => {
     const usage = getCursorUsage(account())
     expect(usage.planUsedPercent).toBeNull()
     expect(getCursorOnDemandSummary(usage).isDisabled).toBe(true)
+  })
+
+  it('Ultra 用满套餐后 used 停在 limit，赠送与合计从 breakdown 取；缺 breakdown 时 included 回落到 used', () => {
+    const ultra = getCursorUsage(
+      account({
+        usageRaw: {
+          individualUsage: {
+            plan: {
+              used: 40000,
+              limit: 40000,
+              breakdown: { included: 40000, bonus: 211004, total: 251004 },
+              totalPercentUsed: 71.7
+            }
+          }
+        }
+      })
+    )
+    expect(ultra).toMatchObject({
+      includedSpendCents: 40000,
+      bonusSpendCents: 211004,
+      totalSpendCents: 251004
+    })
+    const plain = getCursorUsage(
+      account({ usageRaw: { individualUsage: { plan: { used: 1234, limit: 2000 } } } })
+    )
+    expect(plain).toMatchObject({
+      includedSpendCents: 1234,
+      bonusSpendCents: null,
+      totalSpendCents: null
+    })
+  })
+})
+
+describe('Cursor credit 余额解析', () => {
+  it('空对象即余额 0；有余额时取美分并四舍五入；负数和垃圾值按 0', () => {
+    expect(parseCreditGrantsBalance({})).toBe(0)
+    expect(parseCreditGrantsBalance({ creditBalanceCents: 1250 })).toBe(1250)
+    expect(parseCreditGrantsBalance({ credit_balance_cents: '99.6' })).toBe(100)
+    expect(parseCreditGrantsBalance({ creditBalanceCents: -5 })).toBe(0)
+    expect(parseCreditGrantsBalance({ creditBalanceCents: 'abc' })).toBe(0)
   })
 })
 

@@ -9,6 +9,9 @@ import { fetch as undiciFetch, type Dispatcher } from 'undici'
 import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
 
 const CURSOR_USAGE_SUMMARY_URL = 'https://cursor.com/api/usage-summary'
+/** 预付 credit 余额；cursor.com 网页接口，与用量接口同样走 session cookie。 */
+const CURSOR_CREDIT_GRANTS_BALANCE_URL =
+  'https://cursor.com/api/dashboard/get-credit-grants-balance'
 const CURSOR_GET_USER_META_URL = 'https://api2.cursor.sh/aiserver.v1.AuthService/GetUserMeta'
 /** Grok Bot 周额度，与 cursor.com 仪表盘同一条接口；Connect 协议端点，要带协议版本头。 */
 const CURSOR_SAND_USAGE_STATUS_URL =
@@ -316,6 +319,38 @@ export async function fetchUsageSummary(accessToken: string): Promise<Record<str
   if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
   if (status !== 200) throw new Error(`${what} 返回异常状态码: ${status}`)
   return parseJsonObject(text, what)
+}
+
+/** 余额接口对没有赠送额度的账号返回 `{}`，这是「余额 0」而不是失败。 */
+export function parseCreditGrantsBalance(record: Record<string, unknown>): number {
+  const value = record.creditBalanceCents ?? record.credit_balance_cents
+  const cents = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(cents) && cents > 0 ? Math.round(cents) : 0
+}
+
+export async function fetchCreditGrantsBalance(accessToken: string): Promise<number> {
+  const cookie = buildSessionCookie(accessToken)
+  if (!cookie) throw new Error('无法从 accessToken 解析 WorkOS 用户 ID')
+  const what = 'Cursor credit 余额'
+  const { status, text } = await cursorFetch(
+    CURSOR_CREDIT_GRANTS_BALANCE_URL,
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Cookie: cookie,
+        Origin: 'https://cursor.com',
+        Referer: 'https://cursor.com/dashboard/billing',
+        'User-Agent': CURSOR_USAGE_USER_AGENT
+      },
+      body: '{}'
+    },
+    what
+  )
+  if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
+  if (status !== 200) throw new Error(`${what} API 返回异常状态码: ${status}`)
+  return parseCreditGrantsBalance(parseJsonObject(text, what))
 }
 
 /**

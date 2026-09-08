@@ -31,6 +31,11 @@ export function formatDate(value?: number | null): string {
   return value ? new Date(value).toLocaleDateString() : '—'
 }
 
+/** 距某个时间点还剩几天（向下取整，已过期为 0）。 */
+export function daysUntil(value: number, now = Date.now()): number {
+  return Math.max(0, Math.floor((value - now) / 86_400_000))
+}
+
 export function formatRelativeTime(value?: number | null, now = Date.now()): string {
   if (!value) return '—'
   const diff = Math.max(0, now - value)

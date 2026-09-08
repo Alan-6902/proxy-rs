@@ -45,6 +45,8 @@ export interface CursorAccount {
   usageRaw?: Record<string, unknown>
   /** `DashboardService/GetSandUsageStatus` 的原始响应：Grok Bot 的周额度。 */
   botUsageRaw?: Record<string, unknown>
+  /** 预付 credit 余额（美分）。undefined 表示还没查过或查失败，0 表示查到了但没有余额。 */
+  creditBalanceCents?: number
 
   status?: string
   statusReason?: string
@@ -237,6 +239,12 @@ export interface CursorUsage {
   allowanceResetAt: number | null
   planUsedCents: number | null
   planLimitCents: number | null
+  /** 套餐内已用（breakdown.included），缺 breakdown 时回落到 used。 */
+  includedSpendCents: number | null
+  /** 官方赠送的超额免费用量（breakdown.bonus），Ultra 用满套餐后会继续涨。 */
+  bonusSpendCents: number | null
+  /** 本周期总消耗（breakdown.total）。 */
+  totalSpendCents: number | null
   totalPercentUsed: number | null
   autoPercentUsed: number | null
   apiPercentUsed: number | null
@@ -263,6 +271,9 @@ const EMPTY_USAGE: CursorUsage = {
   allowanceResetAt: null,
   planUsedCents: null,
   planLimitCents: null,
+  includedSpendCents: null,
+  bonusSpendCents: null,
+  totalSpendCents: null,
   totalPercentUsed: null,
   autoPercentUsed: null,
   apiPercentUsed: null,
@@ -329,6 +340,10 @@ export function getCursorUsage(account: CursorAccount): CursorUsage {
   const apiPct = pickNumber(plan, 'apiPercentUsed', 'api_percent_used')
   const planUsed = pickNumber(plan, 'used', 'totalSpend', 'total_spend')
   const planLimit = pickNumber(plan, 'limit')
+  const breakdown = getPath(plan, 'breakdown')
+  const includedSpend = pickNumber(breakdown, 'included') ?? planUsed
+  const bonusSpend = pickNumber(breakdown, 'bonus')
+  const totalSpend = pickNumber(breakdown, 'total')
   const odUsed = pickNumber(
     onDemand,
     'used',
@@ -388,6 +403,9 @@ export function getCursorUsage(account: CursorAccount): CursorUsage {
     allowanceResetAt: resetAt,
     planUsedCents: planUsed,
     planLimitCents: planLimit,
+    includedSpendCents: includedSpend,
+    bonusSpendCents: bonusSpend,
+    totalSpendCents: totalSpend,
     totalPercentUsed: totalPct,
     autoPercentUsed: autoPct,
     apiPercentUsed: apiPct,

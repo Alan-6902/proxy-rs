@@ -38,6 +38,7 @@ export interface CursorImportPayload {
   authRaw?: Record<string, unknown>
   usageRaw?: Record<string, unknown>
   botUsageRaw?: Record<string, unknown>
+  creditBalanceCents?: number
   status?: string
   statusReason?: string
   createdAt?: number
@@ -94,6 +95,13 @@ function readTimestampMs(value: unknown): number | undefined {
     : Math.floor(numberValue)
 }
 
+/** 金额（美分）：非数字或负数按未知处理。 */
+function readCents(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const numberValue = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numberValue) && numberValue >= 0 ? Math.round(numberValue) : undefined
+}
+
 function pick(record: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
     const value = record[key]
@@ -122,6 +130,7 @@ function normalizeAccount(value: unknown, now: number): CursorAccount | null {
     authRaw: readObject(record.authRaw),
     usageRaw: readObject(record.usageRaw),
     botUsageRaw: readObject(record.botUsageRaw),
+    creditBalanceCents: readCents(record.creditBalanceCents),
     status: readString(record.status),
     statusReason: readString(record.statusReason),
     quotaQueryLastError: readString(record.quotaQueryLastError),
@@ -313,6 +322,7 @@ function upsertInto(
     authRaw: payload.authRaw ?? existing?.authRaw,
     usageRaw: payload.usageRaw ?? existing?.usageRaw,
     botUsageRaw: payload.botUsageRaw ?? existing?.botUsageRaw,
+    creditBalanceCents: payload.creditBalanceCents ?? existing?.creditBalanceCents,
     status: readString(payload.status),
     statusReason: readString(payload.statusReason),
     quotaQueryLastError: undefined,
@@ -401,6 +411,7 @@ function payloadFromImportRecord(record: Record<string, unknown>): CursorImportP
     authRaw,
     usageRaw: readObject(pick(record, 'usageRaw', 'cursor_usage_raw', 'cursorUsageRaw')),
     botUsageRaw: readObject(record.botUsageRaw),
+    creditBalanceCents: readCents(record.creditBalanceCents),
     status: readString(record.status),
     statusReason: readString(pick(record, 'statusReason', 'status_reason')),
     createdAt: readTimestampMs(pick(record, 'createdAt', 'created_at'))

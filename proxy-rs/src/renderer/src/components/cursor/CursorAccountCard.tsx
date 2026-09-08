@@ -26,6 +26,7 @@ import { Badge, Button, Card, CardContent } from '../ui'
 import { cn } from '@/lib/utils'
 import {
   PLAN_TONE_CLASS,
+  daysUntil,
   formatDate,
   formatPercent,
   formatRelativeTime,
@@ -95,10 +96,14 @@ export function CursorAccountCard({
   const hasUsage = hasCursorQuotaData(account)
   const displayEmail = getCursorAccountDisplayEmail(account)
 
+  // 套餐内已用优先取 breakdown.included；Ultra 用满后 used 会停在 limit，赠送部分另起一行
+  const includedCents = usage.includedSpendCents ?? usage.planUsedCents
   const planCost =
-    usage.planUsedCents != null && usage.planLimitCents != null
-      ? `${formatCursorUsageDollars(usage.planUsedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
+    includedCents != null && usage.planLimitCents != null
+      ? `${formatCursorUsageDollars(includedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
       : undefined
+  const hasBonus = usage.bonusSpendCents != null && usage.bonusSpendCents > 0
+  const hasCredit = account.creditBalanceCents != null && account.creditBalanceCents > 0
 
   const onDemandText = onDemand.isDisabled
     ? onDemand.usedCents > 0
@@ -187,6 +192,22 @@ export function CursorAccountCard({
               </span>
               <span className="tabular-nums">{onDemandText}</span>
             </div>
+            {hasBonus && (
+              <div
+                className="flex items-center justify-between text-xs"
+                title="官方与模型厂商合作赠送的、超出所购套餐之外的免费用量，数额不固定"
+              >
+                <span className="text-muted-foreground">赠送用量</span>
+                <span className="tabular-nums">
+                  {formatCursorUsageDollars(usage.bonusSpendCents)}
+                  {usage.totalSpendCents != null && (
+                    <span className="ml-1.5 text-muted-foreground">
+                      合计 {formatCursorUsageDollars(usage.totalSpendCents)}
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-border/60 px-2.5 py-2 text-xs text-muted-foreground">
@@ -199,8 +220,22 @@ export function CursorAccountCard({
           <UsageBar
             label={`${botUsage.planLabel ?? 'Grok Bot'}（周）`}
             percent={botUsage.usedPercent}
-            detail={botUsage.nextResetAt ? `重置 ${formatDate(botUsage.nextResetAt)}` : undefined}
+            detail={
+              botUsage.nextResetAt
+                ? `重置 ${formatDate(botUsage.nextResetAt)}（${daysUntil(botUsage.nextResetAt)} 天）`
+                : undefined
+            }
           />
+        )}
+
+        {/* 预付 credit 余额：多数账号是 0，只在有余额时占一行 */}
+        {hasCredit && (
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Credit 余额</span>
+            <span className="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+              {formatCursorUsageDollars(account.creditBalanceCents)}
+            </span>
+          </div>
         )}
 
         {account.quotaQueryLastError && (
@@ -214,7 +249,9 @@ export function CursorAccountCard({
         )}
 
         <p className="text-2xs text-muted-foreground">
-          {usage.allowanceResetAt ? `重置 ${formatDate(usage.allowanceResetAt)} · ` : ''}
+          {usage.allowanceResetAt
+            ? `重置 ${formatDate(usage.allowanceResetAt)}（${daysUntil(usage.allowanceResetAt)} 天） · `
+            : ''}
           用量更新 {formatRelativeTime(account.usageUpdatedAt)} · 最近使用{' '}
           {formatRelativeTime(account.lastUsed)}
         </p>

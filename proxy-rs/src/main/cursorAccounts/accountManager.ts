@@ -26,6 +26,7 @@ import {
 import {
   accessTokenNeedsRefresh,
   exchangeRefreshToken,
+  fetchCreditGrantsBalance,
   fetchSandUsageStatus,
   fetchStripeProfile,
   fetchUsageSummary,
@@ -141,11 +142,16 @@ async function collectRemoteState(source: CursorAccount): Promise<CursorAccount>
     account.quotaQueryLastErrorAt = now
   }
 
-  // Bot 额度是附加项：拉不到只记日志，保留上一次的值，不影响主用量的成败判定
+  // Bot 额度与 credit 余额是附加项：拉不到只记日志，保留上一次的值，不影响主用量的成败判定
   try {
     account.botUsageRaw = await fetchSandUsageStatus(account.accessToken)
   } catch (error) {
     console.warn(`${tag} Bot 用量拉取失败: ${errorMessage(error)}`)
+  }
+  try {
+    account.creditBalanceCents = await fetchCreditGrantsBalance(account.accessToken)
+  } catch (error) {
+    console.warn(`${tag} credit 余额拉取失败: ${errorMessage(error)}`)
   }
 
   account.lastUsed = now
@@ -167,6 +173,7 @@ function mergeRefreshed(stored: CursorAccount, refreshed: CursorAccount): void {
   stored.authRaw = refreshed.authRaw
   stored.usageRaw = refreshed.usageRaw
   stored.botUsageRaw = refreshed.botUsageRaw
+  stored.creditBalanceCents = refreshed.creditBalanceCents
   stored.usageUpdatedAt = refreshed.usageUpdatedAt
   stored.quotaQueryLastError = refreshed.quotaQueryLastError
   stored.quotaQueryLastErrorAt = refreshed.quotaQueryLastErrorAt

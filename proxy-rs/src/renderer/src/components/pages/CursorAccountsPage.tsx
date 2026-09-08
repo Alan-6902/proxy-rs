@@ -559,9 +559,9 @@ export function CursorAccountsPage(): React.ReactNode {
       <CursorAddAccountDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        onAdded={(_added, message) => {
+        onAdded={(_added, message, warning) => {
           setNotice(message)
-          setError('')
+          setError(warning ?? '')
         }}
       />
       <CursorTagDialog

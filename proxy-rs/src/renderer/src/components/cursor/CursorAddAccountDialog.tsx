@@ -20,13 +20,15 @@ import { errorText } from './_helpers'
 type AddTab = 'oauth' | 'token' | 'json' | 'local'
 
 const TAB_ITEMS: SegmentedTabItem<AddTab>[] = [
+  { value: 'token', label: 'Cookie / Token', icon: KeyRound },
   { value: 'oauth', label: '浏览器登录', icon: Globe },
-  { value: 'token', label: 'Token', icon: KeyRound },
   { value: 'json', label: 'JSON 导入', icon: FileJson },
   { value: 'local', label: '本机导入', icon: Database }
 ]
 
-const TOKEN_PLACEHOLDER = 'eyJhbGciOiJIUzI1NiIs...'
+const TOKEN_PLACEHOLDER = `user_01ABC...::eyJhbGciOiJIUzI1NiIs...
+eyJhbGciOiJIUzI1NiIs...
+每行一条，可一次贴多个；整段 Cookie 头或浏览器导出的 cookie JSON 也行`
 const JSON_PLACEHOLDER = `[
   { "access_token": "eyJhbGciOiJIUzI1NiIs...", "email": "a@example.com" },
   { "access_token": "eyJhbGciOiJIUzI1NiIs...", "email": "b@example.com" }
@@ -38,8 +40,8 @@ const TEXTAREA_CLASS =
 interface CursorAddAccountDialogProps {
   open: boolean
   onClose: () => void
-  /** 入库成功后回调；message 用于页面顶部提示。 */
-  onAdded: (accounts: CursorAccount[], message: string) => void
+  /** 入库成功后回调；message 用于页面顶部提示，warning 是部分失败时的明细。 */
+  onAdded: (accounts: CursorAccount[], message: string, warning?: string) => void
 }
 
 export function CursorAddAccountDialog({
@@ -47,7 +49,7 @@ export function CursorAddAccountDialog({
   onClose,
   onAdded
 }: CursorAddAccountDialogProps): React.ReactNode {
-  const [tab, setTab] = useState<AddTab>('oauth')
+  const [tab, setTab] = useState<AddTab>('token')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [token, setToken] = useState('')
@@ -88,8 +90,8 @@ export function CursorAddAccountDialog({
     }
   }, [open])
 
-  const finish = (accounts: CursorAccount[], message: string): void => {
-    onAdded(accounts, message)
+  const finish = (accounts: CursorAccount[], message: string, warning?: string): void => {
+    onAdded(accounts, message, warning)
     setToken('')
     setJson('')
     setError('')
@@ -135,9 +137,23 @@ export function CursorAddAccountDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsAddToken(token.trim())
+      const result = await window.api.cursorAccountsAddToken(token)
       if (!result.success) throw new Error(result.error)
-      finish([result.data], `已保存 ${result.data.email || result.data.id}`)
+      const { added, failed } = result.data
+      const failedText = failed.map((item) => `${item.label}: ${item.error}`).join('\n')
+      if (added.length === 0) {
+        throw new Error(failedText || '没有可入库的凭据')
+      }
+      const withoutRefresh = added.filter((item) => !item.viaHandshake).length
+      const emails = added.map((item) => item.account.email || item.account.id).join('、')
+      const message =
+        `已添加 ${added.length} 个账号：${emails}` +
+        (withoutRefresh > 0 ? `（${withoutRefresh} 个握手未通过，只按 access token 入库）` : '')
+      finish(
+        added.map((item) => item.account),
+        message,
+        failed.length > 0 ? `${failed.length} 条失败：\n${failedText}` : undefined
+      )
     } catch (submitError) {
       setError(errorText(submitError, '保存失败'))
     } finally {
@@ -209,7 +225,7 @@ export function CursorAddAccountDialog({
               ) : (
                 <KeyRound className="h-4 w-4" />
               )}
-              保存
+              {busy ? '握手并入库…' : '添加'}
             </Button>
           )}
           {tab === 'json' && (
@@ -308,13 +324,16 @@ export function CursorAddAccountDialog({
         {tab === 'token' && (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">
-              粘贴 Cursor 的 access token（JWT）。保存后会自动拉取邮箱、套餐与用量。
+              直接粘贴 <code className="rounded bg-muted px-1">WorkosCursorSessionToken</code> 的
+              cookie 值。我会用它替你完成一次 Cursor 登录握手，换回带 refresh token
+              的正式凭据再入库，然后自动拉取邮箱、套餐与用量——不用再开无痕窗口手动加 cookie。裸
+              access token 也可以。
             </p>
             <textarea
               value={token}
               onChange={(event) => setToken(event.target.value)}
               placeholder={TOKEN_PLACEHOLDER}
-              rows={4}
+              rows={6}
               spellCheck={false}
               className={TEXTAREA_CLASS}
             />

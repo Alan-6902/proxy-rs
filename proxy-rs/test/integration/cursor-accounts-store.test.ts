@@ -143,10 +143,38 @@ describe('Cursor 账号加密存储', () => {
     expect(merged?.accessToken).toBe('opaque-2')
   })
 
-  it('一方有 authId 一方没有时视为不同账号，不会误合并', async () => {
-    await upsertCursorAccount({ email: 'a@example.com', accessToken: 'opaque' })
-    await upsertCursorAccount({ email: 'a@example.com', accessToken: fakeJwt('auth0|user_A') })
+  it('邮箱相同即同一账号：authId 不同或只有一边有都合并；邮箱不同且 authId 不同才新建', async () => {
+    // 本机导入拿到的 authId 与登录握手 JWT 的 sub 实测不一致，靠邮箱兜住
+    const local = await upsertCursorAccount({
+      email: 'a@example.com',
+      accessToken: fakeJwt('grok|user_LOCAL'),
+      authId: 'grok|user_LOCAL'
+    })
+    const handshake = await upsertCursorAccount({
+      email: 'a@example.com',
+      accessToken: fakeJwt('grok|user_JWT'),
+      refreshToken: 'rt'
+    })
+    expect(handshake.id).toBe(local.id)
+
+    await upsertCursorAccount({ email: 'a@example.com', accessToken: 'opaque-no-authid' })
+    expect(await loadCursorAccounts()).toHaveLength(1)
+
+    await upsertCursorAccount({ email: 'b@example.com', accessToken: fakeJwt('auth0|user_B') })
     expect(await loadCursorAccounts()).toHaveLength(2)
+  })
+
+  it('没有邮箱时只认 authId：一边有一边没有不合并', async () => {
+    await upsertCursorAccount({ email: '', accessToken: fakeJwt('auth0|user_A') })
+    await upsertCursorAccount({ email: '', accessToken: 'opaque' })
+    await upsertCursorAccount({
+      email: '',
+      accessToken: fakeJwt('auth0|user_A'),
+      refreshToken: 'rt'
+    })
+    const accounts = await loadCursorAccounts()
+    expect(accounts).toHaveLength(2)
+    expect(accounts.find((item) => item.authId === 'auth0|user_A')?.refreshToken).toBe('rt')
   })
 
   it('批量导入一次落盘，删除按 id 生效，导出为可再导入的 JSON', async () => {

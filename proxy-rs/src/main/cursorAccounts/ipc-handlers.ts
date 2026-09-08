@@ -4,6 +4,7 @@ import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
   type CursorAutoRefreshSettings,
+  type CursorCredentialImportSummary,
   type CursorInjectOptions,
   type CursorInjectResult,
   type CursorOAuthStartResult,
@@ -11,7 +12,7 @@ import {
 } from '../../shared/cursorAccounts'
 import type { IdcIpcResult } from '../../shared/idcSeats'
 import {
-  addCursorAccountWithToken,
+  addCursorAccountsFromCredentials,
   exportCursorAccounts,
   finishCursorOAuthLogin,
   importCursorAccountFromLocal,
@@ -101,8 +102,10 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     mutating(deps, () => importCursorAccountFromLocal())()
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.addToken, (_event, accessToken: string) =>
-    mutating(deps, () => addCursorAccountWithToken(String(accessToken ?? '')))()
+  ipcMain.handle(
+    CURSOR_ACCOUNTS_CHANNEL.addToken,
+    (_event, input: string): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+      mutating(deps, () => addCursorAccountsFromCredentials(String(input ?? '')))()
   )
 
   ipcMain.handle(

@@ -8,6 +8,7 @@
 import {
   isCursorAccountBanned,
   type CursorAccount,
+  type CursorCredentialImportSummary,
   type CursorInjectOptions,
   type CursorInjectResult,
   type CursorRefreshAllSummary
@@ -41,7 +42,12 @@ import {
   readLocalCursorAuth,
   writeLocalCursorAuth
 } from './cursorLocalState'
-import { completeCursorOAuthLogin } from './cursorOAuth'
+import {
+  completeCursorOAuthLogin,
+  loginWithCursorSessionCookie,
+  parseCursorSessionCredentials,
+  type CursorSessionCredential
+} from './cursorOAuth'
 
 /** 批量刷新并发数。Cursor 接口对单账号限流，跨账号小并发即可。 */
 const REFRESH_ALL_CONCURRENCY = 3
@@ -205,15 +211,49 @@ export async function refreshAllCursorAccounts(): Promise<CursorRefreshAllSummar
   return { total: targets.length, success: targets.length - failed.length, failed }
 }
 
-/** 新号入库后顺手刷一遍，拿到邮箱、套餐和用量；刷不到不算失败。 */
-async function upsertAndRefresh(payload: CursorImportPayload): Promise<CursorAccount> {
-  const saved = await upsertCursorAccount(payload)
-  try {
-    return await refreshCursorAccount(saved.id)
-  } catch (error) {
-    console.warn(`[CursorAccounts] 入库后刷新失败: id=${saved.id}, ${errorMessage(error)}`)
-    return saved
+/**
+ * 新号先拉远端信息再入库：握手 / 裸 token 进来时往往没有邮箱，先拿到邮箱去重才准
+ * （同一个号在不同入口的 WorkOS id 可能不同），而且只落一次盘。远端拉不到也照样入库。
+ */
+async function enrichAndUpsert(payload: CursorImportPayload): Promise<CursorAccount> {
+  const now = Date.now()
+  const draft: CursorAccount = {
+    id: 'pending',
+    email: payload.email,
+    authId: payload.authId,
+    name: payload.name,
+    tags: payload.tags ?? [],
+    accessToken: payload.accessToken,
+    refreshToken: payload.refreshToken,
+    membershipType: payload.membershipType,
+    subscriptionStatus: payload.subscriptionStatus,
+    signUpType: payload.signUpType,
+    authRaw: payload.authRaw,
+    usageRaw: payload.usageRaw,
+    botUsageRaw: payload.botUsageRaw,
+    creditBalanceCents: payload.creditBalanceCents,
+    status: payload.status,
+    statusReason: payload.statusReason,
+    createdAt: payload.createdAt ?? now,
+    lastUsed: now
   }
+  const enriched = await collectRemoteState(draft)
+  return upsertCursorAccount({
+    ...payload,
+    email: enriched.email,
+    authId: enriched.authId,
+    accessToken: enriched.accessToken,
+    refreshToken: enriched.refreshToken,
+    membershipType: enriched.membershipType,
+    subscriptionStatus: enriched.subscriptionStatus,
+    signUpType: enriched.signUpType,
+    authRaw: enriched.authRaw,
+    usageRaw: enriched.usageRaw,
+    botUsageRaw: enriched.botUsageRaw,
+    creditBalanceCents: enriched.creditBalanceCents,
+    quotaQueryLastError: enriched.quotaQueryLastError,
+    quotaQueryLastErrorAt: enriched.quotaQueryLastErrorAt
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -227,17 +267,71 @@ export async function importCursorAccountsFromJson(json: string): Promise<Cursor
 export async function importCursorAccountFromLocal(): Promise<CursorAccount> {
   const payload = readLocalCursorAuth()
   if (!payload) throw new Error('未找到本机 Cursor 的登录信息，请先在 Cursor 里登录一次')
-  return upsertAndRefresh(payload)
+  return enrichAndUpsert(payload)
 }
 
-export async function addCursorAccountWithToken(accessToken: string): Promise<CursorAccount> {
-  const trimmed = accessToken.trim()
-  if (!trimmed) throw new Error('access token 不能为空')
-  return upsertAndRefresh({ email: '', accessToken: trimmed })
+/** 日志与结果里不放整段凭据：有 userId 用 userId，否则只露 token 开头。 */
+function credentialLabel(credential: CursorSessionCredential): string {
+  return credential.userId ?? `${credential.token.slice(0, 12)}…`
+}
+
+/**
+ * 单条凭据入库：先走登录握手换正式 token 对；握手不通（比如给的是客户端 access token 而不是
+ * 网页 session）就退回按 access token 入库，但退回前先用它拉一次用户信息验真，避免把一个
+ * 已失效的 token 存成僵尸账号。
+ */
+async function importCredential(
+  credential: CursorSessionCredential
+): Promise<CursorCredentialImportSummary['added'][number]> {
+  try {
+    const payload = await loginWithCursorSessionCookie(credential)
+    return { account: await enrichAndUpsert(payload), viaHandshake: true }
+  } catch (handshakeError) {
+    console.warn(
+      `[CursorAccounts] cookie 握手失败，尝试按 access token 入库: ${credentialLabel(credential)}, ${errorMessage(handshakeError)}`
+    )
+    try {
+      await fetchUserMeta(credential.token)
+    } catch {
+      throw handshakeError
+    }
+    return {
+      account: await enrichAndUpsert({ email: '', accessToken: credential.token }),
+      viaHandshake: false
+    }
+  }
+}
+
+/**
+ * 粘贴 WorkosCursorSessionToken cookie / access token 批量入库，每行一条。
+ * 逐条处理、互不影响，最后一起汇报成功与失败。
+ */
+export async function addCursorAccountsFromCredentials(
+  input: string
+): Promise<CursorCredentialImportSummary> {
+  const { credentials, unrecognized } = parseCursorSessionCredentials(input)
+  if (credentials.length === 0 && unrecognized.length === 0) {
+    throw new Error('请粘贴 WorkosCursorSessionToken 的 cookie 值或 access token')
+  }
+  const summary: CursorCredentialImportSummary = {
+    added: [],
+    failed: unrecognized.map((line) => ({
+      label: `${line.slice(0, 24)}${line.length > 24 ? '…' : ''}`,
+      error: '无法识别，需要 user_xxx::eyJ… 或 eyJ… 形式'
+    }))
+  }
+  for (const credential of credentials) {
+    try {
+      summary.added.push(await importCredential(credential))
+    } catch (error) {
+      summary.failed.push({ label: credentialLabel(credential), error: errorMessage(error) })
+    }
+  }
+  return summary
 }
 
 export async function finishCursorOAuthLogin(loginId: string): Promise<CursorAccount> {
-  return upsertAndRefresh(await completeCursorOAuthLogin(loginId))
+  return enrichAndUpsert(await completeCursorOAuthLogin(loginId))
 }
 
 export async function exportCursorAccounts(ids: string[]): Promise<string> {

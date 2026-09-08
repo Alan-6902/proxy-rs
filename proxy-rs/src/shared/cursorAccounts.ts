@@ -86,6 +86,16 @@ export interface CursorRefreshAllSummary {
   failed: { id: string; email: string; error: string }[]
 }
 
+/** 粘贴 cookie / token 批量入库的结果。 */
+export interface CursorCredentialImportSummary {
+  added: {
+    account: CursorAccount
+    /** true = 走完登录握手拿到了 refresh token；false = 只按 access token 入库。 */
+    viaHandshake: boolean
+  }[]
+  failed: { label: string; error: string }[]
+}
+
 /** 切号结果。Cursor 正在运行时不能直接改它的数据库，先回 `needsClose` 让用户确认。 */
 export type CursorInjectResult =
   | { status: 'done'; email: string; relaunched: boolean }

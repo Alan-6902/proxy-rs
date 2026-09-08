@@ -34,6 +34,7 @@ import type {
 import type {
   CursorAccount,
   CursorAutoRefreshSettings,
+  CursorCredentialImportSummary,
   CursorInjectOptions,
   CursorInjectResult,
   CursorOAuthStartResult,
@@ -987,7 +988,7 @@ interface KiroApi {
   cursorAccountsRemove: (ids: string[]) => Promise<IdcIpcResult<void>>
   cursorAccountsImportJson: (json: string) => Promise<IdcIpcResult<CursorAccount[]>>
   cursorAccountsImportLocal: () => Promise<IdcIpcResult<CursorAccount>>
-  cursorAccountsAddToken: (accessToken: string) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsAddToken: (input: string) => Promise<IdcIpcResult<CursorCredentialImportSummary>>
   cursorAccountsExport: (ids: string[]) => Promise<IdcIpcResult<string>>
   cursorAccountsRefresh: (id: string) => Promise<IdcIpcResult<CursorAccount>>
   cursorAccountsRefreshAll: () => Promise<IdcIpcResult<CursorRefreshAllSummary>>

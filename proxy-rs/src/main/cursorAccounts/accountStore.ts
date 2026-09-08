@@ -53,6 +53,8 @@ export interface CursorImportPayload {
   creditBalanceCents?: number
   status?: string
   statusReason?: string
+  quotaQueryLastError?: string
+  quotaQueryLastErrorAt?: number
   createdAt?: number
 }
 
@@ -307,15 +309,19 @@ function identityOf(account: CursorAccount): CursorIdentity {
   }
 }
 
+/**
+ * 同一账号的判定：authId 相同，或邮箱相同。
+ *
+ * 邮箱是 Cursor 账号的唯一键，而同一个号在不同入口拿到的 WorkOS id 可能不同（本机
+ * state.vscdb 里的 cursorAuth/authId 与登录握手 JWT 的 sub 实测就不一样），只认 authId
+ * 会把同一个号存成两条。两边都没有 authId 且邮箱不可比时，才退到比较 access token。
+ */
 function identitiesMatch(left: CursorIdentity, right: CursorIdentity): boolean {
-  if (left.authId && right.authId) return left.authId === right.authId
+  if (left.authId && right.authId && left.authId === right.authId) return true
+  if (left.email && right.email) return left.email === right.email
+  // 邮箱不可比：authId 不同或只有一边有，都不敢合并
   if (left.authId || right.authId) return false
-  if (left.email && right.email && left.email !== right.email) return false
-  const emailMatch = Boolean(left.email && right.email && left.email === right.email)
-  const tokenMatch = Boolean(
-    left.accessToken && right.accessToken && left.accessToken === right.accessToken
-  )
-  return emailMatch || tokenMatch
+  return Boolean(left.accessToken && right.accessToken && left.accessToken === right.accessToken)
 }
 
 /** 按身份找已有账号：用于 upsert 去重，也用于识别本机 Cursor 当前登录的是哪个号。 */
@@ -386,8 +392,8 @@ function upsertInto(
     creditBalanceCents: payload.creditBalanceCents ?? existing?.creditBalanceCents,
     status: readString(payload.status),
     statusReason: readString(payload.statusReason),
-    quotaQueryLastError: undefined,
-    quotaQueryLastErrorAt: undefined,
+    quotaQueryLastError: readString(payload.quotaQueryLastError),
+    quotaQueryLastErrorAt: payload.quotaQueryLastError ? payload.quotaQueryLastErrorAt : undefined,
     usageUpdatedAt: payload.usageRaw ? now : existing?.usageUpdatedAt,
     createdAt: existing?.createdAt ?? payload.createdAt ?? now,
     lastUsed: now

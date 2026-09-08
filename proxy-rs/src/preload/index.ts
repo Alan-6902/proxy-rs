@@ -36,6 +36,7 @@ import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
   type CursorAutoRefreshSettings,
+  type CursorCredentialImportSummary,
   type CursorInjectOptions,
   type CursorInjectResult,
   type CursorOAuthStartResult,
@@ -1323,8 +1324,12 @@ const api = {
   cursorAccountsImportLocal: (): Promise<IdcIpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal),
 
-  cursorAccountsAddToken: (accessToken: string): Promise<IdcIpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, accessToken),
+  /**
+   * 粘贴 WorkosCursorSessionToken cookie 值或 access token（每行一条）批量入库。
+   * 主进程会替用户走完 Cursor 登录握手，拿到带 refresh token 的正式凭据。
+   */
+  cursorAccountsAddToken: (input: string): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, input),
 
   cursorAccountsExport: (ids: string[]): Promise<IdcIpcResult<string>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.export, ids),

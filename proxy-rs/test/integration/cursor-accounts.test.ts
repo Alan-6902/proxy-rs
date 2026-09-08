@@ -25,6 +25,7 @@ import {
   readLocalCursorAuth,
   writeLocalCursorAuth
 } from '../../src/main/cursorAccounts/cursorLocalState'
+import { parseCursorSessionCredentials } from '../../src/main/cursorAccounts/cursorOAuth'
 
 function fakeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown): string =>
@@ -246,6 +247,60 @@ describe('Cursor JWT 工具', () => {
     expect(normalizeCursorSignUpType('SIGN_UP_TYPE_GITHUB')).toBe('Github')
     expect(normalizeCursorSignUpType('SIGN_UP_TYPE_GROK')).toBe('Grok')
     expect(normalizeCursorSignUpType('other')).toBe('other')
+  })
+})
+
+describe('Cursor 会话凭据解析', () => {
+  const jwtA = fakeJwt({ sub: 'auth0|user_AAA111', exp: 9999999999 })
+  const jwtB = fakeJwt({ sub: 'auth0|user_BBB222', exp: 9999999999 })
+
+  it('识别 cookie 值的三种写法：明文 ::、URL 编码 %3A%3A、带 cookie 名', () => {
+    const { credentials, unrecognized } = parseCursorSessionCredentials(
+      [
+        `user_AAA111::${jwtA}`,
+        `user_BBB222%3A%3A${jwtB}`,
+        `WorkosCursorSessionToken=user_AAA111%3A%3A${jwtA}; Path=/; Secure`
+      ].join('\n')
+    )
+    expect(unrecognized).toEqual([])
+    // 第三行和第一行是同一个 token，去重后只剩两条
+    expect(credentials).toEqual([
+      { userId: 'user_AAA111', token: jwtA },
+      { userId: 'user_BBB222', token: jwtB }
+    ])
+  })
+
+  it('从整段 Cookie 请求头里挑出会话 token；裸 JWT 从 sub 推 userId', () => {
+    const header = `_ga=GA1.1; WorkosCursorSessionToken=user_AAA111%3A%3A${jwtA}; other=1`
+    expect(parseCursorSessionCredentials(header).credentials).toEqual([
+      { userId: 'user_AAA111', token: jwtA }
+    ])
+    expect(parseCursorSessionCredentials(jwtB).credentials).toEqual([
+      { userId: 'user_BBB222', token: jwtB }
+    ])
+  })
+
+  it('接受浏览器插件导出的 cookie JSON（数组 / 对象 / cookies 字段）', () => {
+    const exported = JSON.stringify([
+      { name: 'other', value: 'x' },
+      { name: 'WorkosCursorSessionToken', value: `user_AAA111%3A%3A${jwtA}` }
+    ])
+    expect(parseCursorSessionCredentials(exported).credentials).toEqual([
+      { userId: 'user_AAA111', token: jwtA }
+    ])
+    const wrapped = JSON.stringify({
+      cookies: [{ name: 'WorkosCursorSessionToken', value: `user_BBB222::${jwtB}` }]
+    })
+    expect(parseCursorSessionCredentials(wrapped).credentials).toEqual([
+      { userId: 'user_BBB222', token: jwtB }
+    ])
+  })
+
+  it('认不出的行单独列出，空输入返回空', () => {
+    const result = parseCursorSessionCredentials(`hello world\nuser_AAA111::${jwtA}\n\n`)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.unrecognized).toEqual(['hello world'])
+    expect(parseCursorSessionCredentials('   ')).toEqual({ credentials: [], unrecognized: [] })
   })
 })
 

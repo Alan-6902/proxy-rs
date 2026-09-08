@@ -36,6 +36,7 @@ import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
   type CursorAutoRefreshSettings,
+  type CursorCockpitImportSummary,
   type CursorCredentialImportSummary,
   type CursorInjectOptions,
   type CursorInjectResult,
@@ -1323,6 +1324,10 @@ const api = {
 
   cursorAccountsImportLocal: (): Promise<IdcIpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal),
+
+  /** 从本机 cockpit-tools（~/.antigravity_cockpit）整批导入 Cursor 账号。 */
+  cursorAccountsImportCockpit: (): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importCockpit),
 
   /**
    * 粘贴 WorkosCursorSessionToken cookie 值或 access token（每行一条）批量入库。

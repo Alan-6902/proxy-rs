@@ -535,7 +535,7 @@ export function CursorAccountsPage(): React.ReactNode {
             )}
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
             {visible.map((account) => (
               <CursorAccountCard
                 key={account.id}

@@ -4,6 +4,7 @@ import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
   type CursorAutoRefreshSettings,
+  type CursorCockpitImportSummary,
   type CursorCredentialImportSummary,
   type CursorInjectOptions,
   type CursorInjectResult,
@@ -30,6 +31,7 @@ import {
   updateCursorAccountTags,
   updateCursorAutoRefreshSettings
 } from './accountStore'
+import { importCursorAccountsFromCockpitTools } from './cockpitToolsImport'
 import { cancelCursorOAuthLogin, startCursorOAuthLogin } from './cursorOAuth'
 import type { CursorAutoRefreshScheduler } from './refreshScheduler'
 
@@ -100,6 +102,12 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.importLocal, () =>
     mutating(deps, () => importCursorAccountFromLocal())()
+  )
+
+  ipcMain.handle(
+    CURSOR_ACCOUNTS_CHANNEL.importCockpit,
+    (): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+      mutating(deps, () => importCursorAccountsFromCockpitTools())()
   )
 
   ipcMain.handle(

@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { createCipheriv, randomBytes } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -26,6 +27,10 @@ import {
   writeLocalCursorAuth
 } from '../../src/main/cursorAccounts/cursorLocalState'
 import { parseCursorSessionCredentials } from '../../src/main/cursorAccounts/cursorOAuth'
+import {
+  parseCockpitAccountFile,
+  readCockpitToolsCursorAccounts
+} from '../../src/main/cursorAccounts/cockpitToolsImport'
 
 function fakeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown): string =>
@@ -301,6 +306,88 @@ describe('Cursor 会话凭据解析', () => {
     expect(result.credentials).toHaveLength(1)
     expect(result.unrecognized).toEqual(['hello world'])
     expect(parseCursorSessionCredentials('   ')).toEqual({ credentials: [], unrecognized: [] })
+  })
+})
+
+describe('cockpit-tools 账号库导入', () => {
+  const key = randomBytes(32)
+
+  /** 按 cockpit-tools secure_account_storage.rs 的格式造一个信封：AES-256-GCM，密文尾接 16 字节 tag。 */
+  function envelope(plain: unknown): string {
+    const nonce = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', key, nonce)
+    const body = Buffer.concat([cipher.update(JSON.stringify(plain), 'utf-8'), cipher.final()])
+    return JSON.stringify({
+      version: 1,
+      kind: 'cursor',
+      algorithm: 'AES-256-GCM',
+      key_id: 'local-secure-account-storage-v1',
+      nonce: nonce.toString('base64'),
+      ciphertext: Buffer.concat([body, cipher.getAuthTag()]).toString('base64'),
+      encrypted_at: 1
+    })
+  }
+
+  it('解开加密信封；老版本明文文件直接当对象；密钥不对报错', () => {
+    const record = { id: 'cursor_x', email: 'a@example.com', access_token: 'at' }
+    expect(parseCockpitAccountFile(envelope(record), key)).toEqual(record)
+    expect(parseCockpitAccountFile(JSON.stringify(record), null)).toEqual(record)
+    expect(() => parseCockpitAccountFile(envelope(record), randomBytes(32))).toThrow()
+    expect(() => parseCockpitAccountFile(envelope(record), null)).toThrow('找不到')
+  })
+
+  it('按索引 + 目录读取全部账号文件，.bak 不算，坏文件只跳过', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proxy-rs-cockpit-'))
+    try {
+      mkdirSync(join(dir, 'cursor_accounts'))
+      writeFileSync(join(dir, 'secure-account-storage.key'), key.toString('base64'))
+      writeFileSync(
+        join(dir, 'cursor_accounts.json'),
+        JSON.stringify({ version: '1.0', accounts: [{ id: 'cursor_a' }, { id: 'cursor_missing' }] })
+      )
+      writeFileSync(
+        join(dir, 'cursor_accounts', 'cursor_a.json'),
+        envelope({
+          id: 'cursor_a',
+          email: 'a@example.com',
+          access_token: 'at-a',
+          refresh_token: 'rt-a',
+          tags: ['eden'],
+          membership_type: 'ultra',
+          cursor_usage_raw: { individualUsage: { plan: { totalPercentUsed: 10 } } },
+          created_at: 1_784_510_774
+        })
+      )
+      // 索引里没有、只在目录里的号也要导；.bak 是删号备份，不导；坏文件跳过
+      writeFileSync(
+        join(dir, 'cursor_accounts', 'cursor_b.json'),
+        JSON.stringify({ email: 'b@example.com', access_token: 'at-b' })
+      )
+      writeFileSync(join(dir, 'cursor_accounts', 'cursor_old.json.bak'), '{}')
+      writeFileSync(join(dir, 'cursor_accounts', 'cursor_broken.json'), 'not json')
+
+      const { payloads, skipped } = await readCockpitToolsCursorAccounts(dir)
+      expect(payloads.map((item) => item.email).sort()).toEqual(['a@example.com', 'b@example.com'])
+      expect(payloads.find((item) => item.email === 'a@example.com')).toMatchObject({
+        accessToken: 'at-a',
+        refreshToken: 'rt-a',
+        tags: ['eden'],
+        membershipType: 'ultra',
+        createdAt: 1_784_510_774_000
+      })
+      expect(skipped.map((item) => item.id).sort()).toEqual(['cursor_broken', 'cursor_missing'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('目录里什么都没有时给出明确错误', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proxy-rs-cockpit-empty-'))
+    try {
+      await expect(readCockpitToolsCursorAccounts(dir)).rejects.toThrow('没有在')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

@@ -189,6 +189,27 @@ export function CursorAddAccountDialog({
     }
   }
 
+  const submitCockpit = async (): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await window.api.cursorAccountsImportCockpit()
+      if (!result.success) throw new Error(result.error)
+      const { imported, skipped } = result.data
+      const skippedText = skipped.map((item) => `${item.id}: ${item.error}`).join('\n')
+      if (imported.length === 0) throw new Error(skippedText || '没有可导入的账号')
+      finish(
+        imported,
+        `已从 Cockpit Tools 导入 ${imported.length} 个账号（同一账号已合并）`,
+        skipped.length > 0 ? `${skipped.length} 个跳过：\n${skippedText}` : undefined
+      )
+    } catch (submitError) {
+      setError(errorText(submitError, '从 Cockpit Tools 导入失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const pickJsonFile = async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -235,14 +256,24 @@ export function CursorAddAccountDialog({
             </Button>
           )}
           {tab === 'local' && (
-            <Button onClick={() => void submitLocal()} disabled={busy}>
-              {busy ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Database className="h-4 w-4" />
-              )}
-              从本机导入
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => void submitCockpit()} disabled={busy}>
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Database className="h-4 w-4" />
+                )}
+                从 Cockpit Tools 导入全部
+              </Button>
+              <Button onClick={() => void submitLocal()} disabled={busy}>
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Database className="h-4 w-4" />
+                )}
+                从本机 Cursor 导入
+              </Button>
+            </>
           )}
         </>
       }
@@ -373,10 +404,18 @@ export function CursorAddAccountDialog({
         )}
 
         {tab === 'local' && (
-          <p className="text-sm text-muted-foreground">
-            读取本机 Cursor 客户端当前登录的账号（来自它的 state.vscdb），保存到账号库。 Cursor
-            不需要退出。
-          </p>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              <span className="font-medium text-foreground">从本机 Cursor 导入</span>
+              ：读取 Cursor 客户端当前登录的账号（来自它的 state.vscdb），Cursor 不需要退出。
+            </p>
+            <p>
+              <span className="font-medium text-foreground">从 Cockpit Tools 导入全部</span>
+              ：解开 <code className="rounded bg-muted px-1">~/.antigravity_cockpit</code> 里
+              cockpit-tools 的加密账号库，把它所有 Cursor 账号（含标签、套餐、用量）一次导进来，
+              同一账号自动合并。cockpit-tools 那边的数据不会被改动。
+            </p>
+          </div>
         )}
       </div>
     </CursorDialogShell>

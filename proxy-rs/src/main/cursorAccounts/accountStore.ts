@@ -453,7 +453,10 @@ export function updateCursorAccountTags(id: string, tags: string[]): Promise<Cur
 // Import / Export
 // ---------------------------------------------------------------------------
 
-function payloadFromImportRecord(record: Record<string, unknown>): CursorImportPayload {
+/** 单条导入记录 → payload。同时认本应用（camelCase）与 cockpit-tools（snake_case）的字段名。 */
+export function cursorImportPayloadFromRecord(
+  record: Record<string, unknown>
+): CursorImportPayload {
   const accessToken = readString(
     pick(record, 'accessToken', 'access_token', 'token', 'cursor_access_token')
   )
@@ -513,7 +516,7 @@ export function parseCursorImportJson(text: string): CursorImportPayload[] {
     const record = readObject(item)
     if (!record) throw new Error(`第 ${index + 1} 条 Cursor 账号不是对象`)
     try {
-      return payloadFromImportRecord(record)
+      return cursorImportPayloadFromRecord(record)
     } catch (error) {
       throw new Error(
         `第 ${index + 1} 条 Cursor 账号解析失败: ${error instanceof Error ? error.message : String(error)}`

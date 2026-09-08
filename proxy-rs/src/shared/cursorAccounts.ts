@@ -10,6 +10,7 @@ export const CURSOR_ACCOUNTS_CHANNEL = {
   remove: 'cursor-accounts-remove',
   importJson: 'cursor-accounts-import-json',
   importLocal: 'cursor-accounts-import-local',
+  importCockpit: 'cursor-accounts-import-cockpit',
   addToken: 'cursor-accounts-add-token',
   export: 'cursor-accounts-export',
   refresh: 'cursor-accounts-refresh',
@@ -84,6 +85,13 @@ export interface CursorRefreshAllSummary {
   total: number
   success: number
   failed: { id: string; email: string; error: string }[]
+}
+
+/** 从本机 cockpit-tools 账号库整批导入的结果。 */
+export interface CursorCockpitImportSummary {
+  imported: CursorAccount[]
+  skipped: { id: string; error: string }[]
+  sourceDir: string
 }
 
 /** 粘贴 cookie / token 批量入库的结果。 */

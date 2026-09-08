@@ -10,6 +10,10 @@ import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
 
 const CURSOR_USAGE_SUMMARY_URL = 'https://cursor.com/api/usage-summary'
 const CURSOR_GET_USER_META_URL = 'https://api2.cursor.sh/aiserver.v1.AuthService/GetUserMeta'
+/** Grok Bot 周额度，与 cursor.com 仪表盘同一条接口；Connect 协议端点，要带协议版本头。 */
+const CURSOR_SAND_USAGE_STATUS_URL =
+  'https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus'
+const CONNECT_PROTOCOL_VERSION_HEADER = { 'Connect-Protocol-Version': '1' }
 const CURSOR_FULL_STRIPE_PROFILE_URL = 'https://api2.cursor.sh/auth/full_stripe_profile'
 const CURSOR_STRIPE_PROFILE_URL = 'https://api2.cursor.sh/auth/stripe_profile'
 /** 与官方客户端一致：用 api2.cursor.sh/oauth/token 和内置 client_id 换新 token。 */
@@ -311,6 +315,32 @@ export async function fetchUsageSummary(accessToken: string): Promise<Record<str
   )
   if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
   if (status !== 200) throw new Error(`${what} 返回异常状态码: ${status}`)
+  return parseJsonObject(text, what)
+}
+
+/**
+ * Grok Bot 周额度。响应形如
+ * `{ hasNonZeroIncludedLimit, usagePercent, currentPeriodStart, nextResetTimestampUtc, grokPlanLabel }`，
+ * 原样返回交给 shared 层解析。
+ */
+export async function fetchSandUsageStatus(accessToken: string): Promise<Record<string, unknown>> {
+  const what = 'Cursor Bot 用量'
+  const { status, text } = await cursorFetch(
+    CURSOR_SAND_USAGE_STATUS_URL,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...CONNECT_PROTOCOL_VERSION_HEADER
+      },
+      body: '{}'
+    },
+    what
+  )
+  if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
+  if (status !== 200) throw new Error(`${what} API 返回异常状态码: ${status}`)
   return parseJsonObject(text, what)
 }
 

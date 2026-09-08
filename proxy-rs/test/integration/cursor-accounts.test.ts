@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
+  getCursorBotUsage,
   getCursorOnDemandSummary,
   getCursorPlanDisplayName,
   getCursorPlanTone,
@@ -98,6 +99,43 @@ describe('Cursor 用量解析', () => {
     const usage = getCursorUsage(account())
     expect(usage.planUsedPercent).toBeNull()
     expect(getCursorOnDemandSummary(usage).isDisabled).toBe(true)
+  })
+})
+
+describe('Cursor Bot 周额度解析', () => {
+  it('解析 GetSandUsageStatus 的实际响应', () => {
+    const bot = getCursorBotUsage(
+      account({
+        botUsageRaw: {
+          currentPeriodStart: '2026-09-06T22:25:13.832Z',
+          nextResetTimestampUtc: '2026-09-13T22:25:13.832Z',
+          usagePercent: 22.587294,
+          hasAvailableUsage: true,
+          hasNonZeroIncludedLimit: true,
+          grokPlanLabel: 'Grok Bot Plan'
+        }
+      })
+    )
+    expect(bot).toMatchObject({
+      hasLimit: true,
+      planLabel: 'Grok Bot Plan',
+      periodStartAt: Date.parse('2026-09-06T22:25:13.832Z'),
+      nextResetAt: Date.parse('2026-09-13T22:25:13.832Z')
+    })
+    expect(bot?.usedPercent).toBeCloseTo(22.587294)
+  })
+
+  it('套餐不含 Bot 额度时 hasLimit=false；没拉过时为 null；兼容 snake_case 与字符串布尔', () => {
+    expect(
+      getCursorBotUsage(account({ botUsageRaw: { hasNonZeroIncludedLimit: false } }))?.hasLimit
+    ).toBe(false)
+    expect(getCursorBotUsage(account())).toBeNull()
+    const snake = getCursorBotUsage(
+      account({
+        botUsageRaw: { has_non_zero_included_limit: 'true', usage_percent: '140' }
+      })
+    )
+    expect(snake).toMatchObject({ hasLimit: true, usedPercent: 100, planLabel: null })
   })
 })
 

@@ -13,6 +13,7 @@ import {
 import {
   formatCursorUsageDollars,
   getCursorAccountDisplayEmail,
+  getCursorBotUsage,
   getCursorOnDemandSummary,
   getCursorPlanDisplayName,
   getCursorPlanTone,
@@ -89,6 +90,7 @@ export function CursorAccountCard({
   const banned = isCursorAccountBanned(account)
   const usage = getCursorUsage(account)
   const onDemand = getCursorOnDemandSummary(usage)
+  const botUsage = getCursorBotUsage(account)
   const planTone = getCursorPlanTone(account)
   const hasUsage = hasCursorQuotaData(account)
   const displayEmail = getCursorAccountDisplayEmail(account)
@@ -190,6 +192,15 @@ export function CursorAccountCard({
           <div className="rounded-lg border border-dashed border-border/60 px-2.5 py-2 text-xs text-muted-foreground">
             {account.quotaQueryLastError ? '用量拉取失败' : '还没拉过用量，点刷新试试'}
           </div>
+        )}
+
+        {/* Bot 周额度走另一条接口，与主用量各自独立展示；套餐不含 Bot 额度时不占位 */}
+        {botUsage?.hasLimit && (
+          <UsageBar
+            label={`${botUsage.planLabel ?? 'Grok Bot'}（周）`}
+            percent={botUsage.usedPercent}
+            detail={botUsage.nextResetAt ? `重置 ${formatDate(botUsage.nextResetAt)}` : undefined}
+          />
         )}
 
         {account.quotaQueryLastError && (

@@ -37,6 +37,7 @@ export interface CursorImportPayload {
   signUpType?: string
   authRaw?: Record<string, unknown>
   usageRaw?: Record<string, unknown>
+  botUsageRaw?: Record<string, unknown>
   status?: string
   statusReason?: string
   createdAt?: number
@@ -120,6 +121,7 @@ function normalizeAccount(value: unknown, now: number): CursorAccount | null {
     signUpType: readString(record.signUpType),
     authRaw: readObject(record.authRaw),
     usageRaw: readObject(record.usageRaw),
+    botUsageRaw: readObject(record.botUsageRaw),
     status: readString(record.status),
     statusReason: readString(record.statusReason),
     quotaQueryLastError: readString(record.quotaQueryLastError),
@@ -310,6 +312,7 @@ function upsertInto(
     signUpType: readString(payload.signUpType) ?? existing?.signUpType,
     authRaw: payload.authRaw ?? existing?.authRaw,
     usageRaw: payload.usageRaw ?? existing?.usageRaw,
+    botUsageRaw: payload.botUsageRaw ?? existing?.botUsageRaw,
     status: readString(payload.status),
     statusReason: readString(payload.statusReason),
     quotaQueryLastError: undefined,
@@ -397,6 +400,7 @@ function payloadFromImportRecord(record: Record<string, unknown>): CursorImportP
     signUpType: readString(pick(record, 'signUpType', 'sign_up_type', 'cachedSignUpType')),
     authRaw,
     usageRaw: readObject(pick(record, 'usageRaw', 'cursor_usage_raw', 'cursorUsageRaw')),
+    botUsageRaw: readObject(record.botUsageRaw),
     status: readString(record.status),
     statusReason: readString(pick(record, 'statusReason', 'status_reason')),
     createdAt: readTimestampMs(pick(record, 'createdAt', 'created_at'))

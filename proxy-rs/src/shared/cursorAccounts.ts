@@ -43,6 +43,8 @@ export interface CursorAccount {
   authRaw?: Record<string, unknown>
   /** `cursor.com/api/usage-summary` 的原始响应。 */
   usageRaw?: Record<string, unknown>
+  /** `DashboardService/GetSandUsageStatus` 的原始响应：Grok Bot 的周额度。 */
+  botUsageRaw?: Record<string, unknown>
 
   status?: string
   statusReason?: string
@@ -413,6 +415,44 @@ export function getCursorOnDemandSummary(usage: CursorUsage): CursorOnDemandSumm
   const isDisabled = !hasFixedLimit && !isUnlimited
 
   return { isTeamLimit, usedCents, limitCents, hasFixedLimit, isUnlimited, isDisabled }
+}
+
+export interface CursorBotUsage {
+  /** 该账号的套餐是否包含 Bot 额度；false 时界面不展示这一项。 */
+  hasLimit: boolean
+  /** 本周期已用百分比（0–100）。 */
+  usedPercent: number | null
+  periodStartAt: number | null
+  nextResetAt: number | null
+  /** 接口给的套餐名，如 "Grok Bot Plan"。 */
+  planLabel: string | null
+}
+
+function parseIsoTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string' || !value) return null
+  const ts = new Date(value).getTime()
+  return Number.isFinite(ts) ? ts : null
+}
+
+/** Grok Bot 周额度。没拉过返回 null；拉过但套餐不含 Bot 额度时 hasLimit=false。 */
+export function getCursorBotUsage(account: CursorAccount): CursorBotUsage | null {
+  const raw = account.botUsageRaw
+  if (!raw || typeof raw !== 'object') return null
+  const hasLimit =
+    parseBoolLike(raw.hasNonZeroIncludedLimit ?? raw.has_non_zero_included_limit) === true
+  const usedRaw = pickNumber(raw, 'usagePercent', 'usage_percent')
+  const usedPercent = usedRaw == null ? null : Math.min(100, Math.max(0, usedRaw))
+  const planLabel =
+    typeof raw.grokPlanLabel === 'string' && raw.grokPlanLabel.trim()
+      ? raw.grokPlanLabel.trim()
+      : null
+  return {
+    hasLimit,
+    usedPercent,
+    periodStartAt: parseIsoTimestamp(raw.currentPeriodStart ?? raw.current_period_start),
+    nextResetAt: parseIsoTimestamp(raw.nextResetTimestampUtc ?? raw.next_reset_timestamp_utc),
+    planLabel
+  }
 }
 
 export function formatCursorUsageDollars(cents: number | null | undefined): string {

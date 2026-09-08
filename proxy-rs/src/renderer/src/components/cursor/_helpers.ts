@@ -26,6 +26,11 @@ export function usageTextClass(percent: number | null): string {
   return 'text-emerald-500'
 }
 
+/** `09/21` 这种最短写法，给半宽格子里的重置日期用。 */
+export function formatShortDate(value: number): string {
+  return new Date(value).toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' })
+}
+
 /** `2026/09/21 12:48` 这种紧凑写法，卡片里放得下。 */
 export function formatCompactDateTime(value?: number | null): string {
   if (!value) return '—'

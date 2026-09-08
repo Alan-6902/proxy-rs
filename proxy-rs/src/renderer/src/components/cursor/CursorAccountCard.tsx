@@ -17,6 +17,7 @@ import {
   PLAN_BADGE_CLASS,
   daysUntil,
   formatCompactDateTime,
+  formatShortDate,
   usageBarClass,
   usageTextClass
 } from './_helpers'
@@ -38,26 +39,26 @@ function Metric({ label, percent, valueText, sublines, barPercent }: MetricProps
   const fill = barPercent ?? percent
   const clamped = fill == null ? 0 : Math.min(100, Math.max(0, fill))
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-start justify-between gap-3">
+    <div className="min-w-0 space-y-1">
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-sm text-muted-foreground">{label}</p>
+          <p className="truncate text-sm text-muted-foreground">{label}</p>
           {sublines?.map((line) => (
-            <p key={line} className="font-mono text-xs text-muted-foreground/80">
+            <p key={line} className="truncate font-mono text-xs text-muted-foreground/80">
               {line}
             </p>
           ))}
         </div>
         <span
           className={cn(
-            'shrink-0 text-lg font-semibold tabular-nums leading-6',
+            'shrink-0 text-base font-semibold tabular-nums leading-5',
             valueText ? 'text-foreground' : usageTextClass(percent)
           )}
         >
           {valueText ?? (percent == null ? '—' : `${Math.round(percent)}%`)}
         </span>
       </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
         <div
           className={cn('h-full rounded-full transition-all', usageBarClass(clamped))}
           style={{ width: `${clamped}%` }}
@@ -103,17 +104,18 @@ export function CursorAccountCard({
 
   // 套餐内已用优先取 breakdown.included；Ultra 用满后 used 会停在 limit
   const includedCents = usage.includedSpendCents ?? usage.planUsedCents
-  const totalSublines: string[] = []
+  const totalParts: string[] = []
   if (includedCents != null && usage.planLimitCents != null) {
-    totalSublines.push(
+    totalParts.push(
       `${formatCursorUsageDollars(includedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
     )
   }
   if (usage.allowanceResetAt) {
-    totalSublines.push(
-      `重置: ${formatCompactDateTime(usage.allowanceResetAt)}（${daysUntil(usage.allowanceResetAt)} 天）`
+    totalParts.push(
+      `重置 ${formatShortDate(usage.allowanceResetAt)}（${daysUntil(usage.allowanceResetAt)} 天）`
     )
   }
+  const totalSublines = totalParts.length > 0 ? [totalParts.join(' · ')] : undefined
 
   const onDemandText = onDemand.isDisabled
     ? onDemand.usedCents > 0
@@ -147,8 +149,8 @@ export function CursorAccountCard({
         selected && 'ring-2 ring-primary'
       )}
     >
-      <CardContent className="space-y-4 p-5">
-        <div className="space-y-2">
+      <CardContent className="space-y-3 p-4">
+        <div className="space-y-1.5">
           <div className="flex items-center gap-3">
             <input
               type="checkbox"
@@ -208,35 +210,40 @@ export function CursorAccountCard({
         <div className="border-t border-border/50" />
 
         {hasUsage ? (
-          <div className="space-y-4">
+          <div className="space-y-3">
             <Metric label="Total Usage" percent={usage.planUsedPercent} sublines={totalSublines} />
-            {usage.autoPercentUsed != null && (
-              <Metric label="Auto + Composer" percent={usage.autoPercentUsed} />
-            )}
-            {usage.apiPercentUsed != null && (
-              <Metric label="API Usage" percent={usage.apiPercentUsed} />
-            )}
-            {botUsage?.hasLimit && (
+            {/* 次级指标两两并排，压住卡片高度 */}
+            <div className="grid grid-cols-2 gap-x-5 gap-y-3">
+              {usage.autoPercentUsed != null && (
+                <Metric label="Auto + Composer" percent={usage.autoPercentUsed} />
+              )}
+              {usage.apiPercentUsed != null && (
+                <Metric label="API Usage" percent={usage.apiPercentUsed} />
+              )}
+              {botUsage?.hasLimit && (
+                <Metric
+                  label={`${botUsage.planLabel ?? 'Grok Bot'}（周）`}
+                  percent={botUsage.usedPercent}
+                  sublines={
+                    botUsage.nextResetAt
+                      ? [
+                          `重置 ${formatShortDate(botUsage.nextResetAt)}（${daysUntil(botUsage.nextResetAt)} 天）`
+                        ]
+                      : undefined
+                  }
+                />
+              )}
               <Metric
-                label={`${botUsage.planLabel ?? 'Grok Bot'}（周）`}
-                percent={botUsage.usedPercent}
-                sublines={
-                  botUsage.nextResetAt
-                    ? [
-                        `重置: ${formatCompactDateTime(botUsage.nextResetAt)}（${daysUntil(botUsage.nextResetAt)} 天）`
-                      ]
-                    : undefined
-                }
+                label={`按需使用${onDemand.isTeamLimit ? '（团队）' : ''}`}
+                percent={null}
+                valueText={onDemandText}
+                barPercent={onDemandBar}
               />
-            )}
-            <Metric
-              label={`按需使用${onDemand.isTeamLimit ? '（团队）' : ''}`}
-              percent={null}
-              valueText={onDemandText}
-              barPercent={onDemandBar}
-            />
+            </div>
             {extras.length > 0 && (
-              <p className="text-xs text-muted-foreground">{extras.join(' · ')}</p>
+              <p className="truncate text-xs text-muted-foreground" title={extras.join(' · ')}>
+                {extras.join(' · ')}
+              </p>
             )}
           </div>
         ) : (

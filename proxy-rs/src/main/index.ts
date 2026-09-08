@@ -108,6 +108,7 @@ import {
 import { updateKskHunterConfig } from './kskHunter/configStore'
 import { DownstreamSettlementManager } from './downstreamSettlement/settlementManager'
 import { registerDownstreamSettlementIpcHandlers } from './downstreamSettlement/ipc-handlers'
+import { registerCursorAccountsIpcHandlers } from './cursorAccounts/ipc-handlers'
 import type { DownstreamLedgerUsage } from '../shared/downstreamSettlement'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
@@ -3369,6 +3370,9 @@ app.whenReady().then(async () => {
   void downstreamSettlementManager.start().catch((err) => {
     console.warn('[DownstreamSettlement] Failed to start:', err)
   })
+
+  // ============ Cursor 账号管理（多账号、切号、用量）IPC ============
+  registerCursorAccountsIpcHandlers({ getMainWindow: () => mainWindow })
 
   // ============ 托盘相关 IPC ============
 

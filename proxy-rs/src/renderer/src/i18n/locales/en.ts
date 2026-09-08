@@ -44,6 +44,7 @@ const en = {
   nav: {
     home: 'Home',
     accounts: 'Accounts',
+    cursor: 'Cursor Accounts',
     tasks: 'Tasks',
     hunter: 'KSK Hunter',
     kskLedger: 'KSK Ledger',

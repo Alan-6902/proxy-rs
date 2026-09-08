@@ -31,6 +31,13 @@ import type {
   LocalAdminStatsSnapshot,
   LocalAdminUsageRefreshSummary
 } from '../shared/localAdminStats'
+import type {
+  CursorAccount,
+  CursorInjectOptions,
+  CursorInjectResult,
+  CursorOAuthStartResult,
+  CursorRefreshAllSummary
+} from '../shared/cursorAccounts'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -974,6 +981,25 @@ interface KiroApi {
   localAdminStatsClearSamples: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   localAdminStatsClearBuckets: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
   onLocalAdminStatsChanged: (callback: (snapshot: LocalAdminStatsSnapshot) => void) => () => void
+  cursorAccountsList: () => Promise<IdcIpcResult<CursorAccount[]>>
+  cursorAccountsCurrentId: () => Promise<IdcIpcResult<string | null>>
+  cursorAccountsRemove: (ids: string[]) => Promise<IdcIpcResult<void>>
+  cursorAccountsImportJson: (json: string) => Promise<IdcIpcResult<CursorAccount[]>>
+  cursorAccountsImportLocal: () => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsAddToken: (accessToken: string) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsExport: (ids: string[]) => Promise<IdcIpcResult<string>>
+  cursorAccountsRefresh: (id: string) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsRefreshAll: () => Promise<IdcIpcResult<CursorRefreshAllSummary>>
+  cursorAccountsUpdateTags: (id: string, tags: string[]) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsInject: (
+    id: string,
+    options?: CursorInjectOptions
+  ) => Promise<IdcIpcResult<CursorInjectResult>>
+  cursorAccountsOAuthStart: () => Promise<IdcIpcResult<CursorOAuthStartResult>>
+  cursorAccountsOAuthComplete: (loginId: string) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsOAuthCancel: (loginId?: string) => Promise<IdcIpcResult<null>>
+  cursorAccountsRevealStore: () => Promise<IdcIpcResult<string>>
+  onCursorAccountsChanged: (callback: () => void) => () => void
 }
 
 declare global {

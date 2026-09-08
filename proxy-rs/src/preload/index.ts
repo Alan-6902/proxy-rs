@@ -32,6 +32,14 @@ import type {
   LocalAdminStatsSnapshot,
   LocalAdminUsageRefreshSummary
 } from '../shared/localAdminStats'
+import {
+  CURSOR_ACCOUNTS_CHANNEL,
+  type CursorAccount,
+  type CursorInjectOptions,
+  type CursorInjectResult,
+  type CursorOAuthStartResult,
+  type CursorRefreshAllSummary
+} from '../shared/cursorAccounts'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -1295,6 +1303,64 @@ const api = {
     }
     ipcRenderer.on('local-admin-stats-changed', handler)
     return () => ipcRenderer.removeListener('local-admin-stats-changed', handler)
+  },
+
+  // ============ Cursor 账号管理 ============
+  cursorAccountsList: (): Promise<IdcIpcResult<CursorAccount[]>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.list),
+
+  /** 本机 Cursor 当前登录的号在账号库里的 id；没匹配上为 null。 */
+  cursorAccountsCurrentId: (): Promise<IdcIpcResult<string | null>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.currentId),
+
+  cursorAccountsRemove: (ids: string[]): Promise<IdcIpcResult<void>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.remove, ids),
+
+  cursorAccountsImportJson: (json: string): Promise<IdcIpcResult<CursorAccount[]>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importJson, json),
+
+  cursorAccountsImportLocal: (): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal),
+
+  cursorAccountsAddToken: (accessToken: string): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, accessToken),
+
+  cursorAccountsExport: (ids: string[]): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.export, ids),
+
+  cursorAccountsRefresh: (id: string): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refresh, id),
+
+  cursorAccountsRefreshAll: (): Promise<IdcIpcResult<CursorRefreshAllSummary>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refreshAll),
+
+  cursorAccountsUpdateTags: (id: string, tags: string[]): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.updateTags, id, tags),
+
+  /** 切号：把账号写进本机 Cursor 的登录态。Cursor 在运行时先返回 needsClose 等用户确认。 */
+  cursorAccountsInject: (
+    id: string,
+    options?: CursorInjectOptions
+  ): Promise<IdcIpcResult<CursorInjectResult>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.inject, id, options),
+
+  cursorAccountsOAuthStart: (): Promise<IdcIpcResult<CursorOAuthStartResult>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthStart),
+
+  /** 阻塞到用户在浏览器完成登录（最长 5 分钟），成功即返回入库后的账号。 */
+  cursorAccountsOAuthComplete: (loginId: string): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, loginId),
+
+  cursorAccountsOAuthCancel: (loginId?: string): Promise<IdcIpcResult<null>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthCancel, loginId),
+
+  cursorAccountsRevealStore: (): Promise<IdcIpcResult<string>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.storePath),
+
+  onCursorAccountsChanged: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
+    return () => ipcRenderer.removeListener(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
   }
 }
 

@@ -16,7 +16,8 @@ import {
   Crosshair,
   ChartLine,
   BookOpenCheck,
-  Handshake
+  Handshake,
+  MousePointer2
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -27,6 +28,7 @@ import { useTranslation } from '@/hooks/useTranslation'
 export type PageType =
   | 'home'
   | 'accounts'
+  | 'cursor'
   | 'tasks'
   | 'hunter'
   | 'kskLedger'
@@ -51,6 +53,7 @@ interface SidebarProps {
 const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType }[] = [
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
+  { id: 'cursor', labelKey: 'nav.cursor', icon: MousePointer2 },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'hunter', labelKey: 'nav.hunter', icon: Crosshair },
   { id: 'kskLedger', labelKey: 'nav.kskLedger', icon: BookOpenCheck },

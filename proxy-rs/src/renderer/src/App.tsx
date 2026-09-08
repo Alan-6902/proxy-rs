@@ -16,7 +16,8 @@ import {
   HunterPage,
   KskLedgerPage,
   DownstreamSettlementPage,
-  ProxyStatsPage
+  ProxyStatsPage,
+  CursorAccountsPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { ConfirmDialogHost } from './components/ui'
@@ -245,6 +246,8 @@ function App(): React.JSX.Element {
         return <HomePage />
       case 'accounts':
         return <AccountManager />
+      case 'cursor':
+        return <CursorAccountsPage />
       case 'tasks':
         return <TaskManagerPage />
       case 'hunter':

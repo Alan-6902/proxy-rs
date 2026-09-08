@@ -11,11 +11,11 @@ export const PLAN_BADGE_CLASS: Record<CursorPlanTone, string> = {
   unknown: 'border-transparent bg-zinc-400 text-white'
 }
 
-/** 用量进度条配色：≥90% 红、≥70% 琥珀、其余绿。 */
+/** 用量进度条配色：≥90% 红、≥70% 琥珀、其余绿；带一点横向渐变，与 cockpit-tools 观感一致。 */
 export function usageBarClass(percent: number): string {
-  if (percent >= 90) return 'bg-red-500'
-  if (percent >= 70) return 'bg-amber-500'
-  return 'bg-emerald-500'
+  if (percent >= 90) return 'bg-gradient-to-r from-red-600 to-red-500'
+  if (percent >= 70) return 'bg-gradient-to-r from-amber-600 to-amber-400'
+  return 'bg-gradient-to-r from-emerald-600 to-emerald-400'
 }
 
 /** 百分比数字配色，与进度条同一套阈值。 */
@@ -24,11 +24,6 @@ export function usageTextClass(percent: number | null): string {
   if (percent >= 90) return 'text-red-500'
   if (percent >= 70) return 'text-amber-500'
   return 'text-emerald-500'
-}
-
-/** `09/21` 这种最短写法，给半宽格子里的重置日期用。 */
-export function formatShortDate(value: number): string {
-  return new Date(value).toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' })
 }
 
 /** `2026/09/21 12:48` 这种紧凑写法，卡片里放得下。 */

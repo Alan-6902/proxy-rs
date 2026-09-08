@@ -10,6 +10,8 @@ import {
   Trash2
 } from 'lucide-react'
 import {
+  CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS,
+  CURSOR_AUTO_REFRESH_INTERVAL_OPTIONS,
   getCursorAccountDisplayEmail,
   getCursorPlanBadge,
   getCursorPlanDisplayName,
@@ -17,9 +19,10 @@ import {
   hasCursorQuotaQueryError,
   isCursorAccountBanned,
   type CursorAccount,
+  type CursorAutoRefreshSettings,
   type CursorPlanBadge
 } from '../../../../shared/cursorAccounts'
-import { Button, Input, PageHeader, askConfirm } from '../ui'
+import { Button, Input, PageHeader, Select, Toggle, askConfirm } from '../ui'
 import {
   CursorAccountCard,
   CursorAddAccountDialog,
@@ -39,6 +42,11 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 /** 特殊筛选值，与套餐名互斥地放在同一组按钮里。 */
 const FILTER_ABNORMAL = '__abnormal__'
 const FILTER_QUOTA_FAILED = '__quota_failed__'
+
+const INTERVAL_OPTIONS = CURSOR_AUTO_REFRESH_INTERVAL_OPTIONS.map((minutes) => ({
+  value: String(minutes),
+  label: `每 ${minutes} 分钟`
+}))
 
 function matchesSearch(account: CursorAccount, query: string): boolean {
   if (!query) return true
@@ -78,6 +86,30 @@ export function CursorAccountsPage(): React.ReactNode {
   const [addOpen, setAddOpen] = useState(false)
   const [tagTarget, setTagTarget] = useState<CursorAccount | null>(null)
   const [exportIds, setExportIds] = useState<string[] | null>(null)
+
+  const [autoRefresh, setAutoRefresh] = useState<CursorAutoRefreshSettings>(
+    CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS
+  )
+  const [savingSettings, setSavingSettings] = useState(false)
+
+  useEffect(() => {
+    void window.api.cursorAccountsGetSettings().then((result) => {
+      if (result.success) setAutoRefresh(result.data)
+    })
+  }, [])
+
+  const updateAutoRefresh = async (patch: Partial<CursorAutoRefreshSettings>): Promise<void> => {
+    setSavingSettings(true)
+    try {
+      const result = await window.api.cursorAccountsUpdateSettings(patch)
+      if (!result.success) throw new Error(result.error)
+      setAutoRefresh(result.data)
+    } catch (settingsError) {
+      setError(errorText(settingsError, '保存自动刷新设置失败'))
+    } finally {
+      setSavingSettings(false)
+    }
+  }
 
   const load = useCallback(async (): Promise<void> => {
     setError('')
@@ -416,7 +448,28 @@ export function CursorAccountsPage(): React.ReactNode {
               </Button>
             )}
           </div>
-          <div className="ml-auto flex items-center gap-1">
+          <div
+            className="ml-auto flex items-center gap-2"
+            title="后台按间隔刷新所有未封禁账号的套餐、用量、Bot 额度与余额；关掉后只能手动刷新"
+          >
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Toggle
+                size="sm"
+                checked={autoRefresh.enabled}
+                disabled={savingSettings}
+                onChange={(enabled) => void updateAutoRefresh({ enabled })}
+              />
+              自动刷新
+            </label>
+            <Select
+              value={String(autoRefresh.intervalMinutes)}
+              options={INTERVAL_OPTIONS}
+              disabled={savingSettings || !autoRefresh.enabled}
+              onChange={(value) => void updateAutoRefresh({ intervalMinutes: Number(value) })}
+              className="w-32 text-xs"
+            />
+          </div>
+          <div className="flex items-center gap-1">
             <span className="text-xs text-muted-foreground">排序</span>
             {SORT_OPTIONS.map((option) => (
               <Button

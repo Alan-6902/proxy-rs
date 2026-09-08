@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
+  type CursorAutoRefreshSettings,
   type CursorInjectOptions,
   type CursorInjectResult,
   type CursorOAuthStartResult,
@@ -23,25 +24,33 @@ import {
 import {
   cursorAccountsStorePath,
   loadCursorAccounts,
+  loadCursorAutoRefreshSettings,
   removeCursorAccounts,
-  updateCursorAccountTags
+  updateCursorAccountTags,
+  updateCursorAutoRefreshSettings
 } from './accountStore'
 import { cancelCursorOAuthLogin, startCursorOAuthLogin } from './cursorOAuth'
+import type { CursorAutoRefreshScheduler } from './refreshScheduler'
 
 export interface CursorAccountsIpcDeps {
   getMainWindow: () => BrowserWindow | null
+  getScheduler: () => CursorAutoRefreshScheduler
+}
+
+/** 账号库有变化时通知渲染层重拉；不携带账号内容。 */
+export function sendCursorAccountsChanged(getMainWindow: () => BrowserWindow | null): void {
+  const win = getMainWindow()
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(CURSOR_ACCOUNTS_CHANNEL.changed)
+  }
 }
 
 function toError(error: unknown): IdcIpcResult<never> {
   return { success: false, error: error instanceof Error ? error.message : String(error) }
 }
 
-/** 账号库有变化时通知渲染层重拉；不携带账号内容。 */
 function notifyChanged(deps: CursorAccountsIpcDeps): void {
-  const win = deps.getMainWindow()
-  if (win && !win.isDestroyed()) {
-    win.webContents.send(CURSOR_ACCOUNTS_CHANNEL.changed)
-  }
+  sendCursorAccountsChanged(deps.getMainWindow)
 }
 
 /** 包一层：成功即通知变更；失败原样回错误信息。 */
@@ -148,6 +157,36 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     (_event, loginId?: string): IdcIpcResult<null> => {
       cancelCursorOAuthLogin(typeof loginId === 'string' ? loginId : undefined)
       return { success: true, data: null }
+    }
+  )
+
+  ipcMain.handle(
+    CURSOR_ACCOUNTS_CHANNEL.settingsGet,
+    async (): Promise<IdcIpcResult<CursorAutoRefreshSettings>> => {
+      try {
+        return { success: true, data: await loadCursorAutoRefreshSettings() }
+      } catch (error) {
+        return toError(error)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    CURSOR_ACCOUNTS_CHANNEL.settingsUpdate,
+    async (
+      _event,
+      patch: Partial<CursorAutoRefreshSettings>
+    ): Promise<IdcIpcResult<CursorAutoRefreshSettings>> => {
+      try {
+        const before = await loadCursorAutoRefreshSettings()
+        const settings = await updateCursorAutoRefreshSettings(
+          patch && typeof patch === 'object' ? patch : {}
+        )
+        await deps.getScheduler().applySettings(settings, settings.enabled && !before.enabled)
+        return { success: true, data: settings }
+      } catch (error) {
+        return toError(error)
+      }
     }
   )
 

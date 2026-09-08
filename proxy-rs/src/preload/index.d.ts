@@ -33,6 +33,7 @@ import type {
 } from '../shared/localAdminStats'
 import type {
   CursorAccount,
+  CursorAutoRefreshSettings,
   CursorInjectOptions,
   CursorInjectResult,
   CursorOAuthStartResult,
@@ -999,6 +1000,10 @@ interface KiroApi {
   cursorAccountsOAuthComplete: (loginId: string) => Promise<IdcIpcResult<CursorAccount>>
   cursorAccountsOAuthCancel: (loginId?: string) => Promise<IdcIpcResult<null>>
   cursorAccountsRevealStore: () => Promise<IdcIpcResult<string>>
+  cursorAccountsGetSettings: () => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
+  cursorAccountsUpdateSettings: (
+    patch: Partial<CursorAutoRefreshSettings>
+  ) => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
   onCursorAccountsChanged: (callback: () => void) => () => void
 }
 

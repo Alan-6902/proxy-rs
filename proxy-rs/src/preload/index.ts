@@ -35,6 +35,7 @@ import type {
 import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
+  type CursorAutoRefreshSettings,
   type CursorInjectOptions,
   type CursorInjectResult,
   type CursorOAuthStartResult,
@@ -1356,6 +1357,15 @@ const api = {
 
   cursorAccountsRevealStore: (): Promise<IdcIpcResult<string>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.storePath),
+
+  cursorAccountsGetSettings: (): Promise<IdcIpcResult<CursorAutoRefreshSettings>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsGet),
+
+  /** 改后台自动刷新的开关/间隔，主进程调度器随即按新设置重排。 */
+  cursorAccountsUpdateSettings: (
+    patch: Partial<CursorAutoRefreshSettings>
+  ): Promise<IdcIpcResult<CursorAutoRefreshSettings>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsUpdate, patch),
 
   onCursorAccountsChanged: (callback: () => void): (() => void) => {
     const handler = (): void => callback()

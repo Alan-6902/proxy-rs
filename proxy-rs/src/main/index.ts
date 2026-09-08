@@ -108,7 +108,11 @@ import {
 import { updateKskHunterConfig } from './kskHunter/configStore'
 import { DownstreamSettlementManager } from './downstreamSettlement/settlementManager'
 import { registerDownstreamSettlementIpcHandlers } from './downstreamSettlement/ipc-handlers'
-import { registerCursorAccountsIpcHandlers } from './cursorAccounts/ipc-handlers'
+import {
+  registerCursorAccountsIpcHandlers,
+  sendCursorAccountsChanged
+} from './cursorAccounts/ipc-handlers'
+import { CursorAutoRefreshScheduler } from './cursorAccounts/refreshScheduler'
 import type { DownstreamLedgerUsage } from '../shared/downstreamSettlement'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
@@ -3372,7 +3376,16 @@ app.whenReady().then(async () => {
   })
 
   // ============ Cursor 账号管理（多账号、切号、用量）IPC ============
-  registerCursorAccountsIpcHandlers({ getMainWindow: () => mainWindow })
+  const cursorAutoRefreshScheduler = new CursorAutoRefreshScheduler({
+    onRefreshed: () => sendCursorAccountsChanged(() => mainWindow)
+  })
+  registerCursorAccountsIpcHandlers({
+    getMainWindow: () => mainWindow,
+    getScheduler: () => cursorAutoRefreshScheduler
+  })
+  void cursorAutoRefreshScheduler.start().catch((err) => {
+    console.warn('[CursorAutoRefresh] Failed to start:', err)
+  })
 
   // ============ 托盘相关 IPC ============
 

@@ -21,8 +21,23 @@ export const CURSOR_ACCOUNTS_CHANNEL = {
   oauthComplete: 'cursor-accounts-oauth-complete',
   oauthCancel: 'cursor-accounts-oauth-cancel',
   storePath: 'cursor-accounts-store-path',
+  settingsGet: 'cursor-accounts-settings-get',
+  settingsUpdate: 'cursor-accounts-settings-update',
   changed: 'cursor-accounts-changed'
 } as const
+
+/** 后台自动刷新的间隔可选值（分钟）。刷新一个号要打 6 条接口，不给更短的档。 */
+export const CURSOR_AUTO_REFRESH_INTERVAL_OPTIONS: readonly number[] = [5, 10, 15, 30, 60]
+
+export interface CursorAutoRefreshSettings {
+  enabled: boolean
+  intervalMinutes: number
+}
+
+export const CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS: CursorAutoRefreshSettings = {
+  enabled: true,
+  intervalMinutes: 10
+}
 
 export interface CursorAccount {
   id: string

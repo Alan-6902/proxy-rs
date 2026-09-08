@@ -103,7 +103,10 @@ export function CursorAccountCard({
       ? `${formatCursorUsageDollars(includedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
       : undefined
   const hasBonus = usage.bonusSpendCents != null && usage.bonusSpendCents > 0
-  const hasCredit = account.creditBalanceCents != null && account.creditBalanceCents > 0
+  // 与 xbar 一致：查到余额就显示（含 $0.00）；没查过或查失败才不占行
+  const creditCents = account.creditBalanceCents
+  const creditKnown = creditCents != null
+  const creditPositive = creditCents != null && creditCents > 0
 
   const onDemandText = onDemand.isDisabled
     ? onDemand.usedCents > 0
@@ -228,11 +231,17 @@ export function CursorAccountCard({
           />
         )}
 
-        {/* 预付 credit 余额：多数账号是 0，只在有余额时占一行 */}
-        {hasCredit && (
+        {creditKnown && (
           <div className="flex items-center justify-between text-xs">
             <span className="text-muted-foreground">Credit 余额</span>
-            <span className="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+            <span
+              className={cn(
+                'tabular-nums',
+                creditPositive
+                  ? 'font-medium text-emerald-600 dark:text-emerald-400'
+                  : 'text-muted-foreground'
+              )}
+            >
               {formatCursorUsageDollars(account.creditBalanceCents)}
             </span>
           </div>

@@ -25,9 +25,12 @@ import {
   exportCursorAccountsJson,
   findCursorAccountByIdentity,
   loadCursorAccounts,
+  loadCursorAutoRefreshSettings,
+  normalizeCursorAutoRefreshSettings,
   parseCursorImportJson,
   removeCursorAccounts,
   updateCursorAccountTags,
+  updateCursorAutoRefreshSettings,
   upsertCursorAccount,
   upsertCursorAccounts
 } from '../../src/main/cursorAccounts/accountStore'
@@ -184,6 +187,32 @@ describe('Cursor 账号加密存储', () => {
       '拒绝用空数据覆盖'
     )
     expect(readFileSync(cursorAccountsStorePath(), 'utf-8')).toBe('not json')
+  })
+
+  it('自动刷新设置与账号同文件持久化，互不覆盖', async () => {
+    expect(await loadCursorAutoRefreshSettings()).toEqual({ enabled: true, intervalMinutes: 10 })
+    await upsertCursorAccount({ email: 'a@example.com', accessToken: fakeJwt('auth0|user_A') })
+    await updateCursorAutoRefreshSettings({ intervalMinutes: 30 })
+    await updateCursorAutoRefreshSettings({ enabled: false })
+    await upsertCursorAccount({ email: 'b@example.com', accessToken: fakeJwt('auth0|user_B') })
+
+    expect(await loadCursorAutoRefreshSettings()).toEqual({ enabled: false, intervalMinutes: 30 })
+    expect(await loadCursorAccounts()).toHaveLength(2)
+  })
+
+  it('设置归一化：非法间隔回落默认，缺字段用默认', () => {
+    expect(normalizeCursorAutoRefreshSettings(undefined)).toEqual({
+      enabled: true,
+      intervalMinutes: 10
+    })
+    expect(normalizeCursorAutoRefreshSettings({ enabled: false, intervalMinutes: 7 })).toEqual({
+      enabled: false,
+      intervalMinutes: 10
+    })
+    expect(normalizeCursorAutoRefreshSettings({ intervalMinutes: '60' })).toEqual({
+      enabled: true,
+      intervalMinutes: 60
+    })
   })
 
   it('系统加密不可用时读到空列表、写入被拒绝', async () => {

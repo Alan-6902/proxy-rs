@@ -12,7 +12,12 @@ import { app, safeStorage } from 'electron'
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { CursorAccount } from '../../shared/cursorAccounts'
+import {
+  CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS,
+  CURSOR_AUTO_REFRESH_INTERVAL_OPTIONS,
+  type CursorAccount,
+  type CursorAutoRefreshSettings
+} from '../../shared/cursorAccounts'
 import { extractAuthIdFromAccessToken } from './cursorApi'
 
 const STORE_FILE = 'cursor-accounts.json'
@@ -20,9 +25,16 @@ const STORE_VERSION = 1
 /** 小于这个值的时间戳按秒处理（cockpit-tools 导出的 created_at / last_used 是秒）。 */
 const SECONDS_TIMESTAMP_UPPER_BOUND = 1e11
 
+/** 落盘格式。settings 与账号放同一个文件：只有一处要加密、一处要排队。 */
 interface PersistedCursorAccountStore {
   version: number
   accounts: CursorAccount[]
+  settings?: CursorAutoRefreshSettings
+}
+
+interface CursorStoreState {
+  accounts: CursorAccount[]
+  settings: CursorAutoRefreshSettings
 }
 
 export interface CursorImportPayload {
@@ -158,35 +170,69 @@ export function normalizeCursorAccountStorePayload(
   return accounts
 }
 
+/** 间隔只接受预设档位，非法值回落到默认；老文件没有 settings 时整体用默认。 */
+export function normalizeCursorAutoRefreshSettings(value: unknown): CursorAutoRefreshSettings {
+  const record = readObject(value)
+  if (!record) return { ...CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS }
+  const interval = Number(record.intervalMinutes)
+  return {
+    enabled:
+      typeof record.enabled === 'boolean'
+        ? record.enabled
+        : CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS.enabled,
+    intervalMinutes: CURSOR_AUTO_REFRESH_INTERVAL_OPTIONS.includes(interval)
+      ? interval
+      : CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS.intervalMinutes
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
-export async function loadCursorAccounts(): Promise<CursorAccount[]> {
-  if (!isCursorAccountStoreAvailable()) return []
+function emptyState(): CursorStoreState {
+  return { accounts: [], settings: { ...CURSOR_AUTO_REFRESH_DEFAULT_SETTINGS } }
+}
+
+async function loadStore(): Promise<CursorStoreState> {
+  if (!isCursorAccountStoreAvailable()) return emptyState()
   try {
     const encrypted = await fs.readFile(cursorAccountsStorePath())
-    return normalizeCursorAccountStorePayload(JSON.parse(safeStorage.decryptString(encrypted)))
+    const payload: unknown = JSON.parse(safeStorage.decryptString(encrypted))
+    return {
+      accounts: normalizeCursorAccountStorePayload(payload),
+      settings: normalizeCursorAutoRefreshSettings(readObject(payload)?.settings)
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState()
     throw new Error('Cursor 账号库无法解密或已损坏，已拒绝用空数据覆盖原文件')
   }
 }
 
-async function saveCursorAccounts(accounts: CursorAccount[]): Promise<void> {
+export async function loadCursorAccounts(): Promise<CursorAccount[]> {
+  return (await loadStore()).accounts
+}
+
+export async function loadCursorAutoRefreshSettings(): Promise<CursorAutoRefreshSettings> {
+  return (await loadStore()).settings
+}
+
+async function saveStore(state: CursorStoreState): Promise<void> {
   if (!isCursorAccountStoreAvailable()) {
     throw new Error('系统加密存储不可用，拒绝明文保存 Cursor 账号 token')
   }
-  const payload: PersistedCursorAccountStore = { version: STORE_VERSION, accounts }
+  const payload: PersistedCursorAccountStore = {
+    version: STORE_VERSION,
+    accounts: state.accounts,
+    settings: state.settings
+  }
   const path = cursorAccountsStorePath()
   await fs.mkdir(dirname(path), { recursive: true })
   await fs.writeFile(path, safeStorage.encryptString(JSON.stringify(payload)), { mode: 0o600 })
 }
 
-/** 读-改-写排队执行；mutate 原地修改数组，返回值透传给调用方。 */
-export function mutateCursorAccounts<T>(
-  mutate: (accounts: CursorAccount[]) => T | Promise<T>
-): Promise<T> {
+/** 读-改-写排队执行；mutate 原地修改状态，返回值透传给调用方。 */
+function mutateStore<T>(mutate: (state: CursorStoreState) => T | Promise<T>): Promise<T> {
   let resolveResult: (value: T | PromiseLike<T>) => void
   let rejectResult: (reason?: unknown) => void
   const result = new Promise<T>((resolve, reject) => {
@@ -195,15 +241,30 @@ export function mutateCursorAccounts<T>(
   })
   mutationQueue = mutationQueue
     .then(async () => {
-      const accounts = await loadCursorAccounts()
-      const value = await mutate(accounts)
-      await saveCursorAccounts(accounts)
+      const state = await loadStore()
+      const value = await mutate(state)
+      await saveStore(state)
       resolveResult(value)
     })
     .catch((error) => {
       rejectResult(error)
     })
   return result
+}
+
+export function mutateCursorAccounts<T>(
+  mutate: (accounts: CursorAccount[]) => T | Promise<T>
+): Promise<T> {
+  return mutateStore((state) => mutate(state.accounts))
+}
+
+export function updateCursorAutoRefreshSettings(
+  patch: Partial<CursorAutoRefreshSettings>
+): Promise<CursorAutoRefreshSettings> {
+  return mutateStore((state) => {
+    state.settings = normalizeCursorAutoRefreshSettings({ ...state.settings, ...patch })
+    return state.settings
+  })
 }
 
 // ---------------------------------------------------------------------------

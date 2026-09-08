@@ -333,6 +333,9 @@ export function resolveMembershipFromStripeProfile(
   return membership ?? individual
 }
 
+const SIGN_UP_TYPE_PREFIX = 'SIGN_UP_TYPE_'
+
+/** 已知枚举保留官方写法，其余（如 GROK）去前缀后首字母大写，避免界面上出现原始枚举名。 */
 export function normalizeCursorSignUpType(value: string | undefined): string | undefined {
   const raw = readNonEmpty(value)
   if (!raw) return undefined
@@ -345,7 +348,10 @@ export function normalizeCursorSignUpType(value: string | undefined): string | u
       return 'Github'
     case 'SIGN_UP_TYPE_WORKOS':
       return 'WorkOS'
-    default:
-      return raw
+    default: {
+      if (!raw.startsWith(SIGN_UP_TYPE_PREFIX)) return raw
+      const rest = raw.slice(SIGN_UP_TYPE_PREFIX.length).toLowerCase()
+      return rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : raw
+    }
   }
 }

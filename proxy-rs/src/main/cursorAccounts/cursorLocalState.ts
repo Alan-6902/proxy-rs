@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { CursorAccount } from '../../shared/cursorAccounts'
 import type { CursorImportPayload } from './accountStore'
-import { extractAuthIdFromAccessToken } from './cursorApi'
+import { extractAuthIdFromAccessToken, normalizeCursorSignUpType } from './cursorApi'
 
 const execFileAsync = promisify(execFile)
 
@@ -38,8 +38,14 @@ export const CURSOR_STATE_KEY = {
 /** 优雅退出后最多等这么久，超时再强杀。 */
 const CURSOR_QUIT_TIMEOUT_MS = 15_000
 const CURSOR_QUIT_POLL_INTERVAL_MS = 300
-/** macOS 主进程的可执行文件路径尾巴；pgrep -x 按进程名匹配不到 app bundle 里的进程。 */
-const MACOS_CURSOR_PROCESS_PATTERN = '/Cursor\\.app/Contents/MacOS/Cursor$'
+/**
+ * macOS 主进程可执行文件路径的尾巴。不用 pgrep：macOS 的 pgrep 读不到受保护进程的参数时会整个
+ * 跳过该进程，实测 Cursor 主进程对 `pgrep -f` 甚至 `pgrep Cursor` 都不可见，只有 ps 能列出来。
+ * Helper 进程的路径在 Frameworks 下，不会误中。
+ */
+const MACOS_CURSOR_EXECUTABLE_SUFFIX = '/Cursor.app/Contents/MacOS/Cursor'
+/** Linux 下 comm 是截断后的进程名，主进程与子进程同名，按名字全匹配即可。 */
+const LINUX_CURSOR_PROCESS_NAMES = new Set(['cursor', 'Cursor'])
 
 function loadSqlite(): SqliteModule {
   const mod = process.getBuiltinModule('node:sqlite') as SqliteModule | undefined
@@ -114,7 +120,7 @@ export function readLocalCursorAuth(dbPath = getCursorStateDbPath()): CursorImpo
   const authId = items.get(CURSOR_STATE_KEY.authId) ?? extractAuthIdFromAccessToken(accessToken)
   const membershipType = items.get(CURSOR_STATE_KEY.membershipType)
   const subscriptionStatus = items.get(CURSOR_STATE_KEY.subscriptionStatus)
-  const signUpType = items.get(CURSOR_STATE_KEY.signUpType)
+  const signUpType = normalizeCursorSignUpType(items.get(CURSOR_STATE_KEY.signUpType))
 
   const authRaw: Record<string, unknown> = { accessToken, cachedEmail: email }
   if (refreshToken) authRaw.refreshToken = refreshToken
@@ -176,28 +182,30 @@ export function writeLocalCursorAuth(
 // Cursor process control
 // ---------------------------------------------------------------------------
 
-function parsePids(output: string): number[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => Number.parseInt(line.trim(), 10))
-    .filter((pid) => Number.isInteger(pid) && pid > 0)
+interface ProcessEntry {
+  pid: number
+  command: string
 }
 
-/** pgrep 没匹配到时退出码是 1，这不是错误。 */
-async function pgrep(args: string[]): Promise<number[]> {
-  try {
-    const { stdout } = await execFileAsync('pgrep', args)
-    return parsePids(stdout)
-  } catch (error) {
-    if ((error as { code?: unknown }).code === 1) return []
-    throw error
+/** `ps -axo pid=,comm=`：每行「pid 可执行文件」，macOS 的 comm 是完整路径，Linux 是短名。 */
+async function listUnixProcesses(): Promise<ProcessEntry[]> {
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,comm='])
+  const entries: ProcessEntry[] = []
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/)
+    if (!match) continue
+    const pid = Number.parseInt(match[1], 10)
+    if (Number.isInteger(pid) && pid > 0) entries.push({ pid, command: match[2].trim() })
   }
+  return entries
 }
 
 export async function findCursorPids(): Promise<number[]> {
   switch (process.platform) {
     case 'darwin':
-      return pgrep(['-f', MACOS_CURSOR_PROCESS_PATTERN])
+      return (await listUnixProcesses())
+        .filter((entry) => entry.command.endsWith(MACOS_CURSOR_EXECUTABLE_SUFFIX))
+        .map((entry) => entry.pid)
     case 'win32': {
       const { stdout } = await execFileAsync('tasklist', [
         '/FI',
@@ -213,10 +221,10 @@ export async function findCursorPids(): Promise<number[]> {
         .map((pid) => (pid ? Number.parseInt(pid, 10) : Number.NaN))
         .filter((pid) => Number.isInteger(pid) && pid > 0)
     }
-    case 'linux': {
-      const [lower, upper] = await Promise.all([pgrep(['-x', 'cursor']), pgrep(['-x', 'Cursor'])])
-      return Array.from(new Set([...lower, ...upper]))
-    }
+    case 'linux':
+      return (await listUnixProcesses())
+        .filter((entry) => LINUX_CURSOR_PROCESS_NAMES.has(entry.command))
+        .map((entry) => entry.pid)
     default:
       return []
   }
@@ -226,20 +234,27 @@ export async function isCursorRunning(): Promise<boolean> {
   return (await findCursorPids()).length > 0
 }
 
-async function requestGracefulQuit(): Promise<void> {
+function signalAll(pids: number[], signal: NodeJS.Signals): void {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal)
+    } catch {
+      // 进程可能已经自己退了
+    }
+  }
+}
+
+async function requestGracefulQuit(pids: number[]): Promise<void> {
   switch (process.platform) {
     case 'darwin':
+      // AppleScript quit 走应用自己的退出流程，能触发 Cursor 保存窗口与工作区状态
       await execFileAsync('osascript', ['-e', 'tell application "Cursor" to quit'])
       return
     case 'win32':
       await execFileAsync('taskkill', ['/IM', 'Cursor.exe']).catch(() => undefined)
       return
-    case 'linux':
-      await execFileAsync('pkill', ['-x', 'cursor']).catch(() => undefined)
-      await execFileAsync('pkill', ['-x', 'Cursor']).catch(() => undefined)
-      return
     default:
-      return
+      signalAll(pids, 'SIGTERM')
   }
 }
 
@@ -248,13 +263,7 @@ async function forceKill(pids: number[]): Promise<void> {
     await execFileAsync('taskkill', ['/F', '/IM', 'Cursor.exe']).catch(() => undefined)
     return
   }
-  for (const pid of pids) {
-    try {
-      process.kill(pid, 'SIGKILL')
-    } catch {
-      // 进程可能已经自己退了
-    }
-  }
+  signalAll(pids, 'SIGKILL')
 }
 
 function sleep(ms: number): Promise<void> {
@@ -263,8 +272,9 @@ function sleep(ms: number): Promise<void> {
 
 /** 先请 Cursor 自己退（能触发它保存状态），超时再强杀；返回时保证没有 Cursor 主进程。 */
 export async function quitCursor(timeoutMs = CURSOR_QUIT_TIMEOUT_MS): Promise<void> {
-  if (!(await isCursorRunning())) return
-  await requestGracefulQuit()
+  const pids = await findCursorPids()
+  if (pids.length === 0) return
+  await requestGracefulQuit(pids)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     await sleep(CURSOR_QUIT_POLL_INTERVAL_MS)

@@ -165,6 +165,7 @@ describe('Cursor JWT 工具', () => {
     ).toBe('enterprise')
     expect(resolveMembershipFromStripeProfile({ individualMembershipType: 'free' })).toBe('free')
     expect(normalizeCursorSignUpType('SIGN_UP_TYPE_GITHUB')).toBe('Github')
+    expect(normalizeCursorSignUpType('SIGN_UP_TYPE_GROK')).toBe('Grok')
     expect(normalizeCursorSignUpType('other')).toBe('other')
   })
 })

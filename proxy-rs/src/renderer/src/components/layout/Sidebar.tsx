@@ -17,7 +17,8 @@ import {
   ChartLine,
   BookOpenCheck,
   Handshake,
-  MousePointer2
+  MousePointer2,
+  Bot
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -29,6 +30,7 @@ export type PageType =
   | 'home'
   | 'accounts'
   | 'cursor'
+  | 'grok'
   | 'tasks'
   | 'hunter'
   | 'kskLedger'
@@ -54,6 +56,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
   { id: 'cursor', labelKey: 'nav.cursor', icon: MousePointer2 },
+  { id: 'grok', labelKey: 'nav.grok', icon: Bot },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'hunter', labelKey: 'nav.hunter', icon: Crosshair },
   { id: 'kskLedger', labelKey: 'nav.kskLedger', icon: BookOpenCheck },

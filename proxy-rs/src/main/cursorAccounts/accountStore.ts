@@ -421,6 +421,15 @@ export function upsertCursorAccounts(payloads: CursorImportPayload[]): Promise<C
   })
 }
 
+/**
+ * 新增入口给「本次添加要打的标签」：并进 payload，落库时 upsertInto 会与已有标签去重合并。
+ * tags 为空时原样返回，不制造无谓的拷贝。
+ */
+export function withTags(payload: CursorImportPayload, tags: string[]): CursorImportPayload {
+  if (tags.length === 0) return payload
+  return { ...payload, tags: [...(payload.tags ?? []), ...tags] }
+}
+
 /** 刷新后的整条账号写回；账号已被删掉时不复活它。 */
 export function replaceCursorAccount(account: CursorAccount): Promise<CursorAccount> {
   return mutateCursorAccounts((accounts) => {

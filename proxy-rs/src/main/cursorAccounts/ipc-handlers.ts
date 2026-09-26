@@ -56,6 +56,11 @@ function notifyChanged(deps: CursorAccountsIpcDeps): void {
   sendCursorAccountsChanged(deps.getMainWindow)
 }
 
+/** 渲染层传来的标签列表只保证是数组；去空、去重在账号库的 readTags 里统一做。 */
+function readTagsArg(tags: unknown): string[] {
+  return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : []
+}
+
 /** 包一层：成功即通知变更；失败原样回错误信息。 */
 function mutating<T>(
   deps: CursorAccountsIpcDeps,
@@ -96,24 +101,26 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     mutating(deps, () => removeCursorAccounts(Array.isArray(ids) ? ids : []))()
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.importJson, (_event, json: string) =>
-    mutating(deps, () => importCursorAccountsFromJson(String(json ?? '')))()
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.importJson, (_event, json: string, tags?: unknown) =>
+    mutating(deps, () => importCursorAccountsFromJson(String(json ?? ''), readTagsArg(tags)))()
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.importLocal, () =>
-    mutating(deps, () => importCursorAccountFromLocal())()
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.importLocal, (_event, tags?: unknown) =>
+    mutating(deps, () => importCursorAccountFromLocal(readTagsArg(tags)))()
   )
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.importCockpit,
-    (): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
-      mutating(deps, () => importCursorAccountsFromCockpitTools())()
+    (_event, tags?: unknown): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+      mutating(deps, () => importCursorAccountsFromCockpitTools(readTagsArg(tags)))()
   )
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.addToken,
-    (_event, input: string): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
-      mutating(deps, () => addCursorAccountsFromCredentials(String(input ?? '')))()
+    (_event, input: string, tags?: unknown): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+      mutating(deps, () =>
+        addCursorAccountsFromCredentials(String(input ?? ''), readTagsArg(tags))
+      )()
   )
 
   ipcMain.handle(
@@ -137,8 +144,8 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
       mutating(deps, () => refreshAllCursorAccounts())()
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.updateTags, (_event, id: string, tags: string[]) =>
-    mutating(deps, () => updateCursorAccountTags(String(id), Array.isArray(tags) ? tags : []))()
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.updateTags, (_event, id: string, tags: unknown) =>
+    mutating(deps, () => updateCursorAccountTags(String(id), readTagsArg(tags)))()
   )
 
   ipcMain.handle(
@@ -159,8 +166,8 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     }
   })
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, (_event, loginId: string) =>
-    mutating(deps, () => finishCursorOAuthLogin(String(loginId)))()
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, (_event, loginId: string, tags?: unknown) =>
+    mutating(deps, () => finishCursorOAuthLogin(String(loginId), readTagsArg(tags)))()
   )
 
   ipcMain.handle(

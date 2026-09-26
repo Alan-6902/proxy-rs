@@ -112,6 +112,7 @@ import {
   registerCursorAccountsIpcHandlers,
   sendCursorAccountsChanged
 } from './cursorAccounts/ipc-handlers'
+import { registerGrokAccountsIpcHandlers } from './grokAccounts/ipc-handlers'
 import { CursorAutoRefreshScheduler } from './cursorAccounts/refreshScheduler'
 import type { DownstreamLedgerUsage } from '../shared/downstreamSettlement'
 import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
@@ -3385,6 +3386,11 @@ app.whenReady().then(async () => {
   })
   void cursorAutoRefreshScheduler.start().catch((err) => {
     console.warn('[CursorAutoRefresh] Failed to start:', err)
+  })
+
+  // ============ Grok Bot 账号管理（切号 + 同步 relay）IPC ============
+  registerGrokAccountsIpcHandlers({
+    getMainWindow: () => mainWindow
   })
 
   // ============ 托盘相关 IPC ============

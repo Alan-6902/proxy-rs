@@ -438,6 +438,58 @@ describe('Cursor state.vscdb 读写', () => {
     expect(legacy.value).toBe('switch@example.com')
   })
 
+  function createStateDb(path: string): typeof import('node:sqlite') {
+    const sqlite = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite')
+    const db = new sqlite.DatabaseSync(path)
+    db.exec('CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)')
+    db.close()
+    return sqlite
+  }
+
+  it('切号会覆盖上一个号残留的 authId，新号没有的字段会被删掉', () => {
+    const switchDb = join(dir, 'switch.vscdb')
+    const sqlite = createStateDb(switchDb)
+
+    writeLocalCursorAuth(
+      account({
+        email: 'old@example.com',
+        accessToken: fakeJwt({ sub: 'auth0|user_OLD', exp: 9999999999 }),
+        refreshToken: 'rt-old'
+      }),
+      switchDb
+    )
+    writeLocalCursorAuth(
+      account({
+        email: 'new@example.com',
+        accessToken: fakeJwt({ sub: 'auth0|user_NEW', exp: 9999999999 })
+      }),
+      switchDb
+    )
+
+    const verify = new sqlite.DatabaseSync(switchDb, { readOnly: true })
+    const row = verify.prepare('SELECT value FROM ItemTable WHERE key = ?')
+    expect((row.get(CURSOR_STATE_KEY.authId) as { value: string }).value).toBe('auth0|user_NEW')
+    expect(row.get(CURSOR_STATE_KEY.refreshToken)).toBeUndefined()
+    verify.close()
+
+    const payload = readLocalCursorAuth(switchDb)
+    expect(payload).toMatchObject({ email: 'new@example.com', authId: 'auth0|user_NEW' })
+    expect(payload?.refreshToken).toBeUndefined()
+  })
+
+  it('库里残留别的号的 authId 时，仍以当前 accessToken 里的身份为准', () => {
+    const staleDb = join(dir, 'stale.vscdb')
+    const sqlite = createStateDb(staleDb)
+    const db = new sqlite.DatabaseSync(staleDb)
+    const insert = db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)')
+    insert.run(CURSOR_STATE_KEY.accessToken, fakeJwt({ sub: 'auth0|user_NEW', exp: 9999999999 }))
+    insert.run(CURSOR_STATE_KEY.cachedEmail, 'new@example.com')
+    insert.run(CURSOR_STATE_KEY.authId, 'auth0|user_OLD')
+    db.close()
+
+    expect(readLocalCursorAuth(staleDb)?.authId).toBe('auth0|user_NEW')
+  })
+
   it('数据库文件不存在时读返回 null、写直接报错', () => {
     const missing = join(dir, 'missing.vscdb')
     expect(readLocalCursorAuth(missing)).toBeNull()

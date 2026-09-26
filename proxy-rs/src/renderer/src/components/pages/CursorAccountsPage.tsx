@@ -535,7 +535,8 @@ export function CursorAccountsPage(): React.ReactNode {
             )}
           </div>
         ) : (
-          <div className="grid items-start gap-4 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
+          // 不设 items-start：同一行卡片等高、底栏对齐；stagger-children 让卡片错峰落位
+          <div className="stagger-children grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
             {visible.map((account) => (
               <CursorAccountCard
                 key={account.id}
@@ -558,6 +559,7 @@ export function CursorAccountsPage(): React.ReactNode {
 
       <CursorAddAccountDialog
         open={addOpen}
+        knownTags={knownTags}
         onClose={() => setAddOpen(false)}
         onAdded={(_added, message, warning) => {
           setNotice(message)
@@ -568,7 +570,11 @@ export function CursorAccountsPage(): React.ReactNode {
         account={tagTarget}
         knownTags={knownTags}
         onClose={() => setTagTarget(null)}
-        onSaved={(account) => setNotice(`已更新 ${getCursorAccountDisplayEmail(account)} 的标签`)}
+        onSaved={(account) => {
+          // 主进程返回的就是落盘后的账号，直接写回列表，不用等 changed 事件重拉
+          setAccounts((prev) => prev.map((item) => (item.id === account.id ? account : item)))
+          setNotice(`已更新 ${getCursorAccountDisplayEmail(account)} 的标签`)
+        }}
       />
       <CursorExportDialog
         ids={exportIds}

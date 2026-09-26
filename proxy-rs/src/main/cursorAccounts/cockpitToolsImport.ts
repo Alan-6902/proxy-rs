@@ -15,6 +15,7 @@ import type { CursorCockpitImportSummary } from '../../shared/cursorAccounts'
 import {
   cursorImportPayloadFromRecord,
   upsertCursorAccounts,
+  withTags,
   type CursorImportPayload
 } from './accountStore'
 
@@ -159,10 +160,15 @@ export async function readCockpitToolsCursorAccounts(
 }
 
 /** 整批导入并按身份去重合并进本地账号库；单个号解不开只跳过它。 */
-export async function importCursorAccountsFromCockpitTools(): Promise<CockpitToolsImportSummary> {
+export async function importCursorAccountsFromCockpitTools(
+  tags: string[] = []
+): Promise<CockpitToolsImportSummary> {
   const sourceDir = cockpitToolsDataDir()
   const { payloads, skipped } = await readCockpitToolsCursorAccounts(sourceDir)
-  const imported = payloads.length > 0 ? await upsertCursorAccounts(payloads) : []
+  const imported =
+    payloads.length > 0
+      ? await upsertCursorAccounts(payloads.map((payload) => withTags(payload, tags)))
+      : []
   console.log(
     `[CockpitImport] 导入完成: ${imported.length} 个账号, 跳过 ${skipped.length} 个, 来源 ${sourceDir}`
   )

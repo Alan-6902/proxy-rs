@@ -45,6 +45,7 @@ const zh = {
     home: '主页',
     accounts: '账户管理',
     cursor: 'Cursor 账号',
+    grok: 'Grok 账号',
     tasks: '任务管理',
     hunter: '抢号监控',
     kskLedger: '抢号台账',

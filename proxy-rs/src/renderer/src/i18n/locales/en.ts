@@ -45,6 +45,7 @@ const en = {
     home: 'Home',
     accounts: 'Accounts',
     cursor: 'Cursor Accounts',
+    grok: 'Grok Accounts',
     tasks: 'Tasks',
     hunter: 'KSK Hunter',
     kskLedger: 'KSK Ledger',

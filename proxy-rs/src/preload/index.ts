@@ -43,6 +43,15 @@ import {
   type CursorOAuthStartResult,
   type CursorRefreshAllSummary
 } from '../shared/cursorAccounts'
+import {
+  GROK_ACCOUNTS_CHANNEL,
+  type GrokAccountView,
+  type GrokRelayInstallProgress,
+  type GrokRelayInstallResult,
+  type GrokRelayStatus,
+  type GrokRemoveResult,
+  type GrokSwitchResult
+} from '../shared/grokAccounts'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -1319,22 +1328,32 @@ const api = {
   cursorAccountsRemove: (ids: string[]): Promise<IdcIpcResult<void>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.remove, ids),
 
-  cursorAccountsImportJson: (json: string): Promise<IdcIpcResult<CursorAccount[]>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importJson, json),
+  // 下面几个新增入口的 tags 是「本次添加要打的标签」，入库时一并写上，不用再单独改一次
 
-  cursorAccountsImportLocal: (): Promise<IdcIpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal),
+  cursorAccountsImportJson: (
+    json: string,
+    tags: string[] = []
+  ): Promise<IdcIpcResult<CursorAccount[]>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importJson, json, tags),
+
+  cursorAccountsImportLocal: (tags: string[] = []): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal, tags),
 
   /** 从本机 cockpit-tools（~/.antigravity_cockpit）整批导入 Cursor 账号。 */
-  cursorAccountsImportCockpit: (): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importCockpit),
+  cursorAccountsImportCockpit: (
+    tags: string[] = []
+  ): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importCockpit, tags),
 
   /**
    * 粘贴 WorkosCursorSessionToken cookie 值或 access token（每行一条）批量入库。
    * 主进程会替用户走完 Cursor 登录握手，拿到带 refresh token 的正式凭据。
    */
-  cursorAccountsAddToken: (input: string): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, input),
+  cursorAccountsAddToken: (
+    input: string,
+    tags: string[] = []
+  ): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, input, tags),
 
   cursorAccountsExport: (ids: string[]): Promise<IdcIpcResult<string>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.export, ids),
@@ -1359,8 +1378,11 @@ const api = {
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthStart),
 
   /** 阻塞到用户在浏览器完成登录（最长 5 分钟），成功即返回入库后的账号。 */
-  cursorAccountsOAuthComplete: (loginId: string): Promise<IdcIpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, loginId),
+  cursorAccountsOAuthComplete: (
+    loginId: string,
+    tags: string[] = []
+  ): Promise<IdcIpcResult<CursorAccount>> =>
+    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, loginId, tags),
 
   cursorAccountsOAuthCancel: (loginId?: string): Promise<IdcIpcResult<null>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthCancel, loginId),
@@ -1381,6 +1403,55 @@ const api = {
     const handler = (): void => callback()
     ipcRenderer.on(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
     return () => ipcRenderer.removeListener(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
+  },
+
+  // ============ Grok Bot 账号管理（切号 + 同步 relay） ============
+  grokAccountsList: (): Promise<IdcIpcResult<GrokAccountView[]>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.list),
+
+  /** 本机 Grok Bot 当前激活账号的 scope；未登录为 null。 */
+  grokAccountsCurrentScope: (): Promise<IdcIpcResult<string | null>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.currentScope),
+
+  /** 切号：（不在 Grok 里就先从 Cursor 账号库写入）改 active + 重启 Grok + 同步 relay。Grok 在运行时先返回 needsClose 等确认。 */
+  grokAccountsSwitch: (
+    scope: string,
+    options?: { closeGrok?: boolean }
+  ): Promise<IdcIpcResult<GrokSwitchResult>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.switch, scope, options),
+
+  /** 从 Grok 客户端移除一个号（Cursor 账号库不动）。Grok 在运行时先返回 needsClose 等确认。 */
+  grokAccountsRemove: (
+    scope: string,
+    options?: { closeGrok?: boolean }
+  ): Promise<IdcIpcResult<GrokRemoveResult>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.remove, scope, options),
+
+  /** 只把反代 relay 配置重新指向某个号的 box 并探活，不重启客户端。 */
+  grokAccountsSyncRelay: (scope: string): Promise<IdcIpcResult<GrokRelayStatus>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.syncRelay, scope),
+
+  /** 探活：本机反代当前能否通过 relay 打到 box。 */
+  grokAccountsRelayStatus: (): Promise<IdcIpcResult<GrokRelayStatus>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.relayStatus),
+
+  /** 确保某个号的 Box 上有 relay 路由：没装就让它的 Bot 去装并等到探针通过。可能跑几分钟，进度走下面的事件。 */
+  grokAccountsEnsureRelayRoute: (scope: string): Promise<IdcIpcResult<GrokRelayInstallResult>> =>
+    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.ensureRelayRoute, scope),
+
+  onGrokRelayInstallProgress: (
+    callback: (progress: GrokRelayInstallProgress) => void
+  ): (() => void) => {
+    const handler = (_event: unknown, progress: GrokRelayInstallProgress): void =>
+      callback(progress)
+    ipcRenderer.on(GROK_ACCOUNTS_CHANNEL.relayInstallProgress, handler)
+    return () => ipcRenderer.removeListener(GROK_ACCOUNTS_CHANNEL.relayInstallProgress, handler)
+  },
+
+  onGrokAccountsChanged: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(GROK_ACCOUNTS_CHANNEL.changed, handler)
+    return () => ipcRenderer.removeListener(GROK_ACCOUNTS_CHANNEL.changed, handler)
   }
 }
 

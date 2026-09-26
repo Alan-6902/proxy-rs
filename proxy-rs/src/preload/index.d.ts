@@ -41,6 +41,14 @@ import type {
   CursorOAuthStartResult,
   CursorRefreshAllSummary
 } from '../shared/cursorAccounts'
+import type {
+  GrokAccountView,
+  GrokRelayInstallProgress,
+  GrokRelayInstallResult,
+  GrokRelayStatus,
+  GrokRemoveResult,
+  GrokSwitchResult
+} from '../shared/grokAccounts'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -987,10 +995,18 @@ interface KiroApi {
   cursorAccountsList: () => Promise<IdcIpcResult<CursorAccount[]>>
   cursorAccountsCurrentId: () => Promise<IdcIpcResult<string | null>>
   cursorAccountsRemove: (ids: string[]) => Promise<IdcIpcResult<void>>
-  cursorAccountsImportJson: (json: string) => Promise<IdcIpcResult<CursorAccount[]>>
-  cursorAccountsImportLocal: () => Promise<IdcIpcResult<CursorAccount>>
-  cursorAccountsImportCockpit: () => Promise<IdcIpcResult<CursorCockpitImportSummary>>
-  cursorAccountsAddToken: (input: string) => Promise<IdcIpcResult<CursorCredentialImportSummary>>
+  cursorAccountsImportJson: (
+    json: string,
+    tags?: string[]
+  ) => Promise<IdcIpcResult<CursorAccount[]>>
+  cursorAccountsImportLocal: (tags?: string[]) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsImportCockpit: (
+    tags?: string[]
+  ) => Promise<IdcIpcResult<CursorCockpitImportSummary>>
+  cursorAccountsAddToken: (
+    input: string,
+    tags?: string[]
+  ) => Promise<IdcIpcResult<CursorCredentialImportSummary>>
   cursorAccountsExport: (ids: string[]) => Promise<IdcIpcResult<string>>
   cursorAccountsRefresh: (id: string) => Promise<IdcIpcResult<CursorAccount>>
   cursorAccountsRefreshAll: () => Promise<IdcIpcResult<CursorRefreshAllSummary>>
@@ -1000,7 +1016,10 @@ interface KiroApi {
     options?: CursorInjectOptions
   ) => Promise<IdcIpcResult<CursorInjectResult>>
   cursorAccountsOAuthStart: () => Promise<IdcIpcResult<CursorOAuthStartResult>>
-  cursorAccountsOAuthComplete: (loginId: string) => Promise<IdcIpcResult<CursorAccount>>
+  cursorAccountsOAuthComplete: (
+    loginId: string,
+    tags?: string[]
+  ) => Promise<IdcIpcResult<CursorAccount>>
   cursorAccountsOAuthCancel: (loginId?: string) => Promise<IdcIpcResult<null>>
   cursorAccountsRevealStore: () => Promise<IdcIpcResult<string>>
   cursorAccountsGetSettings: () => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
@@ -1008,6 +1027,21 @@ interface KiroApi {
     patch: Partial<CursorAutoRefreshSettings>
   ) => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
   onCursorAccountsChanged: (callback: () => void) => () => void
+  grokAccountsList: () => Promise<IdcIpcResult<GrokAccountView[]>>
+  grokAccountsCurrentScope: () => Promise<IdcIpcResult<string | null>>
+  grokAccountsSwitch: (
+    scope: string,
+    options?: { closeGrok?: boolean }
+  ) => Promise<IdcIpcResult<GrokSwitchResult>>
+  grokAccountsRemove: (
+    scope: string,
+    options?: { closeGrok?: boolean }
+  ) => Promise<IdcIpcResult<GrokRemoveResult>>
+  grokAccountsSyncRelay: (scope: string) => Promise<IdcIpcResult<GrokRelayStatus>>
+  grokAccountsRelayStatus: () => Promise<IdcIpcResult<GrokRelayStatus>>
+  grokAccountsEnsureRelayRoute: (scope: string) => Promise<IdcIpcResult<GrokRelayInstallResult>>
+  onGrokRelayInstallProgress: (callback: (progress: GrokRelayInstallProgress) => void) => () => void
+  onGrokAccountsChanged: (callback: () => void) => () => void
 }
 
 declare global {

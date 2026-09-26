@@ -1,4 +1,14 @@
-import { CircleAlert, Download, Loader2, Play, RotateCw, Tag, Trash2 } from 'lucide-react'
+import {
+  CircleAlert,
+  Clock3,
+  Download,
+  Loader2,
+  Play,
+  RotateCw,
+  Tag,
+  Timer,
+  Trash2
+} from 'lucide-react'
 import {
   formatCursorUsageDollars,
   getCursorAccountDisplayEmail,
@@ -17,53 +27,63 @@ import {
   PLAN_BADGE_CLASS,
   daysUntil,
   formatCompactDateTime,
+  formatShortDate,
+  formatShortDateTime,
+  percentText,
+  resetCountdownLabel,
   usageBarClass,
   usageTextClass
 } from './_helpers'
 
-interface MetricProps {
-  label: string
-  /** 已用百分比；null 时右侧显示 `valueText` 而不是百分比。 */
+interface UsageBarProps {
   percent: number | null
-  /** 覆盖右侧文字（如按需的「已禁用」/金额）。 */
-  valueText?: string
-  /** 标签下方的等宽小字：金额、重置时间，各占一行。 */
-  sublines?: string[]
-  /** 进度条填充比例；默认与 percent 相同。 */
-  barPercent?: number | null
+  /** 传高度（h-1 / h-2）与外边距；轨道颜色和圆角统一在这里。 */
+  className?: string
+}
+
+function UsageBar({ percent, className }: UsageBarProps): React.ReactNode {
+  const clamped = percent == null ? 0 : Math.min(100, Math.max(0, percent))
+  return (
+    <div className={cn('w-full overflow-hidden rounded-full bg-foreground/10', className)}>
+      <div
+        className={cn(
+          'h-full rounded-full transition-[width] duration-500 ease-out',
+          usageBarClass(clamped)
+        )}
+        style={{ width: `${clamped}%` }}
+      />
+    </div>
+  )
+}
+
+interface LedgerRowProps {
+  label: string
+  percent: number | null
+  /** 标签后的弱化补充（如 Bot 的重置倒计时）。 */
+  hint?: React.ReactNode
+  title?: string
 }
 
 /**
- * 一项用量：左标签、右彩色百分比、等宽小字补充行、进度条。
- * 结构对齐 cockpit-tools 的账号卡，尺寸对齐本应用 Kiro 账户卡（text-xs / h-1.5）。
+ * 次级额度的一行：标签 | 细进度条 | 百分比。
+ * 三个单元格直接挂在父级三列网格上（display: contents），所有行的条与数字才会纵向对齐成表。
  */
-function Metric({ label, percent, valueText, sublines, barPercent }: MetricProps): React.ReactNode {
-  const fill = barPercent ?? percent
-  const clamped = fill == null ? 0 : Math.min(100, Math.max(0, fill))
+function LedgerRow({ label, percent, hint, title }: LedgerRowProps): React.ReactNode {
   return (
-    <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
-        <span
-          className={cn(
-            'shrink-0 text-sm font-semibold tabular-nums leading-none',
-            valueText ? 'text-foreground' : usageTextClass(percent)
-          )}
-        >
-          {valueText ?? (percent == null ? '—' : `${Math.round(percent)}%`)}
-        </span>
-      </div>
-      {sublines?.map((line) => (
-        <p key={line} className="truncate font-mono text-2xs text-muted-foreground">
-          {line}
-        </p>
-      ))}
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
-        <div
-          className={cn('h-full rounded-full transition-all duration-300', usageBarClass(clamped))}
-          style={{ width: `${clamped}%` }}
-        />
-      </div>
+    <div className="contents" title={title}>
+      <span className="flex items-center gap-1 whitespace-nowrap text-2xs text-muted-foreground">
+        {label}
+        {hint}
+      </span>
+      <UsageBar percent={percent} className="h-1" />
+      <span
+        className={cn(
+          'min-w-[2.5rem] text-right text-2xs font-semibold tabular-nums',
+          usageTextClass(percent)
+        )}
+      >
+        {percentText(percent)}
+      </span>
     </div>
   )
 }
@@ -119,6 +139,20 @@ export interface CursorAccountCardProps {
   onDelete: () => void
 }
 
+interface MoneyItem {
+  label: string
+  value: string
+  className?: string
+}
+
+/**
+ * 卡片自上而下四层，视觉权重递减：
+ * 1. 标题：邮箱 + 套餐徽标，下面一行状态药丸（当前使用 / 封禁）与用户自己打的标签
+ * 2. 主指标面板：套餐额度的大百分比、金额、重置倒计时、粗进度条——整卡唯一的大数字
+ * 3. 次级台账：Auto+Composer / API / Bot 三列对齐的细条，可纵向扫读
+ * 4. 金额一行：按需 / 赠送 / 合计 / Credit，等宽小字
+ * 底栏固定在最下：最近使用时间 + 操作图标。
+ */
 export function CursorAccountCard({
   account,
   isCurrent,
@@ -138,55 +172,70 @@ export function CursorAccountCard({
   const botUsage = getCursorBotUsage(account)
   const hasUsage = hasCursorQuotaData(account)
   const displayEmail = getCursorAccountDisplayEmail(account)
+  // Auth ID（auth0|user_xxx / grok|user_xxx）只进 tooltip：单独摆出来会被当成标签
+  const emailTitle = account.authId ? `${displayEmail}\nAuth ID: ${account.authId}` : displayEmail
 
   // 套餐内已用优先取 breakdown.included；Ultra 用满后 used 会停在 limit
   const includedCents = usage.includedSpendCents ?? usage.planUsedCents
-  const totalSublines: string[] = []
-  if (includedCents != null && usage.planLimitCents != null) {
-    totalSublines.push(
-      `${formatCursorUsageDollars(includedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
-    )
-  }
-  if (usage.allowanceResetAt) {
-    totalSublines.push(
-      `重置: ${formatCompactDateTime(usage.allowanceResetAt)}（${daysUntil(usage.allowanceResetAt)} 天）`
-    )
-  }
+  const planAmount =
+    includedCents != null && usage.planLimitCents != null
+      ? `${formatCursorUsageDollars(includedCents)} / ${formatCursorUsageDollars(usage.planLimitCents)}`
+      : null
 
-  const onDemandText = onDemand.isDisabled
-    ? onDemand.usedCents > 0
-      ? formatCursorUsageDollars(onDemand.usedCents)
-      : '已禁用'
-    : onDemand.isUnlimited
-      ? `${formatCursorUsageDollars(onDemand.usedCents)} · 无上限`
-      : `${formatCursorUsageDollars(onDemand.usedCents)} / ${formatCursorUsageDollars(onDemand.limitCents)}`
-  const onDemandBar =
+  // 有固定上限的按需额度是「百分比型」配额，进台账画条；禁用 / 无上限只是状态，放金额行
+  const onDemandPercent =
     onDemand.hasFixedLimit && onDemand.limitCents
       ? (onDemand.usedCents / onDemand.limitCents) * 100
-      : 0
+      : null
+  const onDemandLabel = onDemand.isTeamLimit ? '团队按需' : '按需'
+  const onDemandUsed = formatCursorUsageDollars(onDemand.usedCents)
+  const onDemandItem: MoneyItem = onDemand.isDisabled
+    ? {
+        label: onDemandLabel,
+        value: onDemand.usedCents > 0 ? `${onDemandUsed} · 已禁用` : '已禁用',
+        className: 'text-muted-foreground'
+      }
+    : onDemand.isUnlimited
+      ? { label: onDemandLabel, value: `${onDemandUsed} · 无上限` }
+      : {
+          label: onDemandLabel,
+          value: `${onDemandUsed}/${formatCursorUsageDollars(onDemand.limitCents ?? 0)}`,
+          className: usageTextClass(onDemandPercent)
+        }
 
-  const extras: string[] = []
+  const hasLedger =
+    usage.autoPercentUsed != null ||
+    usage.apiPercentUsed != null ||
+    botUsage?.hasLimit === true ||
+    onDemandPercent != null
+
+  const money: MoneyItem[] = [onDemandItem]
   if (usage.bonusSpendCents != null && usage.bonusSpendCents > 0) {
-    extras.push(`赠送 ${formatCursorUsageDollars(usage.bonusSpendCents)}`)
+    money.push({ label: '赠送', value: formatCursorUsageDollars(usage.bonusSpendCents) })
   }
   if (usage.totalSpendCents != null && usage.totalSpendCents > 0) {
-    extras.push(`合计 ${formatCursorUsageDollars(usage.totalSpendCents)}`)
+    money.push({ label: '合计', value: formatCursorUsageDollars(usage.totalSpendCents) })
   }
-  if (account.creditBalanceCents != null) {
-    extras.push(`Credit ${formatCursorUsageDollars(account.creditBalanceCents)}`)
+  if (account.creditBalanceCents != null && account.creditBalanceCents > 0) {
+    money.push({ label: 'Credit', value: formatCursorUsageDollars(account.creditBalanceCents) })
   }
+
+  const showMetaRow = isCurrent || banned || account.tags.length > 0
 
   return (
     <Card
       className={cn(
-        'transition-shadow',
-        isCurrent && 'ring-1 ring-primary/50',
-        banned && 'opacity-80',
-        selected && 'ring-2 ring-primary'
+        'relative flex h-full flex-col overflow-hidden bg-solid-card',
+        isCurrent && 'border-transparent active-glow-border',
+        banned && 'border-destructive/50'
       )}
     >
-      <CardContent className="flex flex-col gap-3 p-4">
-        {/* 标题区：邮箱 + 套餐徽标；Auth ID；标签 */}
+      {/* 多选态覆盖层：浮在内容之上、不拦事件，避免与流光边框 / 封禁边框互相覆盖 */}
+      {selected && (
+        <div className="pointer-events-none absolute inset-0 z-10 rounded-[inherit] bg-primary/[0.06] ring-2 ring-inset ring-primary/60" />
+      )}
+
+      <CardContent className="flex flex-1 flex-col gap-3 p-4">
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
             <input
@@ -194,9 +243,9 @@ export function CursorAccountCard({
               checked={selected}
               onChange={onToggleSelect}
               aria-label={`选择 ${displayEmail}`}
-              className="h-3.5 w-3.5 shrink-0 rounded accent-primary"
+              className="h-4 w-4 shrink-0 rounded accent-primary"
             />
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={displayEmail}>
+            <span className="type-title min-w-0 flex-1 truncate text-sm" title={emailTitle}>
               {displayEmail}
             </span>
             <span
@@ -209,26 +258,22 @@ export function CursorAccountCard({
             </span>
           </div>
 
-          <p className="truncate font-mono text-2xs text-muted-foreground" title={account.authId}>
-            Auth ID: {account.authId ?? '—'}
-          </p>
-
-          {(isCurrent || banned || account.tags.length > 0) && (
-            <div className="flex flex-wrap items-center gap-1">
+          {showMetaRow && (
+            <div className="flex flex-wrap items-center gap-1 pl-6">
               {isCurrent && (
-                <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-2xs font-medium text-primary">
+                <span className="rounded-full bg-primary/15 px-2 py-px text-2xs font-medium text-primary">
                   当前使用
                 </span>
               )}
               {banned && (
-                <span className="rounded-md bg-red-500/15 px-1.5 py-0.5 text-2xs font-medium text-red-500">
+                <span className="rounded-full bg-destructive/12 px-2 py-px text-2xs font-medium text-destructive">
                   已封禁
                 </span>
               )}
               {account.tags.map((tag) => (
                 <span
                   key={tag}
-                  className="rounded-md bg-foreground/10 px-1.5 py-0.5 text-2xs text-muted-foreground"
+                  className="rounded-full bg-foreground/[0.07] px-2 py-px text-2xs text-muted-foreground"
                 >
                   {tag}
                 </span>
@@ -237,52 +282,100 @@ export function CursorAccountCard({
           )}
 
           {banned && account.statusReason && (
-            <p className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-2xs text-red-600 dark:text-red-300">
+            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-2xs text-red-600 dark:text-red-300">
               {account.statusReason}
             </p>
           )}
         </div>
 
-        {/* 用量面板：与 Kiro 卡片同样的浅底小面板 */}
         {hasUsage ? (
-          <div className="space-y-3 rounded-lg border border-border/50 bg-muted/30 p-3">
-            <Metric label="Total Usage" percent={usage.planUsedPercent} sublines={totalSublines} />
-            {usage.autoPercentUsed != null && (
-              <Metric label="Auto + Composer" percent={usage.autoPercentUsed} />
+          <>
+            <div className="rounded-xl border border-border/50 bg-muted/30 px-3 pb-3 pt-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="type-eyebrow">套餐额度</span>
+                {usage.allowanceResetAt != null && (
+                  <span
+                    className="shrink-0 text-2xs text-muted-foreground tabular-nums"
+                    title={`重置时间 ${formatCompactDateTime(usage.allowanceResetAt)}`}
+                  >
+                    {resetCountdownLabel(usage.allowanceResetAt)}
+                    <span className="text-muted-foreground/60">
+                      {' · '}
+                      {formatShortDate(usage.allowanceResetAt)}
+                    </span>
+                  </span>
+                )}
+              </div>
+              <div className="mt-1.5 flex items-baseline justify-between gap-2">
+                <span
+                  className={cn(
+                    'type-metric text-display-sm',
+                    usageTextClass(usage.planUsedPercent)
+                  )}
+                >
+                  {percentText(usage.planUsedPercent)}
+                </span>
+                {planAmount && (
+                  <span className="truncate font-mono text-2xs text-muted-foreground tabular-nums">
+                    {planAmount}
+                  </span>
+                )}
+              </div>
+              <UsageBar percent={usage.planUsedPercent} className="mt-2 h-2" />
+            </div>
+
+            {hasLedger && (
+              <div className="grid grid-cols-[auto_1fr_auto] items-center gap-x-2.5 gap-y-1.5 px-1">
+                {usage.autoPercentUsed != null && (
+                  <LedgerRow label="Auto + Composer" percent={usage.autoPercentUsed} />
+                )}
+                {usage.apiPercentUsed != null && (
+                  <LedgerRow label="API" percent={usage.apiPercentUsed} />
+                )}
+                {botUsage?.hasLimit && (
+                  <LedgerRow
+                    label="Bot（周）"
+                    percent={botUsage.usedPercent}
+                    hint={
+                      botUsage.nextResetAt != null && (
+                        <span className="inline-flex items-center gap-0.5 text-3xs text-muted-foreground/70">
+                          <Timer className="h-2.5 w-2.5" />
+                          {daysUntil(botUsage.nextResetAt)} 天
+                        </span>
+                      )
+                    }
+                    title={[
+                      botUsage.planLabel,
+                      botUsage.nextResetAt != null
+                        ? `重置时间 ${formatCompactDateTime(botUsage.nextResetAt)}`
+                        : null
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  />
+                )}
+                {onDemandPercent != null && (
+                  <LedgerRow
+                    label={onDemandLabel}
+                    percent={onDemandPercent}
+                    title={`${onDemandLabel} ${onDemandItem.value}`}
+                  />
+                )}
+              </div>
             )}
-            {usage.apiPercentUsed != null && (
-              <Metric label="API Usage" percent={usage.apiPercentUsed} />
-            )}
-            {botUsage?.hasLimit && (
-              <Metric
-                label={`${botUsage.planLabel ?? 'Grok Bot'}（周）`}
-                percent={botUsage.usedPercent}
-                sublines={
-                  botUsage.nextResetAt
-                    ? [
-                        `重置: ${formatCompactDateTime(botUsage.nextResetAt)}（${daysUntil(botUsage.nextResetAt)} 天）`
-                      ]
-                    : undefined
-                }
-              />
-            )}
-            <Metric
-              label={`按需使用${onDemand.isTeamLimit ? '（团队）' : ''}`}
-              percent={null}
-              valueText={onDemandText}
-              barPercent={onDemandBar}
-            />
-            {extras.length > 0 && (
-              <p
-                className="truncate pt-0.5 font-mono text-2xs text-muted-foreground"
-                title={extras.join(' · ')}
-              >
-                {extras.join(' · ')}
-              </p>
-            )}
-          </div>
+
+            {/* 两列固定网格：四项时折成整齐的 2×2，而不是 flex-wrap 留下一个孤儿 */}
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 px-1 font-mono text-2xs tabular-nums">
+              {money.map((item) => (
+                <span key={item.label} className="truncate" title={`${item.label} ${item.value}`}>
+                  <span className="text-muted-foreground">{item.label} </span>
+                  <span className={cn('text-foreground/85', item.className)}>{item.value}</span>
+                </span>
+              ))}
+            </div>
+          </>
         ) : (
-          <div className="rounded-lg border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
+          <div className="rounded-xl border border-dashed border-border/60 px-3 py-5 text-center text-xs text-muted-foreground">
             {account.quotaQueryLastError ? '用量拉取失败' : '还没拉过用量，点刷新试试'}
           </div>
         )}
@@ -297,15 +390,15 @@ export function CursorAccountCard({
           </p>
         )}
 
-        {/* 底栏：最近使用时间 + 五个图标按钮 */}
-        <div className="flex items-center justify-between gap-2 border-t border-border/50 pt-3">
+        <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/50 pt-2.5">
           <span
-            className="whitespace-nowrap rounded-md bg-foreground/[0.06] px-2 py-1 font-mono text-2xs text-muted-foreground"
+            className="flex min-w-0 items-center gap-1 font-mono text-2xs text-muted-foreground tabular-nums"
             title={`最近使用 ${formatCompactDateTime(account.lastUsed)} · 用量更新 ${formatCompactDateTime(account.usageUpdatedAt)}`}
           >
-            {formatCompactDateTime(account.lastUsed)}
+            <Clock3 className="h-3 w-3 shrink-0" />
+            <span className="truncate">{formatShortDateTime(account.lastUsed)}</span>
           </span>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             <IconAction
               icon={Play}
               title={

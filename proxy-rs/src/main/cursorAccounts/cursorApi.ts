@@ -16,6 +16,13 @@ const CURSOR_GET_USER_META_URL = 'https://api2.cursor.sh/aiserver.v1.AuthService
 /** Grok Bot 周额度，与 cursor.com 仪表盘同一条接口；Connect 协议端点，要带协议版本头。 */
 const CURSOR_SAND_USAGE_STATUS_URL =
   'https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus'
+/** Grok Bot 客户端跟 Bot 对话走的同一组云端接口：列出该号的 Bot、给 Bot 发一条用户消息。 */
+const CURSOR_GROK_BOT_LIST_AGENTS_URL =
+  'https://api2.cursor.sh/aiserver.v1.GrokBotService/ListGrokBotAgents'
+const CURSOR_GROK_BOT_SEND_MESSAGE_URL =
+  'https://api2.cursor.sh/aiserver.v1.GrokBotService/SendGrokBotUserMessage'
+const CURSOR_GROK_BOT_TRANSCRIPT_URL =
+  'https://api2.cursor.sh/aiserver.v1.GrokBotService/ListGrokBotTranscriptEntries'
 const CONNECT_PROTOCOL_VERSION_HEADER = { 'Connect-Protocol-Version': '1' }
 const CURSOR_FULL_STRIPE_PROFILE_URL = 'https://api2.cursor.sh/auth/full_stripe_profile'
 const CURSOR_STRIPE_PROFILE_URL = 'https://api2.cursor.sh/auth/stripe_profile'
@@ -377,6 +384,237 @@ export async function fetchSandUsageStatus(accessToken: string): Promise<Record<
   if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
   if (status !== 200) throw new Error(`${what} API 返回异常状态码: ${status}`)
   return parseJsonObject(text, what)
+}
+
+/** Connect 协议的 JSON 单次调用：Bearer + 协议版本头，请求体和响应体都是 proto 的 JSON 映射。 */
+async function connectUnaryJson(
+  url: string,
+  accessToken: string,
+  body: Record<string, unknown>,
+  what: string
+): Promise<Record<string, unknown>> {
+  const { status, text } = await cursorFetch(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...CONNECT_PROTOCOL_VERSION_HEADER
+      },
+      body: JSON.stringify(body)
+    },
+    what
+  )
+  if (isUnauthorized(status)) throw new Error(CURSOR_SESSION_EXPIRED_MESSAGE)
+  if (status !== 200) throw new Error(`${what} API 返回异常状态码: ${status}`)
+  return parseJsonObject(text, what)
+}
+
+/** 云端 GrokBotAgent 里切号自动化用得上的几个字段；agentId 才是发消息用的 id，id 是服务端主键。 */
+export interface GrokBotAgentSummary {
+  agentId: string
+  name: string
+  /** 运行载体：box（跑在该号的 Box 里）或 temporal（云端工作流）。 */
+  harness: string
+  updatedAtMs: number
+  viewerIsOwner: boolean
+}
+
+/** 把 ListGrokBotAgents 的 JSON 响应收成摘要列表；proto 的 int64 在 JSON 里是字符串，这里统一转数字。 */
+export function parseGrokBotAgents(record: Record<string, unknown>): GrokBotAgentSummary[] {
+  const agents = Array.isArray(record.agents) ? record.agents : []
+  const result: GrokBotAgentSummary[] = []
+  for (const item of agents) {
+    if (!item || typeof item !== 'object') continue
+    const agent = item as Record<string, unknown>
+    const agentId = readNonEmpty(agent.agentId)
+    if (!agentId) continue
+    const updatedRaw = agent.updatedAtMs
+    const updatedAtMs =
+      typeof updatedRaw === 'number'
+        ? updatedRaw
+        : typeof updatedRaw === 'string' && /^\d+$/.test(updatedRaw)
+          ? Number(updatedRaw)
+          : 0
+    result.push({
+      agentId,
+      name: readNonEmpty(agent.name) ?? agentId,
+      harness: readNonEmpty(agent.harness) ?? '',
+      updatedAtMs,
+      viewerIsOwner: agent.viewerIsOwner !== false
+    })
+  }
+  return result
+}
+
+/** 列出这个号能看到的 Grok Bot（含团队共享的）。 */
+export async function listGrokBotAgents(accessToken: string): Promise<GrokBotAgentSummary[]> {
+  const record = await connectUnaryJson(
+    CURSOR_GROK_BOT_LIST_AGENTS_URL,
+    accessToken,
+    { includeTeamAgents: true },
+    'Grok Bot 列表'
+  )
+  return parseGrokBotAgents(record)
+}
+
+/**
+ * SendGrokBotUserMessage 响应里 delivery 的枚举。Connect JSON 给的是 proto 全名，个别实现会给数字，
+ * 两种都认。与 Grok 客户端同口径：ACCEPTED_BOX / ACCEPTED_TEMPORAL / DUPLICATE 都算接下了，
+ * REFUSED 才是拒绝；`dispatched` 字段不是判据。
+ */
+const GROK_BOT_DELIVERY_NAMES: Record<number, string> = {
+  1: 'GROK_BOT_USER_MESSAGE_DELIVERY_ACCEPTED_BOX',
+  2: 'GROK_BOT_USER_MESSAGE_DELIVERY_ACCEPTED_TEMPORAL',
+  3: 'GROK_BOT_USER_MESSAGE_DELIVERY_DUPLICATE',
+  4: 'GROK_BOT_USER_MESSAGE_DELIVERY_REFUSED'
+}
+const GROK_BOT_DELIVERY_ACCEPTED = new Set([
+  GROK_BOT_DELIVERY_NAMES[1],
+  GROK_BOT_DELIVERY_NAMES[2],
+  GROK_BOT_DELIVERY_NAMES[3]
+])
+const GROK_BOT_DELIVERY_REFUSED = GROK_BOT_DELIVERY_NAMES[4]
+
+export interface GrokBotSendOutcome {
+  /** 云端是否接下了这条消息（delivery 为 ACCEPTED_* 或 DUPLICATE）。 */
+  accepted: boolean
+  /** delivery 枚举名，接受与否都带上，便于排查。 */
+  delivery?: string
+  /** 被拒或无法判定时的说明。 */
+  refusal?: string
+}
+
+/** 把 SendGrokBotUserMessage 的 JSON 响应归一成结果；纯函数，便于单测。 */
+export function parseGrokBotSendOutcome(record: Record<string, unknown>): GrokBotSendOutcome {
+  const rawDelivery = record.delivery
+  const delivery =
+    typeof rawDelivery === 'number'
+      ? GROK_BOT_DELIVERY_NAMES[rawDelivery]
+      : readNonEmpty(rawDelivery)
+  const refusalRecord =
+    record.refusal && typeof record.refusal === 'object'
+      ? (record.refusal as Record<string, unknown>)
+      : undefined
+  const refusal = refusalRecord
+    ? pickString(refusalRecord, 'message', 'failureCode', 'failure_code')
+    : readNonEmpty(record.refusal)
+  if (delivery && GROK_BOT_DELIVERY_ACCEPTED.has(delivery)) {
+    return { accepted: true, delivery }
+  }
+  if (delivery === GROK_BOT_DELIVERY_REFUSED) {
+    return { accepted: false, delivery, refusal: refusal ?? '云端拒绝了这条消息' }
+  }
+  // 没有 delivery 的老响应只能看 dispatched
+  if (record.dispatched === true) return { accepted: true, delivery }
+  return {
+    accepted: false,
+    delivery,
+    refusal: refusal ?? `云端没有给出投递结果（delivery=${delivery ?? '空'}）`
+  }
+}
+
+/** Bot 对话里的一条可读消息；工具调用、扣费记录等非文本条目不在此列。 */
+export interface GrokBotTranscriptMessage {
+  seq: number
+  role: 'user' | 'bot'
+  text: string
+  timestampMs?: number
+}
+
+/** 对话记录里用户消息与 Bot 回复的 entry_kind；其余（spend-initiation 等）没有可读文本。 */
+const GROK_BOT_TRANSCRIPT_KIND_USER = 'message'
+const GROK_BOT_TRANSCRIPT_KIND_BOT = 'send-message'
+
+function readTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value)
+  return undefined
+}
+
+/**
+ * 把 ListGrokBotTranscriptEntries 的响应收成按 seq 升序的可读消息。entry.body 是 base64 的 JSON：
+ * 用户消息形如 `{kind:'message', role:'user', content, timestampMs}`，Bot 回复形如
+ * `{kind:'send-message', message:{type:'text', content} | {type:'widget', widget:{prompt}}}`。
+ * 大消息只给 blobHash 不给 body，这里直接跳过——排查进度只需要短句。纯函数，便于单测。
+ */
+export function parseGrokBotTranscript(
+  record: Record<string, unknown>
+): GrokBotTranscriptMessage[] {
+  const entries = Array.isArray(record.entries) ? record.entries : []
+  const messages: GrokBotTranscriptMessage[] = []
+  for (const item of entries) {
+    if (!item || typeof item !== 'object') continue
+    const entry = item as Record<string, unknown>
+    const seq = readTimestamp(entry.seq)
+    const body = typeof entry.body === 'string' ? entry.body : undefined
+    if (seq === undefined || !body || entry.bodyOmitted === true) continue
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(Buffer.from(body, 'base64').toString('utf-8'))
+    } catch {
+      continue
+    }
+    if (!decoded || typeof decoded !== 'object') continue
+    const payload = decoded as Record<string, unknown>
+    const timestampMs = readTimestamp(payload.timestampMs)
+    if (entry.entryKind === GROK_BOT_TRANSCRIPT_KIND_USER) {
+      const text = readNonEmpty(payload.content)
+      if (text) messages.push({ seq, role: 'user', text, timestampMs })
+      continue
+    }
+    if (entry.entryKind === GROK_BOT_TRANSCRIPT_KIND_BOT) {
+      const message =
+        payload.message && typeof payload.message === 'object'
+          ? (payload.message as Record<string, unknown>)
+          : undefined
+      const widget =
+        message?.widget && typeof message.widget === 'object'
+          ? (message.widget as Record<string, unknown>)
+          : undefined
+      const text = readNonEmpty(message?.content) ?? readNonEmpty(widget?.prompt)
+      if (text) messages.push({ seq, role: 'bot', text, timestampMs })
+    }
+  }
+  return messages.sort((a, b) => a.seq - b.seq)
+}
+
+/** 拉某个 Bot 最近的对话记录（含用户消息与 Bot 回复），按时间升序。 */
+export async function listGrokBotTranscript(
+  accessToken: string,
+  input: { agentId: string; limit: number }
+): Promise<GrokBotTranscriptMessage[]> {
+  const record = await connectUnaryJson(
+    CURSOR_GROK_BOT_TRANSCRIPT_URL,
+    accessToken,
+    { agentId: input.agentId, limit: input.limit, sessionId: '' },
+    'Grok Bot 对话记录'
+  )
+  return parseGrokBotTranscript(record)
+}
+
+/**
+ * 以用户身份给某个 Bot 发一条消息，等价于在 Grok Bot 客户端聊天框里输入。messageId 由调用方决定，
+ * 便于重发时幂等。
+ */
+export async function sendGrokBotUserMessage(
+  accessToken: string,
+  input: { agentId: string; messageId: string; text: string }
+): Promise<GrokBotSendOutcome> {
+  const record = await connectUnaryJson(
+    CURSOR_GROK_BOT_SEND_MESSAGE_URL,
+    accessToken,
+    {
+      agentId: input.agentId,
+      messageId: input.messageId,
+      text: input.text,
+      sentAtMs: String(Date.now())
+    },
+    'Grok Bot 发消息'
+  )
+  return parseGrokBotSendOutcome(record)
 }
 
 /**

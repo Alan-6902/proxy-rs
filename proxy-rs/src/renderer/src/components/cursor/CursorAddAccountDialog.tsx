@@ -10,11 +10,13 @@ import {
   Loader2,
   Plus,
   ShieldOff,
+  Tag,
   Upload
 } from 'lucide-react'
 import type { CursorAccount } from '../../../../shared/cursorAccounts'
 import { Button, SegmentedTabs, type SegmentedTabItem } from '../ui'
 import { CursorDialogShell } from './CursorDialogShell'
+import { CursorTagEditor, type CursorTagEditorHandle } from './CursorTagEditor'
 import { errorText } from './_helpers'
 
 type AddTab = 'oauth' | 'token' | 'json' | 'local'
@@ -39,6 +41,8 @@ const TEXTAREA_CLASS =
 
 interface CursorAddAccountDialogProps {
   open: boolean
+  /** 库里已有的标签，标签编辑器里一键补上。 */
+  knownTags: string[]
   onClose: () => void
   /** 入库成功后回调；message 用于页面顶部提示，warning 是部分失败时的明细。 */
   onAdded: (accounts: CursorAccount[], message: string, warning?: string) => void
@@ -46,6 +50,7 @@ interface CursorAddAccountDialogProps {
 
 export function CursorAddAccountDialog({
   open,
+  knownTags,
   onClose,
   onAdded
 }: CursorAddAccountDialogProps): React.ReactNode {
@@ -54,12 +59,18 @@ export function CursorAddAccountDialog({
   const [error, setError] = useState('')
   const [token, setToken] = useState('')
   const [json, setJson] = useState('')
+  /** 本次添加要打的标签：四种入口共用，随入库请求一并发给主进程。 */
+  const [tags, setTags] = useState<string[]>([])
   const [oauthUrl, setOauthUrl] = useState('')
   const [oauthLoginId, setOauthLoginId] = useState('')
   const [urlCopied, setUrlCopied] = useState(false)
   const [usedIncognito, setUsedIncognito] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const activeLoginIdRef = useRef('')
+  const tagEditorRef = useRef<CursorTagEditorHandle>(null)
+
+  /** 提交时用的标签：把输入框里没回车的草稿也并进去。 */
+  const collectTags = (): string[] => tagEditorRef.current?.flush() ?? tags
 
   const resetOauth = useCallback((): void => {
     activeLoginIdRef.current = ''
@@ -94,6 +105,7 @@ export function CursorAddAccountDialog({
     onAdded(accounts, message, warning)
     setToken('')
     setJson('')
+    setTags([])
     setError('')
     resetOauth()
     onClose()
@@ -113,7 +125,7 @@ export function CursorAddAccountDialog({
       if (incognito) window.api.openIncognitoBrowser(verificationUri)
       else window.api.openExternal(verificationUri)
 
-      const completed = await window.api.cursorAccountsOAuthComplete(loginId)
+      const completed = await window.api.cursorAccountsOAuthComplete(loginId, collectTags())
       // 用户已取消或重新发起了新会话，这次结果作废
       if (activeLoginIdRef.current !== loginId) return
       if (incognito) window.api.closeIncognitoBrowser()
@@ -137,7 +149,7 @@ export function CursorAddAccountDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsAddToken(token)
+      const result = await window.api.cursorAccountsAddToken(token, collectTags())
       if (!result.success) throw new Error(result.error)
       const { added, failed } = result.data
       const failedText = failed.map((item) => `${item.label}: ${item.error}`).join('\n')
@@ -165,7 +177,7 @@ export function CursorAddAccountDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsImportJson(json)
+      const result = await window.api.cursorAccountsImportJson(json, collectTags())
       if (!result.success) throw new Error(result.error)
       finish(result.data, `已导入 ${result.data.length} 个账号`)
     } catch (submitError) {
@@ -179,7 +191,7 @@ export function CursorAddAccountDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsImportLocal()
+      const result = await window.api.cursorAccountsImportLocal(collectTags())
       if (!result.success) throw new Error(result.error)
       finish([result.data], `已从本机 Cursor 导入 ${result.data.email || result.data.id}`)
     } catch (submitError) {
@@ -193,7 +205,7 @@ export function CursorAddAccountDialog({
     setBusy(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsImportCockpit()
+      const result = await window.api.cursorAccountsImportCockpit(collectTags())
       if (!result.success) throw new Error(result.error)
       const { imported, skipped } = result.data
       const skippedText = skipped.map((item) => `${item.id}: ${item.error}`).join('\n')
@@ -417,6 +429,25 @@ export function CursorAddAccountDialog({
             </p>
           </div>
         )}
+
+        <div className="space-y-2 border-t border-border/50 pt-4">
+          <div className="flex items-center gap-1.5 text-sm">
+            <Tag className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="font-medium">标签</span>
+            <span className="text-xs text-muted-foreground">
+              可选；这次添加进来的账号入库时直接打上
+            </span>
+          </div>
+          {/* 标签随入库请求一起发出去，浏览器登录发起后再改就来不及了，等待期间一并锁住 */}
+          <CursorTagEditor
+            ref={tagEditorRef}
+            tags={tags}
+            onChange={setTags}
+            knownTags={knownTags}
+            emptyText="不打标签也能入库"
+            disabled={busy}
+          />
+        </div>
       </div>
     </CursorDialogShell>
   )

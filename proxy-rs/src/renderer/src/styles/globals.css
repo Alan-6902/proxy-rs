@@ -1041,6 +1041,36 @@ body {
   animation: breathe-glow 3s ease-in-out infinite;
 }
 
+/* relay 指向的卡片：呼吸灯。
+ * 放在卡片内部的一个绝对定位元素上，而不是卡片自身：卡片的 animation 被 .stagger-children 入场动画占着，
+ * ::before/::after 又被 .active-glow-border（当前号流光边框）用掉了；内嵌元素两边都不碰，两种状态能叠加。
+ * 用 inset 阴影做光环，卡片是 overflow-hidden 也不会被裁掉。颜色跟 relay 状态走：正常绿、有问题琥珀。 */
+.relay-breathing {
+  --relay-breath-rgb: 52 211 153; /* emerald-400 */
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  animation: relay-breathe 2.4s ease-in-out infinite;
+}
+.relay-breathing-warn {
+  --relay-breath-rgb: 251 191 36; /* amber-400 */
+}
+@keyframes relay-breathe {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 0 1px rgb(var(--relay-breath-rgb) / 0.35),
+      inset 0 0 18px rgb(var(--relay-breath-rgb) / 0.08);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 2px rgb(var(--relay-breath-rgb) / 0.9),
+      inset 0 0 40px rgb(var(--relay-breath-rgb) / 0.28);
+  }
+}
+
 /* ==================== 排版工具类（编辑感层级） ====================
  * 页面里只用这几个类描述"这段文字是什么角色"，不再各页手写 text-2xl font-bold text-<色>。 */
 

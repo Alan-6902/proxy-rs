@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
-import { Loader2, Tag, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Loader2, Tag } from 'lucide-react'
 import type { CursorAccount } from '../../../../shared/cursorAccounts'
 import { getCursorAccountDisplayEmail } from '../../../../shared/cursorAccounts'
-import { Badge, Button, Input } from '../ui'
+import { Badge, Button } from '../ui'
 import { CursorDialogShell } from './CursorDialogShell'
+import { CursorTagEditor, type CursorTagEditorHandle } from './CursorTagEditor'
 import { errorText } from './_helpers'
 
 interface CursorTagDialogProps {
@@ -14,20 +15,6 @@ interface CursorTagDialogProps {
   onSaved: (account: CursorAccount) => void
 }
 
-function normalizeTags(tags: string[]): string[] {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const raw of tags) {
-    const tag = raw.trim()
-    if (!tag) continue
-    const key = tag.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    result.push(tag)
-  }
-  return result
-}
-
 export function CursorTagDialog({
   account,
   knownTags,
@@ -35,29 +22,23 @@ export function CursorTagDialog({
   onSaved
 }: CursorTagDialogProps): React.ReactNode {
   const [tags, setTags] = useState<string[]>([])
-  const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const editorRef = useRef<CursorTagEditorHandle>(null)
 
   useEffect(() => {
     setTags(account?.tags ?? [])
-    setDraft('')
     setError('')
   }, [account])
-
-  const addDraft = (): void => {
-    // 支持一次贴多个：逗号、中文逗号、空格都当分隔符
-    const incoming = draft.split(/[,，\s]+/)
-    setTags((prev) => normalizeTags([...prev, ...incoming]))
-    setDraft('')
-  }
 
   const save = async (): Promise<void> => {
     if (!account) return
     setSaving(true)
     setError('')
     try {
-      const result = await window.api.cursorAccountsUpdateTags(account.id, normalizeTags(tags))
+      // 输入框里没回车的那一个也算：用户输完直接点保存是最常见的操作
+      const finalTags = editorRef.current?.flush() ?? tags
+      const result = await window.api.cursorAccountsUpdateTags(account.id, finalTags)
       if (!result.success) throw new Error(result.error)
       onSaved(result.data)
       onClose()
@@ -67,10 +48,6 @@ export function CursorTagDialog({
       setSaving(false)
     }
   }
-
-  const suggestions = knownTags.filter(
-    (tag) => !tags.some((existing) => existing.toLowerCase() === tag.toLowerCase())
-  )
 
   return (
     <CursorDialogShell
@@ -104,58 +81,14 @@ export function CursorTagDialog({
             {error}
           </div>
         )}
-
-        <div className="flex flex-wrap gap-1.5 min-h-8">
-          {tags.length === 0 && <span className="text-sm text-muted-foreground">还没有标签</span>}
-          {tags.map((tag) => (
-            <Badge key={tag} variant="secondary" className="gap-1 pr-1">
-              {tag}
-              <button
-                type="button"
-                aria-label={`移除标签 ${tag}`}
-                className="rounded-sm p-0.5 hover:bg-foreground/10"
-                onClick={() => setTags((prev) => prev.filter((item) => item !== tag))}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </Badge>
-          ))}
-        </div>
-
-        <div className="flex gap-2">
-          <Input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                addDraft()
-              }
-            }}
-            placeholder="输入标签后回车，多个用逗号分隔"
-          />
-          <Button variant="outline" onClick={addDraft} disabled={!draft.trim()}>
-            添加
-          </Button>
-        </div>
-
-        {suggestions.length > 0 && (
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">已有标签</p>
-            <div className="flex flex-wrap gap-1.5">
-              {suggestions.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  className="rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-muted"
-                  onClick={() => setTags((prev) => normalizeTags([...prev, tag]))}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        <CursorTagEditor
+          ref={editorRef}
+          tags={tags}
+          onChange={setTags}
+          knownTags={knownTags}
+          disabled={saving}
+          autoFocus
+        />
       </div>
     </CursorDialogShell>
   )

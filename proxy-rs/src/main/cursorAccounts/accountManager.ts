@@ -22,6 +22,7 @@ import {
   parseCursorImportJson,
   upsertCursorAccount,
   upsertCursorAccounts,
+  withTags,
   type CursorImportPayload
 } from './accountStore'
 import {
@@ -260,14 +261,17 @@ async function enrichAndUpsert(payload: CursorImportPayload): Promise<CursorAcco
 // Import
 // ---------------------------------------------------------------------------
 
-export async function importCursorAccountsFromJson(json: string): Promise<CursorAccount[]> {
-  return upsertCursorAccounts(parseCursorImportJson(json))
+export async function importCursorAccountsFromJson(
+  json: string,
+  tags: string[] = []
+): Promise<CursorAccount[]> {
+  return upsertCursorAccounts(parseCursorImportJson(json).map((payload) => withTags(payload, tags)))
 }
 
-export async function importCursorAccountFromLocal(): Promise<CursorAccount> {
+export async function importCursorAccountFromLocal(tags: string[] = []): Promise<CursorAccount> {
   const payload = readLocalCursorAuth()
   if (!payload) throw new Error('未找到本机 Cursor 的登录信息，请先在 Cursor 里登录一次')
-  return enrichAndUpsert(payload)
+  return enrichAndUpsert(withTags(payload, tags))
 }
 
 /** 日志与结果里不放整段凭据：有 userId 用 userId，否则只露 token 开头。 */
@@ -281,11 +285,12 @@ function credentialLabel(credential: CursorSessionCredential): string {
  * 已失效的 token 存成僵尸账号。
  */
 async function importCredential(
-  credential: CursorSessionCredential
+  credential: CursorSessionCredential,
+  tags: string[]
 ): Promise<CursorCredentialImportSummary['added'][number]> {
   try {
     const payload = await loginWithCursorSessionCookie(credential)
-    return { account: await enrichAndUpsert(payload), viaHandshake: true }
+    return { account: await enrichAndUpsert(withTags(payload, tags)), viaHandshake: true }
   } catch (handshakeError) {
     console.warn(
       `[CursorAccounts] cookie 握手失败，尝试按 access token 入库: ${credentialLabel(credential)}, ${errorMessage(handshakeError)}`
@@ -296,7 +301,7 @@ async function importCredential(
       throw handshakeError
     }
     return {
-      account: await enrichAndUpsert({ email: '', accessToken: credential.token }),
+      account: await enrichAndUpsert(withTags({ email: '', accessToken: credential.token }, tags)),
       viaHandshake: false
     }
   }
@@ -307,7 +312,8 @@ async function importCredential(
  * 逐条处理、互不影响，最后一起汇报成功与失败。
  */
 export async function addCursorAccountsFromCredentials(
-  input: string
+  input: string,
+  tags: string[] = []
 ): Promise<CursorCredentialImportSummary> {
   const { credentials, unrecognized } = parseCursorSessionCredentials(input)
   if (credentials.length === 0 && unrecognized.length === 0) {
@@ -322,7 +328,7 @@ export async function addCursorAccountsFromCredentials(
   }
   for (const credential of credentials) {
     try {
-      summary.added.push(await importCredential(credential))
+      summary.added.push(await importCredential(credential, tags))
     } catch (error) {
       summary.failed.push({ label: credentialLabel(credential), error: errorMessage(error) })
     }
@@ -330,8 +336,11 @@ export async function addCursorAccountsFromCredentials(
   return summary
 }
 
-export async function finishCursorOAuthLogin(loginId: string): Promise<CursorAccount> {
-  return enrichAndUpsert(await completeCursorOAuthLogin(loginId))
+export async function finishCursorOAuthLogin(
+  loginId: string,
+  tags: string[] = []
+): Promise<CursorAccount> {
+  return enrichAndUpsert(withTags(await completeCursorOAuthLogin(loginId), tags))
 }
 
 export async function exportCursorAccounts(ids: string[]): Promise<string> {

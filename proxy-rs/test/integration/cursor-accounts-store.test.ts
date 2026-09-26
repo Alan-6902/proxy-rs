@@ -32,7 +32,8 @@ import {
   updateCursorAccountTags,
   updateCursorAutoRefreshSettings,
   upsertCursorAccount,
-  upsertCursorAccounts
+  upsertCursorAccounts,
+  withTags
 } from '../../src/main/cursorAccounts/accountStore'
 
 function fakeJwt(sub: string): string {
@@ -129,6 +130,42 @@ describe('Cursor 账号加密存储', () => {
     expect(second.tags).toEqual(['主力', 'vip', '备用'])
     expect(second.createdAt).toBe(first.createdAt)
     expect(await loadCursorAccounts()).toHaveLength(1)
+  })
+
+  it('新增时带的标签随入库一次写上：与 payload 自带、库里已有的标签去重合并，标签内空格保留', async () => {
+    const plain = { email: 'b@example.com', accessToken: fakeJwt('auth0|user_B') }
+    // 没有标签时不制造拷贝
+    expect(withTags(plain, [])).toBe(plain)
+
+    const [first] = await upsertCursorAccounts([
+      withTags({ email: 'a@example.com', accessToken: fakeJwt('auth0|user_A'), tags: ['主力'] }, [
+        '赏帽 token2',
+        ' 主力 '
+      ])
+    ])
+    expect(first.tags).toEqual(['主力', '赏帽 token2'])
+
+    // 同一账号再导一次并带新标签：旧标签不丢，新的追加
+    const again = await upsertCursorAccount(
+      withTags({ email: 'a@example.com', accessToken: fakeJwt('auth0|user_A') }, ['vip', 'VIP'])
+    )
+    expect(again.id).toBe(first.id)
+    expect(again.tags).toEqual(['主力', '赏帽 token2', 'vip'])
+  })
+
+  it('更新标签是整体替换：删掉的不会回来，空数组即清空', async () => {
+    const saved = await upsertCursorAccount({
+      email: 'a@example.com',
+      accessToken: fakeJwt('auth0|user_A'),
+      tags: ['主力', '备用']
+    })
+    const replaced = await updateCursorAccountTags(saved.id, ['备用', '  ', 'grok'])
+    expect(replaced.tags).toEqual(['备用', 'grok'])
+    expect((await loadCursorAccounts())[0].tags).toEqual(['备用', 'grok'])
+
+    await updateCursorAccountTags(saved.id, [])
+    expect((await loadCursorAccounts())[0].tags).toEqual([])
+    await expect(updateCursorAccountTags('cursor_missing', ['x'])).rejects.toThrow('账号不存在')
   })
 
   it('没有 authId 时按邮箱匹配；邮箱不同则新建', async () => {

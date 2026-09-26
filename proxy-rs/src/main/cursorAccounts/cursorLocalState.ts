@@ -117,7 +117,8 @@ export function readLocalCursorAuth(dbPath = getCursorStateDbPath()): CursorImpo
   if (!accessToken || !email) return null
 
   const refreshToken = items.get(CURSOR_STATE_KEY.refreshToken)
-  const authId = items.get(CURSOR_STATE_KEY.authId) ?? extractAuthIdFromAccessToken(accessToken)
+  // 身份以 token 里的 sub 为准：库里的 authId 键可能是上一个号残留的，信它会把"当前使用"判到别的号
+  const authId = extractAuthIdFromAccessToken(accessToken) ?? items.get(CURSOR_STATE_KEY.authId)
   const membershipType = items.get(CURSOR_STATE_KEY.membershipType)
   const subscriptionStatus = items.get(CURSOR_STATE_KEY.subscriptionStatus)
   const signUpType = normalizeCursorSignUpType(items.get(CURSOR_STATE_KEY.signUpType))
@@ -153,6 +154,7 @@ export function writeLocalCursorAuth(
     [CURSOR_STATE_KEY.accessToken, account.accessToken],
     [CURSOR_STATE_KEY.refreshToken, account.refreshToken],
     [CURSOR_STATE_KEY.cachedEmail, account.email],
+    [CURSOR_STATE_KEY.authId, extractAuthIdFromAccessToken(account.accessToken) ?? account.authId],
     [CURSOR_STATE_KEY.membershipType, account.membershipType],
     [CURSOR_STATE_KEY.subscriptionStatus, account.subscriptionStatus],
     [CURSOR_STATE_KEY.legacyAccessToken, account.accessToken],
@@ -163,10 +165,14 @@ export function writeLocalCursorAuth(
   const db = new DatabaseSync(dbPath)
   try {
     const upsert = db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)')
+    const remove = db.prepare('DELETE FROM ItemTable WHERE key = ?')
     db.exec('BEGIN')
     try {
       for (const [key, value] of entries) {
+        // 新号没有的字段要删而不是留着：残留的旧 authId 会让"当前使用"指到别的号，
+        // 残留的旧 refreshToken 会让 Cursor 在 token 过期后静默刷回上一个号
         if (value) upsert.run(key, value)
+        else remove.run(key)
       }
       db.exec('COMMIT')
     } catch (error) {

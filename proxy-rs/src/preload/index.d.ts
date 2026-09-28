@@ -226,6 +226,10 @@ interface KiroApi {
     callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
   ) => () => void
 
+  // 已交给本机反代托管的账号 id 集合
+  getAdminManagedIds: () => Promise<string[]>
+  onAdminManagedChanged: (callback: (ids: string[]) => void) => () => void
+
   // 后台批量检查账号状态（不刷新 Token）
   backgroundBatchCheck: (
     accounts: Array<{

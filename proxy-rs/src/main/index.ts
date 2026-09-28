@@ -30,10 +30,12 @@ import { AccountStoreCoordinator } from './accountStoreCoordinator'
 import {
   ADMIN_MANAGED_REFRESH_SUPPRESSED,
   adminManagedEntry,
+  adminManagedIdsSnapshot,
   isAdminManagedAccount,
   isAdminManagedRefreshToken,
   reconcileManagedAccounts,
   reloadAdminManagedIds,
+  setAdminManagedChangeListener,
   setAdminManagedRefreshTokenResolver
 } from './adminManaged/gate'
 import { syncManagedAccountFromAdmin } from './adminManaged/accountSync'
@@ -5546,9 +5548,14 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
     const candidates = await readCanonicalKiroRefreshTransportCandidates(refreshToken)
     return candidates[0]?.accountId
   })
+  // 托管集合一变就推给渲染进程，用于把 CLI 切号之类的入口置灰
+  setAdminManagedChangeListener((ids) => sendRendererEvent('admin-managed-changed', ids))
   await reloadAdminManagedIds()
   // 升级时把反代里已有的凭据认回来；必须先于刷新调度，否则存量号会被本地刷一次
   await runAdminManagedAdoptionOnce()
+
+  // 渲染进程启动时拉一次托管集合（事件只推增量，首帧需要主动取）
+  ipcMain.handle('get-admin-managed-ids', () => [...adminManagedIdsSnapshot()])
 
   // 启动主进程池 token 刷新调度器（不依赖窗口可见/存活，挂托盘也照常刷新）
   startMainPoolTokenRefresh()

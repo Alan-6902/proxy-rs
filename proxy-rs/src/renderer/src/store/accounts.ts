@@ -141,6 +141,14 @@ interface AccountsState {
   /** 批量验活是否进行中 */
   livenessRunning: boolean
 
+  /**
+   * 已交给本机反代托管的账号 id。
+   *
+   * 托管账号的 token 由反代维护，本地不发刷新请求；CLI 切号这类需要本地凭据的
+   * 入口据此置灰。权威在主进程，这里只是镜像。
+   */
+  adminManagedIds: Set<string>
+
   // 加载状态
   isLoading: boolean
   isSyncing: boolean
@@ -244,6 +252,8 @@ interface AccountsActions {
   runAccountLiveness: (id: string, params?: { model?: string; message?: string }) => Promise<void>
   stopLivenessBatch: () => void
   clearLivenessResults: () => void
+  /** 覆盖式写入托管账号集合（主进程推来的始终是全量快照） */
+  setAdminManagedIds: (ids: string[]) => void
 
   // 导入导出
   exportAccounts: (ids?: string[]) => AccountExportData
@@ -470,6 +480,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   selectedIds: new Set(),
   selectionGroupId: undefined,
   livenessResults: new Map(),
+  adminManagedIds: new Set(),
   livenessRunning: false,
   isLoading: false,
   isSyncing: false,
@@ -1051,6 +1062,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   stopLivenessBatch: () => {
     livenessAbort = true
     set({ livenessRunning: false })
+  },
+
+  setAdminManagedIds: (ids) => {
+    set({ adminManagedIds: new Set(ids) })
   },
 
   clearLivenessResults: () => {

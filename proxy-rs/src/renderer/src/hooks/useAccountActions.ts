@@ -152,8 +152,11 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   }, [resolved, isEn])
 
   const switchAccountToCli = useAccountsStore((state) => state.switchAccountToCli)
+  const adminManagedIds = useAccountsStore((state) => state.adminManagedIds)
   const [cliSwitchState, setCliSwitchState] = useState<CliSwitchState>('idle')
-  const canSwitchCli = canRefreshUpstreamCredential(account.credentials)
+  const isAdminManaged = adminManagedIds.has(account.id)
+  // 托管账号的凭据由反代维护，本地那份已被轮换作废，切到 CLI 只会得到一份死 token
+  const canSwitchCli = canRefreshUpstreamCredential(account.credentials) && !isAdminManaged
 
   const switchToCli = useCallback(() => {
     if (!canSwitchCli || cliSwitchState === 'switching') return
@@ -178,9 +181,13 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   }, [canSwitchCli, cliSwitchState, switchAccountToCli, account.id, isEn])
 
   const cliSwitchTitle = !canSwitchCli
-    ? isEn
-      ? 'Only OAuth accounts with a refresh token can be used by Kiro CLI'
-      : '只有带 Refresh Token 的 OAuth 账号能切到 Kiro CLI'
+    ? isAdminManaged
+      ? isEn
+        ? 'Managed by the local proxy — its credentials are not maintained here'
+        : '该账号由本机反代托管，凭据不在本地维护，请在反代侧使用'
+      : isEn
+        ? 'Only OAuth accounts with a refresh token can be used by Kiro CLI'
+        : '只有带 Refresh Token 的 OAuth 账号能切到 Kiro CLI'
     : cliSwitchState === 'done'
       ? isEn
         ? 'Kiro CLI switched to this account'

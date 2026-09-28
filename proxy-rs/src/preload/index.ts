@@ -183,6 +183,19 @@ const api = {
     }
   },
 
+  // 已交给本机反代托管的账号 id 集合（渲染层据此把 CLI 切号等入口置灰）
+  getAdminManagedIds: (): Promise<string[]> => ipcRenderer.invoke('get-admin-managed-ids'),
+
+  onAdminManagedChanged: (callback: (ids: string[]) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, ids: string[]): void => {
+      callback(ids)
+    }
+    ipcRenderer.on('admin-managed-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('admin-managed-changed', handler)
+    }
+  },
+
   // 后台批量检查账号状态（不刷新 Token）
   backgroundBatchCheck: (
     accounts: Array<{

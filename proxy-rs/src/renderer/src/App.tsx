@@ -205,8 +205,19 @@ function App(): React.JSX.Element {
         flushTimer = setTimeout(flush, BACKGROUND_RESULT_FLUSH_MS)
       }
     })
+    /*
+     * 托管账号集合：事件推的是全量快照，但首帧没有事件，得主动取一次。
+     * 用于把 CLI 切号这类需要本地凭据的入口置灰。
+     */
+    const unsubscribeManaged = window.api.onAdminManagedChanged((ids) => {
+      useAccountsStore.getState().setAdminManagedIds(ids)
+    })
+    void window.api.getAdminManagedIds().then((ids) => {
+      useAccountsStore.getState().setAdminManagedIds(ids)
+    })
     return () => {
       unsubscribe()
+      unsubscribeManaged()
       if (flushTimer) {
         clearTimeout(flushTimer)
         // 卸载前 flush 剩余结果，防止丢失

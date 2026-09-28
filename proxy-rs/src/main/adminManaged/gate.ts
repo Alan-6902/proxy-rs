@@ -36,6 +36,18 @@ type RefreshTokenResolver = (refreshToken: string) => Promise<string | undefined
 let managedIds: ReadonlySet<string> = new Set()
 let managedById: ReadonlyMap<string, AdminManagedAccountEntry> = new Map()
 let resolveAccountIdByRefreshToken: RefreshTokenResolver | undefined
+let managedIdsListener: ((ids: readonly string[]) => void) | undefined
+
+/**
+ * 注册托管集合的变更通知，由主进程用来把最新集合推给渲染进程。
+ *
+ * 做成回调而不是在 gate 里直接发 IPC：gate 是纯逻辑层，不该知道窗口的存在。
+ */
+export function setAdminManagedChangeListener(
+  listener: (ids: readonly string[]) => void
+): void {
+  managedIdsListener = listener
+}
 
 /**
  * 注入「明文 refreshToken → accountId」的反查实现。
@@ -52,6 +64,7 @@ export async function reloadAdminManagedIds(): Promise<ReadonlySet<string>> {
   const entries = await loadAdminManagedEntries()
   managedById = new Map(entries.map((entry) => [entry.accountId, entry]))
   managedIds = new Set(managedById.keys())
+  managedIdsListener?.([...managedIds])
   return managedIds
 }
 

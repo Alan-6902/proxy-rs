@@ -194,6 +194,40 @@ fn extract_session_id(user_id: &str) -> Option<String> {
     None
 }
 
+/// 从请求内容派生确定性的 conversationId
+///
+/// 仅用于下游客户端未提供 `metadata.user_id` 的场景。此时不能退化成每轮
+/// 生成新 UUID：Kiro 按 `conversationId` 关联 prompt cache 与会话诊断，
+/// 每轮换新 ID 会把一个持续会话表现成一串互不相关的独立会话。
+///
+/// 锚点取「system + 第一条消息」——两者在会话生命周期内恒定，因此同一会话
+/// 的每一轮派生出同一个 ID，不同会话（哪怕只差一个字）派生出不同 ID。
+///
+/// 权衡：两个会话若 system 与首条消息逐字相同，会共用同一个 ID。这比每轮
+/// 新 ID 更接近正常客户端行为，故接受。
+fn derive_conversation_id(
+    req: &MessagesRequest,
+    first_message: &super::types::Message,
+) -> String {
+    let mut hasher = Sha256::new();
+
+    if let Some(system) = &req.system {
+        hasher.update(serde_json::to_vec(system).unwrap_or_default());
+    }
+    // 分隔符，避免 system 与首条消息的字节序列产生拼接歧义
+    hasher.update(b"\x1f");
+    hasher.update(serde_json::to_vec(first_message).unwrap_or_default());
+
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // 置 RFC 9562 version 8（自定义）与 RFC 4122 variant，保持合法 UUID 形状
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    Uuid::from_bytes(bytes).to_string()
+}
+
 /// 简单验证 UUID 格式（36 字符，包含 4 个连字符）
 fn is_valid_uuid(s: &str) -> bool {
     s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
@@ -262,13 +296,14 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     };
 
     // 3. 生成会话 ID 和代理 ID
-    // 优先从 metadata.user_id 中提取 session UUID 作为 conversationId
+    // 优先从 metadata.user_id 中提取 session UUID 作为 conversationId；
+    // 提不到时从请求内容派生，而不是每轮新 UUID（见 derive_conversation_id）
     let conversation_id = req
         .metadata
         .as_ref()
         .and_then(|m| m.user_id.as_ref())
         .and_then(|user_id| extract_session_id(user_id))
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .unwrap_or_else(|| derive_conversation_id(req, &messages[0]));
     let agent_continuation_id = Uuid::new_v4().to_string();
 
     // 4. 确定触发类型
@@ -1403,7 +1438,7 @@ mod tests {
     fn test_convert_request_without_metadata() {
         use super::super::types::Message as AnthropicMessage;
 
-        // 测试没有 metadata 的请求，应该生成新的 UUID
+        // 测试没有 metadata 的请求，应该从请求内容派生稳定的 UUID
         let req = MessagesRequest {
             model: "claude-sonnet-4".to_string(),
             max_tokens: 1024,
@@ -1432,6 +1467,95 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    use super::super::types::{Message as AnthropicMessage, SystemMessage};
+
+    fn user_msg(text: &str) -> AnthropicMessage {
+        AnthropicMessage {
+            role: "user".to_string(),
+            content: serde_json::json!(text),
+        }
+    }
+
+    fn assistant_msg(text: &str) -> AnthropicMessage {
+        AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!(text),
+        }
+    }
+
+    fn make_request(
+        system: Option<Vec<SystemMessage>>,
+        messages: Vec<AnthropicMessage>,
+    ) -> MessagesRequest {
+        MessagesRequest {
+            model: "claude-sonnet-4.5".to_string(),
+            max_tokens: 1024,
+            messages,
+            stream: false,
+            system,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_derive_conversation_id_stable_across_turns() {
+        // 同一会话的第二轮比第一轮多出 assistant/user 两条历史，
+        // 但 system 与首条消息不变 → conversationId 必须一致
+        let turn1 = convert_request(&make_request(None, vec![user_msg("Hello")])).unwrap();
+        let turn2 = convert_request(&make_request(
+            None,
+            vec![
+                user_msg("Hello"),
+                assistant_msg("Hi!"),
+                user_msg("Tell me more"),
+            ],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            turn1.conversation_state.conversation_id,
+            turn2.conversation_state.conversation_id
+        );
+    }
+
+    #[test]
+    fn test_derive_conversation_id_differs_across_sessions() {
+        let a = convert_request(&make_request(None, vec![user_msg("Hello")])).unwrap();
+        let b = convert_request(&make_request(None, vec![user_msg("Hi there")])).unwrap();
+        let c = convert_request(&make_request(
+            Some(vec![SystemMessage {
+                text: "You are terse.".to_string(),
+            }]),
+            vec![user_msg("Hello")],
+        ))
+        .unwrap();
+
+        assert_ne!(
+            a.conversation_state.conversation_id,
+            b.conversation_state.conversation_id
+        );
+        assert_ne!(
+            a.conversation_state.conversation_id,
+            c.conversation_state.conversation_id
+        );
+    }
+
+    #[test]
+    fn test_derive_conversation_id_is_well_formed_v8_uuid() {
+        let result = convert_request(&make_request(None, vec![user_msg("Hello")])).unwrap();
+        let id = result.conversation_state.conversation_id;
+
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+        // 第 14 位是 version（8 = 自定义），第 19 位是 variant（10xx）
+        assert_eq!(id.chars().nth(14), Some('8'));
+        assert!(matches!(id.chars().nth(19), Some('8' | '9' | 'a' | 'b')));
     }
 
     #[test]

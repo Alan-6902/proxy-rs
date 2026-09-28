@@ -14,8 +14,11 @@ use crate::kiro::token_manager::{MultiTokenManager, UsageLimitsHttpError};
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    CredentialsStatusResponse, EnsureFreshRequest, EnsureFreshResponse, ImportAccountRequest,
+    ImportAccountResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest, SetProxyRequest,
+    StoreInfoResponse,
 };
+use crate::kiro::account_store::NewAccountMeta;
 
 /// 余额缓存过期时间（秒），5 分钟
 ///
@@ -95,6 +98,8 @@ impl AdminService {
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
                 auth_region: entry.auth_region,
                 api_region: entry.api_region,
+                in_pool: entry.in_pool,
+                credential_version: entry.credential_version,
             })
             .collect();
 
@@ -278,6 +283,107 @@ impl AdminService {
     }
 
     /// 删除凭据
+    /// 加入 / 移出号池
+    pub fn set_in_pool(&self, id: u64, in_pool: bool) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .set_in_pool(id, in_pool)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 确保凭据新鲜（刷新只在 kiro-rs 发生）
+    pub async fn ensure_fresh(
+        &self,
+        id: u64,
+        req: EnsureFreshRequest,
+    ) -> Result<EnsureFreshResponse, AdminServiceError> {
+        let credential_version = self
+            .token_manager
+            .ensure_fresh(id, req.expected_credential_version, req.force)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?;
+        Ok(EnsureFreshResponse { credential_version })
+    }
+
+    /// 设置凭据级代理
+    pub fn set_proxy(&self, id: u64, req: SetProxyRequest) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .set_proxy(id, req.proxy_url, req.proxy_username, req.proxy_password)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 导入已有凭据（不刷新）
+    pub fn import_account(
+        &self,
+        req: ImportAccountRequest,
+    ) -> Result<ImportAccountResponse, AdminServiceError> {
+        if let Some(ref name) = req.endpoint {
+            if !self.known_endpoints.contains(name) {
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "未知端点 \"{}\"",
+                    name
+                )));
+            }
+        }
+        let cred = KiroCredentials {
+            access_token: req.access_token,
+            refresh_token: req.refresh_token,
+            expires_at: crate::kiro::account_store::ms_to_rfc3339(req.expires_at_ms),
+            auth_method: Some(req.auth_method),
+            client_id: req.client_id,
+            client_secret: req.client_secret,
+            profile_arn: req.profile_arn,
+            priority: req.priority,
+            region: req.region,
+            auth_region: req.auth_region,
+            api_region: req.api_region,
+            machine_id: req.machine_id,
+            email: req.email,
+            proxy_url: req.proxy_url,
+            proxy_username: req.proxy_username,
+            proxy_password: req.proxy_password,
+            kiro_api_key: req.kiro_api_key,
+            endpoint: req.endpoint,
+            ..Default::default()
+        };
+        let meta = NewAccountMeta {
+            account_uuid: req.account_uuid,
+            in_pool: req.in_pool,
+            provider: req.provider,
+            start_url: req.start_url,
+            extra_json: req.extra.map(|v| v.to_string()),
+            nickname: req.nickname,
+            group_id: req.group_id,
+            tags_json: req
+                .tags
+                .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "[]".into())),
+            metadata_json: req.metadata.map(|v| v.to_string()),
+        };
+        let (credential_id, created) = self
+            .token_manager
+            .import_credential(cred, meta)
+            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        Ok(ImportAccountResponse {
+            credential_id,
+            created,
+        })
+    }
+
+    /// 账号库信息（proxy-rs 据此确认两端打开的是同一个库）
+    pub fn store_info(&self) -> StoreInfoResponse {
+        match self.token_manager.account_store() {
+            Some(store) => StoreInfoResponse {
+                enabled: true,
+                database_id: store.database_id().ok(),
+                path: Some(store.path().display().to_string()),
+            },
+            None => StoreInfoResponse {
+                enabled: false,
+                database_id: None,
+                path: None,
+            },
+        }
+    }
+
     pub fn delete_credential(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
             .delete_credential(id)
@@ -474,7 +580,8 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)

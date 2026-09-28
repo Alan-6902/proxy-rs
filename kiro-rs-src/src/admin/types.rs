@@ -75,6 +75,10 @@ pub struct CredentialStatusItem {
     pub auth_region: String,
     /// 实际生效的 API Region（API 请求用），已回退到全局配置
     pub api_region: String,
+    /// 是否在反代号池中（账号库模式下可能为 false）
+    pub in_pool: bool,
+    /// 账号库凭据版本，调用 ensure-fresh 时回传
+    pub credential_version: i64,
 }
 
 // ============ 操作请求 ============
@@ -277,4 +281,97 @@ impl AdminErrorResponse {
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::new("internal_error", message)
     }
+}
+
+// ============ 共享账号库（proxy-rs 接入） ============
+
+/// POST /credentials/:id/pool
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetInPoolRequest {
+    pub in_pool: bool,
+}
+
+/// POST /credentials/:id/ensure-fresh
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureFreshRequest {
+    /// 调用方所用 token 的版本；与当前版本不同说明已被轮换，直接复用
+    #[serde(default)]
+    pub expected_credential_version: Option<i64>,
+    /// 为 true 时即使未过期也刷新（仅当版本仍是 expected 时生效）
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureFreshResponse {
+    pub credential_version: i64,
+}
+
+/// POST /credentials/:id/proxy
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyRequest {
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+}
+
+/// POST /accounts/import：导入已有凭据，不刷新、不查额度
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAccountRequest {
+    /// proxy 侧账号 ID
+    pub account_uuid: Option<String>,
+    #[serde(default)]
+    pub in_pool: bool,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    /// 过期时间，Unix 毫秒
+    pub expires_at_ms: Option<i64>,
+    pub kiro_api_key: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub profile_arn: Option<String>,
+    pub region: Option<String>,
+    pub auth_region: Option<String>,
+    pub api_region: Option<String>,
+    pub machine_id: Option<String>,
+    pub email: Option<String>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub priority: u32,
+    /// proxy 侧登录来源（BuilderId / Enterprise / Github / Google）
+    pub provider: Option<String>,
+    pub start_url: Option<String>,
+    /// proxy 侧其余非秘密凭据配置
+    pub extra: Option<serde_json::Value>,
+    pub nickname: Option<String>,
+    pub group_id: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAccountResponse {
+    pub credential_id: u64,
+    /// false 表示命中已有账号，未新建
+    pub created: bool,
+}
+
+/// GET /store/info
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreInfoResponse {
+    pub enabled: bool,
+    pub database_id: Option<String>,
+    pub path: Option<String>,
 }

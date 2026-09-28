@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
+use kiro::account_store::{self, AccountStore};
 use kiro::endpoint::{AmazonQEndpoint, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
 use kiro::provider::KiroProvider;
@@ -35,19 +36,85 @@ async fn main() {
     let config_path = args
         .config
         .unwrap_or_else(|| Config::default_config_path().to_string());
-    let config = Config::load(&config_path).unwrap_or_else(|e| {
+    let mut config = Config::load(&config_path).unwrap_or_else(|e| {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    if let Some(host) = args.host.clone() {
+        config.host = host;
+    }
+    if let Some(port) = args.port {
+        config.port = port;
+    }
 
-    // 加载凭证（支持单对象或数组格式）
+    // 账号库一次性子命令：初始化 / 从 JSON 迁移，完成即退出
+    if let Some(db) = args.account_db.as_deref() {
+        let db_path = std::path::Path::new(db);
+        if args.init_account_db {
+            match AccountStore::create_new(db_path) {
+                Ok(store) => {
+                    tracing::info!(
+                        "已创建账号库 {}（database_id={}）",
+                        db,
+                        store.database_id().unwrap_or_default()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("创建账号库失败: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        if args.migrate_from_json {
+            let credentials_path = args
+                .credentials
+                .clone()
+                .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
+            let list = CredentialsConfig::load(&credentials_path)
+                .map(|c| c.into_sorted_credentials())
+                .unwrap_or_else(|e| {
+                    tracing::error!("加载凭证失败: {}", e);
+                    std::process::exit(1);
+                });
+            let stats = std::path::Path::new(&credentials_path)
+                .parent()
+                .map(|d| d.join("kiro_stats.json"));
+            match account_store::migrate_from_json(db_path, list, stats.as_deref()) {
+                Ok(n) => {
+                    tracing::info!("已从 {} 迁移 {} 个凭据到 {}", credentials_path, n, db);
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("迁移失败: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    // 账号库模式：只打开已存在的库，不会因路径写错静默建空库
+    let account_store = args.account_db.as_deref().map(|db| {
+        Arc::new(
+            AccountStore::open_existing(std::path::Path::new(db)).unwrap_or_else(|e| {
+                tracing::error!("打开账号库失败: {}", e);
+                std::process::exit(1);
+            }),
+        )
+    });
+
+    // 加载凭证（支持单对象或数组格式）；账号库模式下不读 JSON
     let credentials_path = args
         .credentials
         .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
-    let credentials_config = CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
-        tracing::error!("加载凭证失败: {}", e);
-        std::process::exit(1);
-    });
+    let credentials_config = if account_store.is_some() {
+        CredentialsConfig::Multiple(vec![])
+    } else {
+        CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
+            tracing::error!("加载凭证失败: {}", e);
+            std::process::exit(1);
+        })
+    };
 
     // 判断是否为多凭据格式（用于刷新后回写）
     let is_multiple_format = credentials_config.is_multiple();
@@ -56,7 +123,9 @@ async fn main() {
     let mut credentials_list = credentials_config.into_sorted_credentials();
 
     // 检查 KIRO_API_KEY 环境变量，自动创建 API Key 凭据
-    if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY") {
+    if account_store.is_some() && std::env::var("KIRO_API_KEY").is_ok_and(|v| !v.is_empty()) {
+        tracing::warn!("账号库模式下忽略 KIRO_API_KEY 环境变量；请通过 Admin API 导入该 API Key");
+    } else if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY") {
         if kiro_api_key.is_empty() {
             tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
         } else {
@@ -153,17 +222,31 @@ async fn main() {
     let endpoint_names: Vec<String> = endpoints.keys().cloned().collect();
 
     // 创建 MultiTokenManager 和 KiroProvider
-    let token_manager = MultiTokenManager::new(
-        config.clone(),
-        credentials_list,
-        proxy_config.clone(),
-        Some(credentials_path.into()),
-        is_multiple_format,
-    )
+    let token_manager = match &account_store {
+        Some(store) => {
+            MultiTokenManager::new_with_store(config.clone(), store.clone(), proxy_config.clone())
+        }
+        None => MultiTokenManager::new(
+            config.clone(),
+            credentials_list,
+            proxy_config.clone(),
+            Some(credentials_path.into()),
+            is_multiple_format,
+        ),
+    }
     .unwrap_or_else(|e| {
         tracing::error!("创建 Token 管理器失败: {}", e);
         std::process::exit(1);
     });
+    // 库中凭据声明的端点同样必须已注册
+    for entry in token_manager.snapshot().entries {
+        if let Some(name) = entry.endpoint.as_deref() {
+            if !endpoints.contains_key(name) {
+                tracing::error!("凭据 #{} 指定了未知端点 \"{}\"", entry.id, name);
+                std::process::exit(1);
+            }
+        }
+    }
     let token_manager = Arc::new(token_manager);
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
@@ -238,6 +321,56 @@ async fn main() {
         tracing::info!("  GET  /admin");
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("监听 {} 失败: {}", addr, e);
+            std::process::exit(1);
+        });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(args.exit_on_stdin_eof))
+        .await
+        .unwrap();
+    // 退出前把防抖中的统计写掉
+    token_manager.flush_stats();
+    tracing::info!("已退出");
+}
+
+/// SIGINT / SIGTERM，或（子进程模式下）stdin 关闭时触发优雅退出
+async fn shutdown_signal(watch_stdin: bool) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let terminate = async {
+        #[cfg(unix)]
+        {
+            if let Ok(mut s) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                s.recv().await;
+                return;
+            }
+        }
+        std::future::pending::<()>().await
+    };
+    let stdin_eof = async {
+        if !watch_stdin {
+            return std::future::pending::<()>().await;
+        }
+        use tokio::io::AsyncReadExt;
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 256];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        tracing::info!("stdin 已关闭（父进程退出），开始退出");
+    };
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+        _ = stdin_eof => {},
+    }
 }

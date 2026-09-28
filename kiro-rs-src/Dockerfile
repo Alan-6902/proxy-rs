@@ -14,6 +14,7 @@ RUN apk add --no-cache musl-dev perl make
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY migrations ./migrations
 COPY --from=frontend-builder /app/admin-ui/dist /app/admin-ui/dist
 
 RUN cargo build --release --no-default-features

@@ -9,8 +9,9 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, BalanceQuery, SetDisabledRequest, SetLoadBalancingModeRequest,
-        SetPriorityRequest, SuccessResponse,
+        AddCredentialRequest, BalanceQuery, EnsureFreshRequest, ImportAccountRequest,
+        SetDisabledRequest, SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
+        SetProxyRequest, SuccessResponse,
     },
 };
 
@@ -140,4 +141,69 @@ pub async fn set_load_balancing_mode(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// POST /api/admin/credentials/:id/pool
+/// 加入 / 移出反代号池
+pub async fn set_credential_in_pool(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetInPoolRequest>,
+) -> impl IntoResponse {
+    match state.service.set_in_pool(id, payload.in_pool) {
+        Ok(_) => {
+            let action = if payload.in_pool {
+                "已加入号池"
+            } else {
+                "已移出号池"
+            };
+            Json(SuccessResponse::new(format!("凭据 #{} {}", id, action))).into_response()
+        }
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/ensure-fresh
+/// 确保凭据新鲜，返回当前凭据版本
+pub async fn ensure_credential_fresh(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    payload: Option<Json<EnsureFreshRequest>>,
+) -> impl IntoResponse {
+    let req = payload.map(|Json(p)| p).unwrap_or_default();
+    match state.service.ensure_fresh(id, req).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/proxy
+/// 设置凭据级代理
+pub async fn set_credential_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetProxyRequest>,
+) -> impl IntoResponse {
+    match state.service.set_proxy(id, payload) {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 代理已更新", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/accounts/import
+/// 导入已有凭据（不刷新、不查额度）
+pub async fn import_account(
+    State(state): State<AdminState>,
+    Json(payload): Json<ImportAccountRequest>,
+) -> impl IntoResponse {
+    match state.service.import_account(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/store/info
+/// 账号库信息
+pub async fn get_store_info(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.store_info())
 }

@@ -19,6 +19,22 @@ pub struct UsageLimitsResponse {
     /// 使用量明细列表
     #[serde(default)]
     pub usage_breakdown_list: Vec<UsageBreakdown>,
+
+    /// 用户信息（userId 用作上游账号身份，见共享账号库 upstream_identity）
+    #[serde(default)]
+    pub user_info: Option<UserInfo>,
+
+    /// 上游原样响应，写入账号库 account_usage.raw_json 供 proxy-rs 解析展示
+    #[serde(skip)]
+    pub raw: serde_json::Value,
+}
+
+/// 用户信息
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// 订阅信息

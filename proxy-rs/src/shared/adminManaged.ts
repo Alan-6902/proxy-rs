@@ -14,6 +14,14 @@
 
 export type AdminManagedAuthMethod = 'api_key' | 'idc' | 'social'
 
+/**
+ * 托管账号的刷新被闸门拦下时返回的错误码。
+ *
+ * 主进程与渲染进程共用：渲染层据此把「无需刷新」与「刷新失败」区分开，
+ * 不把卡片标红——对托管账号来说「刷新被拦下」是预期行为，不是故障。
+ */
+export const ADMIN_MANAGED_REFRESH_SUPPRESSED = 'ADMIN_MANAGED_REFRESH_SUPPRESSED'
+
 export interface AdminManagedAccountEntry {
   /** 本地账号 id，托管判定的主键 */
   accountId: string

@@ -116,6 +116,7 @@ import {
   type LocalAdminExhaustedCleanupSummary
 } from '../shared/localAdminStats'
 import { LocalAdminStatsManager } from './localAdminStats/statsManager'
+import { fetchLocalAdminUsage } from './localAdminStats/statsClient'
 import {
   registerLocalAdminStatsIpcHandlers,
   sendLocalAdminStatsSnapshot
@@ -1655,6 +1656,14 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
     throw new Error('Kiro API Key 账号无法切换到 Kiro CLI')
   }
   if (!credentials.refreshToken) throw new Error('缺少 Refresh Token')
+  /*
+   * 托管账号不能切到 Kiro CLI：它的 refreshToken 早已被反代轮换作废，写进 CLI 的
+   * 会是一份死凭据——用户看到「切换成功」，CLI 那边立刻提示登录失效。挡在这里
+   * 比让它静默失效好。
+   */
+  if (isAdminManagedAccount(accountId)) {
+    throw new Error('该账号由反代托管，凭据不在本地维护，无法切换到 Kiro CLI')
+  }
 
   const socialProvider = resolveKiroCliSocialProvider(credentials.provider, account.idp)
   const isSocial = socialProvider !== undefined || credentials.authMethod === 'social'
@@ -1717,6 +1726,17 @@ async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise
   const [candidate] = await readCanonicalKiroRefreshTransportCandidates(token.refresh_token)
   // CLI 当前账号不在账号库里，交给 kiro-cli 自己续期
   if (!candidate) return
+  /*
+   * 托管账号不在这里续期：凭据由反代独占刷新，kiro-cli 手里那份副本会在反代轮换后
+   * 失效。让 CLI 自己拿旧 token 去刷，正是这次改造要消除的双边抢刷。
+   */
+  if (isAdminManagedAccount(candidate.accountId)) {
+    console.warn(
+      `[AdminManaged] kiro-cli 试图为托管账号 ${candidate.accountId} 续期，已跳过；` +
+        '该副本会在反代轮换凭据后失效，请在反代侧使用或重新登录'
+    )
+    return
+  }
   const canonical = await readCanonicalKiroCredentials(candidate.accountId)
   const result = await refreshStoredKiroCredentials({
     accountId: candidate.accountId,
@@ -3976,6 +3996,44 @@ app.whenReady().then(async () => {
           const timeoutMs = params?.timeoutMs ?? 45000
           const start = Date.now()
 
+          /*
+           * 托管账号的 token 由反代维护，本地这份要么已过期、要么根本刷不出来，
+           * 发不出消息级验活。改用反代的余额接口：能查出余额就说明反代拿这份凭据
+           * 成功通过了上游认证，比「本地 token 还在」更接近事实。
+           *
+           * 局限：反代对「不允许查额度」的账号（如 Enterprise）会返回错误，这类
+           * 账号在这里会显示验活失败，而它其实可能是好的。要彻底解决得靠反代新增
+           * 一个发消息探针端点。
+           */
+          if (acc?.id && isAdminManagedAccount(acc.id)) {
+            const managedEntry = adminManagedEntry(acc.id)
+            if (!managedEntry) {
+              return { success: false, error: '托管登记缺失，请重新推送该账号', latencyMs: 0 }
+            }
+            const probeStart = Date.now()
+            try {
+              const target = await resolveLocalAdminTarget()
+              const { usage, errors } = await fetchLocalAdminUsage(
+                { ...target, fetchImpl: localAdminFetchImpl },
+                [managedEntry.credentialId]
+              )
+              if (usage.size > 0) {
+                return { success: true, latencyMs: Date.now() - probeStart }
+              }
+              return {
+                success: false,
+                error: errors[0] ?? '反代未返回该凭据的余额',
+                latencyMs: Date.now() - probeStart
+              }
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+                latencyMs: Date.now() - probeStart
+              }
+            }
+          }
+
           const isApiKeyAccount = acc?.credentialKind === 'kiro_api_key'
           if (!acc || (isApiKeyAccount ? !acc.kiroApiKey : !acc.accessToken)) {
             return { success: false, error: '账号缺少上游凭据', latencyMs: 0 }
@@ -4675,6 +4733,46 @@ app.whenReady().then(async () => {
                 credentialRevision: newCredentials.credentialRevision
               }
             : undefined
+        }
+      }
+    }
+
+    /*
+     * 托管账号不走上游。
+     *
+     * 本地已经没有它的有效 token（刷新被闸门停掉），createSession / getUsageAndLimits
+     * 必然 401，随后那次「401 补刷」也会被闸门拦下。直接改从反代读余额与订阅，
+     * 顺带把 401 重试分支整段绕开。
+     *
+     * 反代不可达时如实报错、不退回直连：退回必然伴随一次刷新，等于重新引入双边抢刷。
+     */
+    if (isAdminManagedAccount(account?.id)) {
+      const entry = adminManagedEntry(account.id)
+      if (!entry) {
+        return { success: false, error: { message: '托管登记缺失，请重新推送该账号' } }
+      }
+      try {
+        const target = await resolveLocalAdminTarget()
+        const synced = await syncManagedAccountFromAdmin(
+          { ...target, fetchImpl: localAdminFetchImpl },
+          entry.credentialId
+        )
+        return {
+          success: true,
+          data: {
+            status: synced.status,
+            email: account.email,
+            subscriptionTitle: synced.subscription?.title,
+            usage: synced.usage,
+            subscription: synced.subscription,
+            // 托管账号的 token 由反代维护，本地没有新凭据可回写
+            newCredentials: undefined
+          }
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: { message: error instanceof Error ? error.message : String(error) }
         }
       }
     }

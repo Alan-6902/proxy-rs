@@ -10,6 +10,7 @@
  */
 
 import {
+  ADMIN_MANAGED_REFRESH_SUPPRESSED,
   shouldSuppressKiroRefresh,
   type AdminManagedAccountEntry,
   type AdminManagedReconcileDrop,
@@ -23,8 +24,12 @@ import {
   recordAdminManagedAccount
 } from './registryStore'
 
-/** 命中此错误码表示「刷新被托管闸门拦下」，调用方据此区分「失败」与「无需刷新」。 */
-export const ADMIN_MANAGED_REFRESH_SUPPRESSED = 'ADMIN_MANAGED_REFRESH_SUPPRESSED'
+/**
+ * 命中此错误码表示「刷新被托管闸门拦下」，调用方据此区分「失败」与「无需刷新」。
+ *
+ * 定义在 shared，渲染进程也要用它判断该不该把卡片标红。
+ */
+export { ADMIN_MANAGED_REFRESH_SUPPRESSED }
 
 type RefreshTokenResolver = (refreshToken: string) => Promise<string | undefined>
 

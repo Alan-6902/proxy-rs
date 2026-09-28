@@ -411,6 +411,12 @@ import { hasUpstreamKiroCredential } from '../types/account'
 
 import { canRefreshUpstreamCredential } from '../types/account'
 import { resolveBackgroundRefreshPlan } from '../../../shared/upstreamKiroCredentials'
+import { ADMIN_MANAGED_REFRESH_SUPPRESSED } from '../../../shared/adminManaged'
+
+/** 主进程返回该错误码表示「刷新被托管闸门拦下」——预期行为，不该按失败标红。 */
+function isAdminManagedRefreshSuppressed(error: { message?: string } | undefined): boolean {
+  return error?.message === ADMIN_MANAGED_REFRESH_SUPPRESSED
+}
 import { readPersistedLivenessModel } from '../hooks/useLivenessModels'
 
 /**
@@ -1299,7 +1305,10 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         get().saveToStorage()
         return true
       }
-      updateAccountStatus(id, 'error', result.error?.message)
+      // 托管账号的 token 由反代维护，「刷不了」是预期行为，不标红
+      if (!isAdminManagedRefreshSuppressed(result.error)) {
+        updateAccountStatus(id, 'error', result.error?.message)
+      }
       return false
     } catch (error) {
       updateAccountStatus(id, 'error', error instanceof Error ? error.message : 'Unknown error')
@@ -1515,7 +1524,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         if (isBanned) {
           // 封禁账户：设置错误状态并标记为封禁
           updateAccountStatus(id, 'error', `账户已封禁: ${result.error?.message}`)
-        } else {
+        } else if (!isAdminManagedRefreshSuppressed(result.error)) {
+          // 托管账号不走上游，这里的失败多半来自反代不可达，仍如实标红；
+          // 唯独「刷新被闸门拦下」是预期行为，跳过。
           updateAccountStatus(id, 'error', result.error?.message)
         }
       }

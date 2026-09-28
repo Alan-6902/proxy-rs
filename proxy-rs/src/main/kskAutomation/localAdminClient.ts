@@ -10,6 +10,7 @@ import {
   type LocalAdminPushResult
 } from '../../shared/localAdminPush'
 import type { KskCredentialCleanupResult } from './credentialCleanup'
+import { forgetManagedByCredentialId } from '../adminManaged/gate'
 
 export interface LocalAdminAccount {
   kiroApiKey: string
@@ -183,6 +184,22 @@ async function deleteRemoteCredential(input: {
   await requestJson(input.fetchImpl, target, input.adminApiKey, input.timeoutMs, {
     method: 'DELETE'
   })
+  /*
+   * 删除成功即注销托管登记：这个账号的凭据已不在反代，本地必须恢复刷新，
+   * 否则会永远停在「托管」状态、再也不刷 token。
+   *
+   * 放在这里而不是各个调用点：verifyOrRollback、按 key / 按 id 删除、额度耗尽
+   * 清理都要经过这个函数，一处覆盖全部。
+   */
+  try {
+    await forgetManagedByCredentialId(input.credentialId)
+  } catch (error) {
+    // 凭据已经删掉了，注销失败不该让它看起来像删除失败；下一轮回收器会补上
+    console.warn(
+      `[AdminManaged] 注销托管登记失败（凭据 #${input.credentialId} 已从反代删除）：`,
+      error instanceof Error ? error.message : error
+    )
+  }
 }
 
 /**

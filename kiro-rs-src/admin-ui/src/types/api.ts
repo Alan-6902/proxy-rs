@@ -31,6 +31,17 @@ export interface CredentialStatusItem {
   authRegion: string
   /** 实际生效的 API Region（API 请求用），后端已回退到全局配置 */
   apiRegion: string
+  /** 是否在反代号池中。共享账号库模式下可能为 false（账号由 proxy-rs 管理但不参与反代） */
+  inPool?: boolean
+  /** 账号库凭据版本 */
+  credentialVersion?: number
+}
+
+/** 共享账号库信息：enabled=false 时是传统的 credentials.json 模式 */
+export interface StoreInfoResponse {
+  enabled: boolean
+  databaseId?: string | null
+  path?: string | null
 }
 
 // 余额响应

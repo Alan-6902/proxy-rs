@@ -9,7 +9,7 @@ import {
   wrapStoreWithBridge,
   type RawStore
 } from '../../src/main/accountDb/bridge'
-import { toAccount, toImportRequest } from '../../src/main/accountDb/projection'
+import { toAccount, toImportRequest, withoutSecrets } from '../../src/main/accountDb/projection'
 import { planMigration, rollbackAccountDb } from '../../src/main/accountDb/migrate'
 import { managedEntryOf, defaultAccountDbConfig } from '../../src/main/accountDb/runtime'
 import type { KiroRsAdminTarget } from '../../src/main/accountDb/adminApi'
@@ -202,6 +202,27 @@ describe('projection', () => {
     db.close()
   })
 
+  it('脱敏投影去掉 token 明文，只保留"有没有"的标志', () => {
+    const path = createDb()
+    seed(path, { uuid: 'a', refreshToken: 'rt-secret' })
+    seed(path, { uuid: 'k', kiroApiKey: 'ksk_secret' })
+    const db = new AccountDb(path)
+    const [oauth, apiKey] = db.listRows().map((row) => withoutSecrets(toAccount(row)))
+    const oauthCred = oauth.credentials as Record<string, unknown>
+    expect(oauthCred.refreshToken).toBeUndefined()
+    expect(oauthCred.accessToken).toBeUndefined()
+    expect(oauthCred.clientSecret).toBeUndefined()
+    expect([oauthCred.hasAccessToken, oauthCred.hasRefreshToken]).toEqual([true, true])
+    // 非秘密字段保留，按钮可用性判断不受影响
+    expect(oauthCred.credentialKind).toBe('oauth')
+    expect(oauthCred.credentialRevision).toBe('0')
+    const keyCred = apiKey.credentials as Record<string, unknown>
+    expect(keyCred.kiroApiKey).toBeUndefined()
+    expect([keyCred.hasAccessToken, keyCred.hasRefreshToken]).toEqual([true, false])
+    expect(JSON.stringify([oauth, apiKey])).not.toContain('secret')
+    db.close()
+  })
+
   it('导入请求按账号认证方式映射，缺字段时拒绝', () => {
     const social = toImportRequest({
       id: 'p1',
@@ -332,22 +353,43 @@ describe('AccountDataBridge', () => {
     expect((await bridge.deleteAccounts(['db-1'], null))[0].reason).toMatch(/未运行/)
   })
 
-  it('代理绑定：只在 proxy 有绑定且不同时下发，没有绑定不清除', async () => {
-    const id = seed(path, { uuid: 'db-1', refreshToken: 'rt' })
-    seed(path, { uuid: 'db-2', refreshToken: 'rt2' })
-    const bodies: unknown[] = []
+  it('代理绑定：下发新绑定；解绑只清 proxy 自己设过的，迁移账号自带的代理保留', async () => {
+    const managed = seed(path, { uuid: 'db-1', refreshToken: 'rt' })
+    const migrated = seed(path, { uuid: 'db-2', refreshToken: 'rt2' })
+    // db-2 模拟迁移自 credentials.json、本来就配了代理的账号
+    const conn = new Database(path)
+    conn
+      .prepare('UPDATE account_credentials SET proxy_url = ? WHERE account_id = ?')
+      .run('http://from-credentials-json:1', migrated)
+    conn.close()
+    const calls: Array<[string, unknown]> = []
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      bodies.push([url, JSON.parse(String(init?.body))])
+      calls.push([url, JSON.parse(String(init?.body))])
       return jsonResponse(200, { success: true })
     }) as unknown as typeof fetch
+    let bound: string | undefined = 'socks5://p:1'
     const bridge = new AccountDataBridge(db, raw, {
       fetchImpl,
-      proxyUrlFor: (accountId) => (accountId === 'db-1' ? 'socks5://p:1' : undefined)
+      proxyUrlFor: (accountId) => (accountId === 'db-1' ? bound : undefined)
     })
+
     expect(await bridge.syncProxyBindings(TARGET)).toBe(1)
-    expect(bodies).toEqual([
-      [`${TARGET.baseUrl}/credentials/${id}/proxy`, { proxyUrl: 'socks5://p:1' }]
+    expect(calls).toEqual([
+      [`${TARGET.baseUrl}/credentials/${managed}/proxy`, { proxyUrl: 'socks5://p:1' }]
     ])
+    // 库里还没写回 proxy_url（kiro-rs 负责写），再同步一次不应重复下发
+    const write = new Database(path)
+    write
+      .prepare('UPDATE account_credentials SET proxy_url = ? WHERE account_id = ?')
+      .run('socks5://p:1', managed)
+    write.close()
+    calls.length = 0
+    expect(await bridge.syncProxyBindings(TARGET)).toBe(0)
+
+    // 解绑：proxy 设过的被清除，迁移账号自带的不动
+    bound = undefined
+    expect(await bridge.syncProxyBindings(TARGET)).toBe(1)
+    expect(calls).toEqual([[`${TARGET.baseUrl}/credentials/${managed}/proxy`, { proxyUrl: null }]])
   })
 
   it('wrapStoreWithBridge 只拦截 accountData，其余透传（含对象形式 set）', () => {

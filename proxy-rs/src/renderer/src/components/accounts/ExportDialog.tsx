@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, Badge } from '../ui'
 import { X, FileJson, FileText, Table, Clipboard, Check, Download, Key, Braces } from 'lucide-react'
@@ -17,7 +17,37 @@ interface ExportDialogProps {
   selectedCount: number
 }
 
-export function ExportDialog({ open, onClose, accounts, selectedCount }: ExportDialogProps) {
+export function ExportDialog({
+  open,
+  onClose,
+  accounts: maskedAccounts,
+  selectedCount
+}: ExportDialogProps) {
+  /*
+   * 账号库模式下账号列表不带 token 明文（改造方案 §6.3），而导出"包含凭据"必须要真值，
+   * 所以打开对话框时按需向主进程取一次带凭据的版本。非账号库模式返回 null，沿用入参。
+   */
+  const [revealed, setRevealed] = useState<Record<string, Account> | null>(null)
+  useEffect(() => {
+    if (!open) {
+      setRevealed(null)
+      return
+    }
+    let cancelled = false
+    void window.api
+      .accountDbAccountsWithSecrets(maskedAccounts.map((account) => account.id))
+      .then((result) => {
+        if (!cancelled) setRevealed((result as Record<string, Account> | null) ?? null)
+      })
+      .catch((error) => console.warn('[AccountDb] 取导出凭据失败：', error))
+    return () => {
+      cancelled = true
+    }
+  }, [open, maskedAccounts])
+  const accounts = revealed
+    ? maskedAccounts.map((account) => revealed[account.id] ?? account)
+    : maskedAccounts
+
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('json')
   const [includeCredentials, setIncludeCredentials] = useState(true)
   const [copied, setCopied] = useState(false)

@@ -156,6 +156,17 @@ export function toAccount(row: AccountDbRow): AccountLike {
   }
 }
 
+/** 账号库模式下发给渲染层的版本：去掉 token 明文，只留"有没有"（改造方案 §6.3） */
+export function withoutSecrets(account: AccountLike): AccountLike {
+  const credentials = { ...((account.credentials ?? {}) as Record<string, unknown>) }
+  const hasAccessToken = Boolean(credentials.accessToken || credentials.kiroApiKey)
+  const hasRefreshToken = Boolean(credentials.refreshToken)
+  for (const key of ['accessToken', 'refreshToken', 'kiroApiKey', 'clientSecret', 'csrfToken']) {
+    delete credentials[key]
+  }
+  return { ...account, credentials: { ...credentials, hasAccessToken, hasRefreshToken } }
+}
+
 export function toUiFields(account: AccountLike): AccountUiFields {
   const metadata: Record<string, unknown> = {}
   for (const key of METADATA_KEYS) {

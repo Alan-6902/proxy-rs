@@ -161,7 +161,8 @@ export function AccountDetailDialog({
   const subscription = account.subscription
   const credentials = account.credentials
   const canForceRefresh =
-    credentials.credentialKind !== 'kiro_api_key' && Boolean(credentials.refreshToken)
+    credentials.credentialKind !== 'kiro_api_key' &&
+    Boolean(credentials.refreshToken || credentials.hasRefreshToken)
 
   const handleForceRefresh = async (): Promise<void> => {
     if (!canForceRefresh) return

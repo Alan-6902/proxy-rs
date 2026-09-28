@@ -8,17 +8,40 @@ import {
   getCredentialBalance,
   addCredential,
   deleteCredential,
+  getStoreInfo,
+  setCredentialInPool,
   getLoadBalancingMode,
   setLoadBalancingMode,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
-// 查询凭据列表
-export function useCredentials() {
+// 查询凭据列表。all=true 时连未入池的账号一起列出（仅共享账号库模式有区别）
+export function useCredentials(all = false) {
   return useQuery({
-    queryKey: ['credentials'],
-    queryFn: getCredentials,
+    queryKey: ['credentials', all],
+    queryFn: () => getCredentials(all),
     refetchInterval: 30000, // 每 30 秒刷新一次
+  })
+}
+
+// 共享账号库信息：决定界面是否显示号池相关操作
+export function useStoreInfo() {
+  return useQuery({
+    queryKey: ['store-info'],
+    queryFn: getStoreInfo,
+    staleTime: Infinity,
+  })
+}
+
+// 加入 / 移出号池
+export function useSetInPool() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, inPool }: { id: number; inPool: boolean }) =>
+      setCredentialInPool(id, inPool),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
   })
 }
 
@@ -93,7 +116,8 @@ export function useAddCredential() {
 export function useDeleteCredential() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (id: number) => deleteCredential(id),
+    mutationFn: ({ id, purge }: { id: number; purge?: boolean }) =>
+      deleteCredential(id, purge ?? false),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

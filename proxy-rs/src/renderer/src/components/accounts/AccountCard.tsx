@@ -228,6 +228,7 @@ export const AccountCard = memo(function AccountCard({
     showPushError,
     dismissPushError,
     canPush,
+    inPool,
     pushTitle,
     switchToCli,
     cliSwitchState,
@@ -1040,7 +1041,7 @@ export const AccountCard = memo(function AccountCard({
               variant="ghost"
               className={cn(
                 'h-7 w-6',
-                pushState === 'created' || pushState === 'existing'
+                pushState === 'created' || pushState === 'existing' || inPool === true
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : pushState === 'error'
                     ? 'text-destructive'
@@ -1055,7 +1056,7 @@ export const AccountCard = memo(function AccountCard({
             >
               {pushState === 'pushing' ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : pushState === 'created' || pushState === 'existing' ? (
+              ) : pushState === 'created' || pushState === 'existing' || inPool === true ? (
                 <CloudCheck className="h-3.5 w-3.5" />
               ) : (
                 <CloudUpload className="h-3.5 w-3.5" />

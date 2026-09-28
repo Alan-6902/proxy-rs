@@ -180,7 +180,27 @@ describe.skipIf(!existsSync(BIN))('账号库端到端（真实 kiro-rs）', () =
       })
       expect(db.listRows().find((r) => r.accountUuid === 'proxy-local')!.inPool).toBe(true)
 
-      // 6. 删除账号
+      // 6. ensure-fresh：API Key 账号直接返回当前版本（不刷新）
+      const fresh = await adminRequest<{ credentialVersion: number }>(
+        target,
+        `/credentials/${local.id}/ensure-fresh`,
+        { method: 'POST', body: {} }
+      )
+      expect(fresh.credentialVersion).toBe(0)
+
+      // 7. 号池开关：移出后 Admin 默认列表看不到，加回来又出现
+      await adminRequest(target, `/credentials/${local.id}/pool`, {
+        method: 'POST',
+        body: { inPool: false }
+      })
+      expect(db.listRows().find((r) => r.accountUuid === 'proxy-local')!.inPool).toBe(false)
+      const afterOut = await adminRequest<{ credentials: Array<{ id: number }> }>(
+        target,
+        '/credentials'
+      )
+      expect(afterOut.credentials.map((c) => c.id)).toEqual([4])
+
+      // 8. 删除账号
       expect(await bridge.deleteAccounts(['proxy-local'], target)).toEqual([])
       expect(db.listRows().map((r) => r.accountUuid)).toEqual(['proxy-linked'])
       // 已删除账号出现在旧快照里也不会复活

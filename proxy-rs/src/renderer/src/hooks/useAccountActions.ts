@@ -35,6 +35,8 @@ interface UseAccountActions {
   dismissPushError: () => void
   /** 该账号的凭据是否可推送；false 时按钮置灰，原因见 pushError */
   canPush: boolean
+  /** 账号库模式下该账号是否在反代号池中；未启用账号库时为 undefined */
+  inPool?: boolean
   /** 按钮 title：说明将要推什么，或为什么不能推 */
   pushTitle: string
   /** 把该账号切换为 Kiro CLI 当前账号 */
@@ -72,7 +74,39 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     void runAccountLiveness(account.id)
   }, [runAccountLiveness, account.id])
 
+  /*
+   * 账号库模式：账号本来就在共享库里，"加入反代"只是把它放进号池，不需要再推一份凭据
+   * （渲染层也已经拿不到明文凭据）。inPool 为真时按钮变成"移出号池"。
+   */
+  const accountDb = account.accountDb
+  const inPool = accountDb?.inPool === true
+
+  const setPool = useCallback(
+    (next: boolean) => {
+      if (pushState === 'pushing') return
+      setPushState('pushing')
+      setPushError(undefined)
+      void (async () => {
+        const result = await window.api.accountDbSetInPool(account.id, next)
+        if (result.success) {
+          setPushState(next ? 'created' : 'existing')
+          setTimeout(() => setPushState('idle'), PUSH_FEEDBACK_MS)
+          // 号池状态在库里，重新读一次账号列表才能刷新徽标
+          void useAccountsStore.getState().reloadAccountsFromMain()
+          return
+        }
+        setPushState('error')
+        setPushError(result.error || (isEn ? 'Unknown error' : '未知错误'))
+      })()
+    },
+    [account.id, pushState, isEn]
+  )
+
   const pushToAdmin = useCallback(() => {
+    if (accountDb) {
+      setPool(!inPool)
+      return
+    }
     if (!resolved.ok || pushState === 'pushing') return
     setPushState('pushing')
     setPushError(undefined)
@@ -110,7 +144,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
         setPushError(error instanceof Error ? error.message : String(error))
       }
     })()
-  }, [resolved, pushState, account.credentials, account.email])
+  }, [accountDb, inPool, setPool, resolved, pushState, account.credentials, account.email])
 
   const dismissPushError = useCallback(() => {
     setPushState('idle')
@@ -139,6 +173,15 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   }, [pushError, isEn, pushToAdmin, dismissPushError])
 
   const pushTitle = useMemo(() => {
+    if (accountDb) {
+      return inPool
+        ? isEn
+          ? 'In the reverse-proxy pool — click to remove it (the account itself is kept)'
+          : '已在反代号池中，点击移出（账号仍保留在账号库里）'
+        : isEn
+          ? 'Add this account to the reverse-proxy pool'
+          : '把该账号加入反代号池（由 kiro-rs 接单）'
+    }
     if (!resolved.ok) {
       return isEn
         ? `Cannot add to kiro-admin: ${resolved.reason}`
@@ -149,7 +192,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     return isEn
       ? `Add to kiro-admin (${method}); only permanently invalid credentials are removed, transient failures are kept`
       : `添加到 kiro-admin（以 ${method} 凭据创建；仅明确失效才删除，暂时性故障会保留）`
-  }, [resolved, isEn])
+  }, [accountDb, inPool, resolved, isEn])
 
   const switchAccountToCli = useAccountsStore((state) => state.switchAccountToCli)
   const adminManagedIds = useAccountsStore((state) => state.adminManagedIds)
@@ -204,7 +247,10 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     pushError: resolved.ok ? pushError : resolved.reason,
     showPushError,
     dismissPushError,
-    canPush: resolved.ok,
+    // 账号库模式：账号已入库即可切号池状态，不需要渲染层持有凭据
+    canPush: accountDb ? true : resolved.ok,
+    /** 账号库模式下该账号是否在反代号池中；未启用账号库时为 undefined */
+    inPool: accountDb ? inPool : undefined,
     pushTitle,
     switchToCli,
     cliSwitchState,

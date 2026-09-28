@@ -158,6 +158,19 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
     }
   }
 
+  /*
+   * 账号库模式下凭据由 kiro-rs 独占写入（改造方案 §0.2），这里改成只读：
+   * 保存也写不进去，留着可编辑只会让人以为改生效了。
+   */
+  const [credentialsReadOnly, setCredentialsReadOnly] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    void window.api
+      .accountDbStatus()
+      .then((status) => setCredentialsReadOnly(status.enabled === true))
+      .catch(() => setCredentialsReadOnly(false))
+  }, [open])
+
   // 保存
   const handleSave = () => {
     if (!account || !accountInfo) return
@@ -179,21 +192,24 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
       email: accountInfo.email,
       userId: accountInfo.userId,
       nickname: nickname || undefined,
-      credentials: {
-        ...account.credentials,
-        credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
-        kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
-        accessToken: isApiKey ? undefined : accountInfo.accessToken,
-        csrfToken: '',
-        refreshToken: isApiKey ? undefined : refreshToken,
-        clientId: isApiKey ? undefined : clientId,
-        clientSecret: isApiKey ? undefined : clientSecret,
-        region,
-        expiresAt: isApiKey ? undefined : now + 3600 * 1000,
-        preferredEndpoint: preferredEndpoint || undefined,
-        endpointFallbackOrder: endpointFallbackOrder ? [...endpointFallbackOrder] : undefined,
-        endpointFallbackAfterFailures
-      },
+      // 只读模式下原样带回，避免把脱敏后的空值写进快照
+      credentials: credentialsReadOnly
+        ? account.credentials
+        : {
+            ...account.credentials,
+            credentialKind: isApiKey ? 'kiro_api_key' : 'oauth',
+            kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
+            accessToken: isApiKey ? undefined : accountInfo.accessToken,
+            csrfToken: '',
+            refreshToken: isApiKey ? undefined : refreshToken,
+            clientId: isApiKey ? undefined : clientId,
+            clientSecret: isApiKey ? undefined : clientSecret,
+            region,
+            expiresAt: isApiKey ? undefined : now + 3600 * 1000,
+            preferredEndpoint: preferredEndpoint || undefined,
+            endpointFallbackOrder: endpointFallbackOrder ? [...endpointFallbackOrder] : undefined,
+            endpointFallbackAfterFailures
+          },
       subscription: {
         type: accountInfo.subscriptionType as SubscriptionType,
         title: accountInfo.subscriptionTitle,
@@ -336,6 +352,14 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
               </div>
             </div>
 
+            {credentialsReadOnly && (
+              <p className="text-xs text-warning">
+                {isEn
+                  ? 'Credentials are managed by the local reverse proxy (kiro-rs) and are read-only here.'
+                  : '凭据由本机反代（kiro-rs）统一管理，此处只读；如需更换请重新登录该账号。'}
+              </p>
+            )}
+
             {!isApiKey && account?.credentials.authMethod === 'social' && (
               <p className="text-xs text-muted-foreground">
                 {isEn
@@ -379,6 +403,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                   <textarea
                     value={kiroApiKey}
                     onChange={(event) => setKiroApiKey(event.target.value)}
+                    readOnly={credentialsReadOnly}
                     placeholder="ksk_..."
                     className="w-full min-h-[80px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 resize-none font-mono"
                   />
@@ -393,6 +418,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                   <textarea
                     value={refreshToken}
                     onChange={(e) => setRefreshToken(e.target.value)}
+                    readOnly={credentialsReadOnly}
                     placeholder="aorAAAAA..."
                     className="w-full min-h-[80px] px-3 py-2.5 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
                   />
@@ -410,6 +436,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                         type="text"
                         value={clientId}
                         onChange={(e) => setClientId(e.target.value)}
+                        readOnly={credentialsReadOnly}
                         placeholder="Client ID"
                         className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 font-mono"
                       />
@@ -423,6 +450,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                         type="text"
                         value={clientSecret}
                         onChange={(e) => setClientSecret(e.target.value)}
+                        readOnly={credentialsReadOnly}
                         placeholder="Client Secret"
                         className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 font-mono"
                       />
@@ -434,6 +462,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                     <select
                       value={region}
                       onChange={(e) => setRegion(e.target.value)}
+                      disabled={credentialsReadOnly}
                       className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
                     >
                       <option value="us-east-1">us-east-1 (N. Virginia)</option>

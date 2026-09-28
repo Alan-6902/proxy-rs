@@ -194,6 +194,11 @@ interface KiroApi {
   accountDbDelete: (
     ids: string[]
   ) => Promise<{ success: boolean; failed: Array<{ id: string; reason: string }> }>
+  accountDbSetInPool: (
+    accountId: string,
+    inPool: boolean
+  ) => Promise<{ success: boolean; error?: string }>
+  accountDbAccountsWithSecrets: (ids: string[]) => Promise<Record<string, unknown> | null>
   accountDbStatus: () => Promise<{
     enabled: boolean
     dbPath?: string

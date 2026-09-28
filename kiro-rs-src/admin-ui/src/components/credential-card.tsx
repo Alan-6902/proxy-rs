@@ -6,6 +6,8 @@ import {
   Loader2,
   RefreshCw,
   RotateCcw,
+  LogOut,
+  PlusCircle,
   Trash2,
   Wallet,
   X,
@@ -30,6 +32,8 @@ import {
   useResetFailure,
   useDeleteCredential,
   useForceRefreshToken,
+  useSetInPool,
+  useStoreInfo,
 } from '@/hooks/use-credentials'
 import { cn } from '@/lib/utils'
 
@@ -135,8 +139,26 @@ export function CredentialCard({
     })
   }
 
-  const handleDelete = () => {
-    deleteCredential.mutate(credential.id, {
+  /*
+   * 共享账号库模式下账号由 proxy-rs 管理，Admin 的"删除"只是把它移出反代号池；
+   * 要彻底删除得显式 purge。传统 credentials.json 模式下两者等价。
+   */
+  const storeEnabled = useStoreInfo().data?.enabled === true
+  const setInPool = useSetInPool()
+  const inPool = credential.inPool !== false
+
+  const handleSetInPool = (next: boolean) => {
+    setInPool.mutate(
+      { id: credential.id, inPool: next },
+      {
+        onSuccess: (res) => toast.success(res.message),
+        onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+      }
+    )
+  }
+
+  const handleDelete = (purge = false) => {
+    deleteCredential.mutate({ id: credential.id, purge }, {
       onSuccess: (res) => {
         toast.success(res.message)
         setShowDeleteDialog(false)
@@ -215,6 +237,9 @@ export function CredentialCard({
                 </span>
                 {credential.isCurrent && <Badge variant="success" className="rounded-full">当前路由</Badge>}
                 {credential.disabled && <Badge variant="destructive" className="rounded-full">已禁用</Badge>}
+                {storeEnabled && !inPool && (
+                  <Badge variant="outline" className="rounded-full" title="该账号在共享账号库中，但不参与反代请求">未入池</Badge>
+                )}
               </div>
               <h2 className="mt-1.5 truncate text-[15px] font-semibold tracking-tight" title={credential.email || `凭据 #${credential.id}`}>
                 {credential.email || `凭据 #${credential.id}`}
@@ -338,8 +363,18 @@ export function CredentialCard({
                   <RotateCcw className="mr-1.5 h-3.5 w-3.5" />重置失败
                 </Button>
               )}
+              {storeEnabled && !inPool ? (
+                <Button size="sm" variant="ghost" className="h-8 rounded-lg px-2.5 text-xs" onClick={() => handleSetInPool(true)} disabled={setInPool.isPending}>
+                  <PlusCircle className="mr-1.5 h-3.5 w-3.5" />加入号池
+                </Button>
+              ) : null}
+              {storeEnabled && inPool ? (
+                <Button size="sm" variant="ghost" className="h-8 rounded-lg px-2.5 text-xs" onClick={() => handleSetInPool(false)} disabled={setInPool.isPending}>
+                  <LogOut className="mr-1.5 h-3.5 w-3.5" />移出号池
+                </Button>
+              ) : null}
               <Button size="sm" variant="ghost" className="h-8 rounded-lg px-2.5 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setShowDeleteDialog(true)} disabled={deleting}>
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" />删除
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />{storeEnabled ? '彻底删除' : '删除'}
               </Button>
             </div>
           </section>
@@ -350,12 +385,14 @@ export function CredentialCard({
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认删除凭据</DialogTitle>
+            <DialogTitle>{storeEnabled ? '从账号库彻底删除' : '确认删除凭据'}</DialogTitle>
             <DialogDescription>
-              您确定要删除凭据 #{credential.id} 吗？此操作无法撤销。
+              {storeEnabled
+                ? `凭据 #${credential.id} 将从共享账号库删除，proxy-rs 的账号列表里也会消失，且不能用同一账号 ID 重新导入。只想让它不再接反代请求，请用"移出号池"。`
+                : `您确定要删除凭据 #${credential.id} 吗？此操作无法撤销。`}
             </DialogDescription>
           </DialogHeader>
-          {!credential.disabled && (
+          {!storeEnabled && !credential.disabled && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
               这条凭据还在启用中，删除会先自动禁用它。
               {credential.isCurrent && ' 它是当前活跃凭据，删除后会切换到优先级最高的可用凭据。'}
@@ -371,7 +408,13 @@ export function CredentialCard({
             </Button>
             <Button
               variant="destructive"
-              onClick={credential.disabled ? handleDelete : handleDisableAndDelete}
+              onClick={
+                storeEnabled
+                  ? () => handleDelete(true)
+                  : credential.disabled
+                    ? () => handleDelete()
+                    : handleDisableAndDelete
+              }
               disabled={deleting}
             >
               {deleting

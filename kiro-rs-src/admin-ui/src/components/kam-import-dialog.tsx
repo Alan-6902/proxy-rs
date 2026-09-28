@@ -160,7 +160,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
       return { success: false, error: `禁用失败: ${extractErrorMessage(error)}` }
     }
     try {
-      await deleteCredential(id)
+      await deleteCredential({ id, purge: true })
       return { success: true }
     } catch (error) {
       return { success: false, error: `删除失败: ${extractErrorMessage(error)}` }

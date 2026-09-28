@@ -27,7 +27,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useSetDisabled, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useSetDisabled, useLoadBalancingMode, useSetLoadBalancingMode, useStoreInfo } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -64,7 +64,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
   })
 
   const queryClient = useQueryClient()
-  const { data, isLoading, error, refetch } = useCredentials()
+  /*
+   * 共享账号库模式下 Admin 列表默认只显示号池中的账号（保持"反代凭据"语义）。
+   * 打开这个开关能看到库里其它由 proxy-rs 管理的账号，并把它们加入号池。
+   */
+  const [showAllAccounts, setShowAllAccounts] = useState(false)
+  const storeEnabled = useStoreInfo().data?.enabled === true
+  const { data, isLoading, error, refetch } = useCredentials(storeEnabled && showAllAccounts)
   const { mutate: resetFailure } = useResetFailure()
   const { mutateAsync: setDisabledAsync } = useSetDisabled()
   const { mutateAsync: deleteCredentialAsync } = useDeleteCredential()
@@ -169,7 +175,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
     if (!disabled) {
       await setDisabledAsync({ id, disabled: true })
     }
-    await deleteCredentialAsync(id)
+    // 账号库模式下 Admin 的批量删除同样是彻底删除（与卡片上的按钮一致）
+    await deleteCredentialAsync({ id, purge: true })
   }
 
   // 批量删除选中的凭据（启用中的会先自动禁用）
@@ -611,6 +618,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
               </span>
             </Button>
+            {storeEnabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAllAccounts((value) => !value)}
+                title={showAllAccounts ? '只看反代号池中的账号' : '显示账号库里的全部账号（含未入池）'}
+                className="h-9 gap-2 rounded-xl bg-card/70 px-2.5 shadow-sm sm:px-3"
+              >
+                <Database className="h-4 w-4 text-primary" />
+                <span className="hidden md:inline">{showAllAccounts ? '全部账号' : '仅号池'}</span>
+              </Button>
+            )}
             <Button variant="ghost" size="icon" onClick={toggleDarkMode} className="h-9 w-9 rounded-xl" aria-label="切换深浅色主题" title="切换深浅色主题">
               {darkMode ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
             </Button>

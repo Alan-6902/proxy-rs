@@ -176,7 +176,8 @@ app.setName(APP_NAME)
 // 可在本机正式版运行时安全地起第二个实例做验证
 app.setPath(
   'userData',
-  process.env.PROXY_RS_USER_DATA_DIR?.trim() || join(app.getPath('appData'), APP_DATA_DIRECTORY_NAME)
+  process.env.PROXY_RS_USER_DATA_DIR?.trim() ||
+    join(app.getPath('appData'), APP_DATA_DIRECTORY_NAME)
 )
 
 // ============ 自动更新配置 ============
@@ -1267,13 +1268,17 @@ let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
 import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
+import { withoutSecrets, type AccountLike } from './accountDb/projection'
 import {
+  accountDbAccountsWithSecrets,
   accountDbAdminTarget,
   accountDbBackupPayload,
   accountDbBridge,
   accountDbStatus,
   activateAccountDb,
   defaultAccountDbConfig,
+  accountDbRow,
+  ensureFreshAccountDbCredential,
   isAccountDbMode,
   loadAccountDbConfig,
   startAccountDbWatcher,
@@ -1283,6 +1288,7 @@ import {
   type AccountDbConfig
 } from './accountDb/runtime'
 import { rollbackAccountDb, runMigration } from './accountDb/migrate'
+import { setInPool as setAccountInPool } from './accountDb/adminApi'
 import { loadAdminManagedEntries } from './adminManaged/registryStore'
 const accountStoreCoordinator = new AccountStoreCoordinator()
 type CanonicalKiroCredentialRefreshResult = OidcRefreshResult & {
@@ -1513,6 +1519,83 @@ async function syncKiroCliAfterRefresh(
   }
 }
 
+/** proxy 自己调上游（模型、订阅、验活）需要的凭据与区域信息 */
+interface UpstreamCallContext {
+  credential: Exclude<UpstreamKiroCredential, string>
+  region?: string
+  profileArn?: string
+  provider?: string
+  authMethod?: string
+  proxyUrl?: string
+  /** 账号库凭据版本，401 重试时回传给 kiro-rs */
+  credentialVersion?: number
+}
+
+/**
+ * 账号库模式下 proxy 调上游前的取值：先请 kiro-rs 确保 token 新鲜，再从库里读。
+ * 非账号库模式或账号未入库时返回 null，调用方沿用渲染层传来的凭据。
+ */
+async function accountDbUpstreamContext(
+  accountId: string | undefined,
+  options: { expectedCredentialVersion?: number; force?: boolean } = {}
+): Promise<UpstreamCallContext | { error: string } | null> {
+  if (!accountId) return null
+  const row = accountDbRow(accountId)
+  if (!row) return null
+  const fresh = await ensureFreshAccountDbCredential({
+    accountId,
+    expectedCredentialVersion: options.expectedCredentialVersion ?? row.credentialVersion,
+    force: options.force
+  })
+  if (!fresh) return null
+  if (!fresh.success || !fresh.accessToken) return { error: fresh.error ?? '无法取得可用凭据' }
+  const latest = accountDbRow(accountId) ?? row
+  return {
+    credential: resolveUpstreamKiroCredential(
+      latest.authKind === 'api_key'
+        ? {
+            credentialKind: 'kiro_api_key',
+            kiroApiKey: fresh.accessToken,
+            idp: latest.provider ?? undefined
+          }
+        : {
+            credentialKind: 'oauth',
+            accessToken: fresh.accessToken,
+            idp: latest.provider ?? undefined
+          }
+    ),
+    region: latest.apiRegion ?? latest.authRegion ?? latest.region ?? undefined,
+    profileArn: latest.profileArn ?? undefined,
+    provider: latest.provider ?? undefined,
+    authMethod:
+      latest.authKind === 'api_key' ? undefined : latest.authMethod === 'idc' ? 'IdC' : 'social',
+    proxyUrl: latest.proxyUrl ?? undefined,
+    credentialVersion: Number(fresh.credentialRevision)
+  }
+}
+
+/** 401 时按账号库凭据版本重试一次：版本已变就用新 token，否则请 kiro-rs 刷新 */
+async function withAccountDbRetry<T>(
+  accountId: string | undefined,
+  run: (context: UpstreamCallContext | null) => Promise<T>,
+  initial: UpstreamCallContext | null
+): Promise<T> {
+  try {
+    return await run(initial)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const unauthorized = message.includes('401') || message.includes('Unauthorized')
+    if (!unauthorized || !initial?.credentialVersion || !accountId) throw error
+    const retry = await accountDbUpstreamContext(accountId, {
+      expectedCredentialVersion: initial.credentialVersion,
+      force: true
+    })
+    if (!retry || 'error' in retry) throw error
+    console.log(`[AccountDb] 上游 401，已请 kiro-rs 刷新后重试：${accountId}`)
+    return await run(retry)
+  }
+}
+
 async function refreshStoredKiroCredentials(params: {
   accountId: string
   expectedRefreshToken: string
@@ -1523,6 +1606,27 @@ async function refreshStoredKiroCredentials(params: {
   authMethod?: string
   proxyUrl?: string
 }): Promise<CanonicalKiroCredentialRefreshResult> {
+  /*
+   * 账号库模式：刷新只在 kiro-rs 发生。这里把请求转过去并返回库中最新凭据，
+   * 于是所有入口（手动刷新、状态检查的 401 重试、后台批量、验活、诊断）都自动走新协议。
+   * expectedCredentialRevision 是调用方所用 token 的版本，传给 kiro-rs 用于判断
+   * "是否已被别处轮换"：已轮换则直接复用新 token，不再多轮换一次。
+   */
+  const fresh = await ensureFreshAccountDbCredential({
+    accountId: params.accountId,
+    expectedCredentialVersion: Number(params.expectedCredentialRevision) || undefined
+  })
+  if (fresh) {
+    return fresh.success
+      ? {
+          ...fresh,
+          expiresIn: fresh.expiresAt
+            ? Math.max(0, Math.ceil((fresh.expiresAt - Date.now()) / 1000))
+            : undefined
+        }
+      : { success: false, error: fresh.error }
+  }
+
   /*
    * 权威闸门：账号已托管给反代时本地一律不刷。
    *
@@ -2949,7 +3053,10 @@ let rawAccountStore: (RawStore & { path: string }) | null = null
 let accountDbStartupError: string | null = null
 
 /** 账号绑定的出口代理（与 readAccountBoundProxyUrl 同一判据），供账号库同步给 kiro-rs */
-function resolveBoundProxyUrl(accountId: string, data: Record<string, unknown>): string | undefined {
+function resolveBoundProxyUrl(
+  accountId: string,
+  data: Record<string, unknown>
+): string | undefined {
   const bindings = data.accountProxyBindings as Record<string, string> | undefined
   const pool = data.proxyPool as
     | Record<string, { url?: string; enabled?: boolean; status?: string }>
@@ -3634,12 +3741,19 @@ app.whenReady().then(async () => {
   await initStore()
 
   // 账号库迁移 / 回滚命令行（改造方案 P5）：执行完即退出，不进入正常启动
-  if (process.argv.some((arg) => arg.startsWith('--migrate-account-db') || arg === '--rollback-account-db')) {
+  if (
+    process.argv.some(
+      (arg) => arg.startsWith('--migrate-account-db') || arg === '--rollback-account-db'
+    )
+  ) {
     await runAccountDbCommand(process.argv)
     return
   }
   if (accountDbStartupError) {
-    dialog.showErrorBox('账号库不可用', `${accountDbStartupError}\n\n账号操作已停用，请检查账号库文件后重启。`)
+    dialog.showErrorBox(
+      '账号库不可用',
+      `${accountDbStartupError}\n\n账号操作已停用，请检查账号库文件后重启。`
+    )
   }
   if (isAccountDbMode()) void startAccountDbServices()
 
@@ -4213,11 +4327,31 @@ app.whenReady().then(async () => {
   ipcMain.handle('load-accounts', async () => {
     try {
       await initStore()
-      return store!.get('accountData', EMPTY_ACCOUNT_DATA)
+      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA)
+      if (!isAccountDbMode() || !data || typeof data !== 'object') return data
+      // 账号库模式：普通列表不下发 token 明文，只给"有没有"的标志
+      const record = data as { accounts?: Record<string, AccountLike> }
+      return {
+        ...record,
+        accounts: Object.fromEntries(
+          Object.entries(record.accounts ?? {}).map(([id, account]) => [
+            id,
+            withoutSecrets(account)
+          ])
+        )
+      }
     } catch (error) {
       console.error('Failed to load accounts:', error)
       return null
     }
+  })
+
+  // IPC: 取带凭据的账号（导出 / 复制凭据这类显式操作；账号库模式下列表已脱敏）
+  ipcMain.handle('account-db:accounts-with-secrets', async (_event, ids: unknown) => {
+    await initStore()
+    if (!isAccountDbMode()) return null
+    const list = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
+    return accountDbAccountsWithSecrets(list)
   })
 
   // IPC: 删除账号（账号库模式经 kiro-rs 删除；旧模式由 save-accounts 快照完成，这里无操作）
@@ -4229,6 +4363,21 @@ app.whenReady().then(async () => {
       bridge.deleteAccounts(list, accountDbAdminTarget())
     )
     return { success: failed.length === 0, failed }
+  })
+
+  // IPC: 加入 / 移出反代号池（账号库模式；号池成员才接反代请求）
+  ipcMain.handle('account-db:set-in-pool', async (_event, accountId: string, inPool: boolean) => {
+    await initStore()
+    const row = accountDbRow(accountId)
+    if (!row) return { success: false, error: '账号尚未进入账号库，请稍后重试' }
+    const target = accountDbAdminTarget()
+    if (!target) return { success: false, error: 'kiro-rs 尚未就绪' }
+    try {
+      await setAccountInPool(target, row.id, inPool)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
   })
 
   // IPC: 账号库状态（是否启用、kiro-rs 子进程状态、待导入数量）
@@ -4889,10 +5038,15 @@ app.whenReady().then(async () => {
         kiroApiKey,
         idp: provider || account.idp
       })
-      const upstreamAuth = getUpstreamKiroAuth(upstreamCredential)
+      // 账号库模式：凭据以库为准（渲染层不再持有明文），先请 kiro-rs 确保新鲜
+      const dbContext = await accountDbUpstreamContext(account.id)
+      if (dbContext && 'error' in dbContext) {
+        return { success: false, error: { message: dbContext.error } }
+      }
+      const upstreamAuth = getUpstreamKiroAuth(dbContext?.credential ?? upstreamCredential)
 
       // 查询账号绑定的代理（账号池）
-      const boundProxyUrl = readAccountBoundProxyUrl(account.id || '')
+      const boundProxyUrl = dbContext?.proxyUrl ?? readAccountBoundProxyUrl(account.id || '')
 
       // 确定正确的 idp：优先使用 credentials.provider，否则回退到 account.idp
       // 社交登录使用实际的 provider (Github/Google)，IdC 使用 BuilderId
@@ -4921,10 +5075,10 @@ app.whenReady().then(async () => {
                 }
               ),
           getUsageAndLimits(
-            upstreamCredential,
+            dbContext?.credential ?? upstreamCredential,
             idp,
-            account.profileArn || profileArn,
-            apiRegion || region,
+            dbContext?.profileArn ?? (account.profileArn || profileArn),
+            dbContext?.region ?? (apiRegion || region),
             account?.email,
             boundProxyUrl
           )
@@ -5024,142 +5178,152 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 后台批量刷新账号（在主进程执行，不阻塞 UI）
-/**
- * 托管账号在后台轮询里的处理：不发 token 刷新请求，改为从反代读用量与订阅状态。
- *
- * 返回值表示这一轮是否算成功——「跳过同步」（syncInfo=false）也算成功，它不是失败。
- *
- * 特意不弹 TokenRefreshFailed 通知：那个通知的语义是「token 刷新失败」，而托管账号
- * 压根没刷 token；上百个托管号每 5 分钟误报一次会把通知系统淹掉。
- */
-async function syncManagedAccountIntoBatch(
-  account: BackgroundRefreshAccount,
-  syncInfo: boolean,
-  refreshManaged: boolean = false
-): Promise<boolean> {
-  const accountId = account.id
-  const entry = accountId ? adminManagedEntry(accountId) : undefined
-  if (!accountId || !entry) return true
+  /**
+   * 托管账号在后台轮询里的处理：不发 token 刷新请求，改为从反代读用量与订阅状态。
+   *
+   * 返回值表示这一轮是否算成功——「跳过同步」（syncInfo=false）也算成功，它不是失败。
+   *
+   * 特意不弹 TokenRefreshFailed 通知：那个通知的语义是「token 刷新失败」，而托管账号
+   * 压根没刷 token；上百个托管号每 5 分钟误报一次会把通知系统淹掉。
+   */
+  async function syncManagedAccountIntoBatch(
+    account: BackgroundRefreshAccount,
+    syncInfo: boolean,
+    refreshManaged: boolean = false
+  ): Promise<boolean> {
+    const accountId = account.id
+    const entry = accountId ? adminManagedEntry(accountId) : undefined
+    if (!accountId || !entry) return true
 
-  // syncInfo=false 的轮次只关心 token，托管账号没有 token 可刷，省掉这次 loopback
-  if (!syncInfo && !refreshManaged) return true
+    // syncInfo=false 的轮次只关心 token，托管账号没有 token 可刷，省掉这次 loopback
+    if (!syncInfo && !refreshManaged) return true
 
-  try {
-    const target = await resolveLocalAdminTarget()
-    const adminTarget = { ...target, fetchImpl: localAdminFetchImpl }
-    if (refreshManaged && entry.authMethod !== 'api_key') {
-      await refreshManagedAccountFromAdmin(adminTarget, entry.credentialId)
-    }
-    const synced = syncInfo
-      ? await syncManagedAccountFromAdmin(adminTarget, entry.credentialId, Date.now(), refreshManaged)
-      : { status: 'active' as const, usage: undefined, subscription: undefined, errorMessage: undefined }
-    // 账号库模式：kiro-rs 已把上游原样额度写进库，用它补全 base / bonus / 试用明细
-    const projected = syncInfo ? accountDbBridge()?.projectedAccount(accountId) : undefined
-    if (projected && synced.status === 'active') {
-      synced.usage = projected.usage as typeof synced.usage
-      synced.subscription = projected.subscription as typeof synced.subscription
-    }
-    sendRendererEvent('background-refresh-result', {
-      id: accountId,
-      success: synced.status === 'active',
-      error: synced.errorMessage,
-      data: {
-        usage: synced.usage,
-        subscription: synced.subscription,
-        status: synced.status,
-        errorMessage: synced.errorMessage
+    try {
+      const target = await resolveLocalAdminTarget()
+      const adminTarget = { ...target, fetchImpl: localAdminFetchImpl }
+      if (refreshManaged && entry.authMethod !== 'api_key') {
+        await refreshManagedAccountFromAdmin(adminTarget, entry.credentialId)
       }
-    })
-    return synced.status === 'active'
-  } catch (error) {
-    sendRendererEvent('background-refresh-result', {
-      id: accountId,
-      success: false,
-      error: error instanceof Error ? error.message : String(error)
-    })
-    return false
-  }
-}
-
-const ADMIN_MANAGED_ADOPTION_KEY = 'adminManagedAdoptionDone'
-
-/**
- * 升级时的一次性认领：把反代里已有的凭据认回本地账号并登记为托管。
- *
- * 不做的话，改造前推给反代的账号在登记表里没有条目，升级后会立刻恢复本地刷新、
- * 重新开始双边抢刷——而烧号不可逆。
- *
- * 认领结果直接落盘、不要求用户先确认：漏认的代价是继续烧号，误认的代价只是该账号
- * 暂时不本地刷新（UI 可一键取消）。两边代价不对称，所以宁枉勿纵。
- */
-async function runAdminManagedAdoptionOnce(): Promise<void> {
-  if (!store) return
-  // 账号库模式：库里的账号全部由 kiro-rs 管理，不需要认领
-  if (isAccountDbMode()) return
-  if (store.get(ADMIN_MANAGED_ADOPTION_KEY, false) === true) return
-
-  try {
-    const accountData = store.get('accountData') as
-      | {
-          accounts?: Record<
-            string,
-            { email?: string; credentials?: { refreshToken?: string; kiroApiKey?: string } }
-          >
+      const synced = syncInfo
+        ? await syncManagedAccountFromAdmin(
+            adminTarget,
+            entry.credentialId,
+            Date.now(),
+            refreshManaged
+          )
+        : {
+            status: 'active' as const,
+            usage: undefined,
+            subscription: undefined,
+            errorMessage: undefined
+          }
+      // 账号库模式：kiro-rs 已把上游原样额度写进库，用它补全 base / bonus / 试用明细
+      const projected = syncInfo ? accountDbBridge()?.projectedAccount(accountId) : undefined
+      if (projected && synced.status === 'active') {
+        synced.usage = projected.usage as typeof synced.usage
+        synced.subscription = projected.subscription as typeof synced.subscription
+      }
+      sendRendererEvent('background-refresh-result', {
+        id: accountId,
+        success: synced.status === 'active',
+        error: synced.errorMessage,
+        data: {
+          usage: synced.usage,
+          subscription: synced.subscription,
+          status: synced.status,
+          errorMessage: synced.errorMessage
         }
-      | undefined
-    const accounts = Object.entries(accountData?.accounts ?? {}).map(([id, account]) => {
-      const refreshToken = account.credentials?.refreshToken?.trim()
-      const kiroApiKey = account.credentials?.kiroApiKey?.trim()
-      return {
-        id,
-        email: account.email,
-        refreshTokenHash: refreshToken ? sha256Hex(refreshToken) : undefined,
-        kiroApiKeyHash: kiroApiKey ? sha256Hex(kiroApiKey) : undefined
-      }
-    })
-    if (accounts.length === 0) return
-
-    const target = await resolveLocalAdminTarget()
-    const payload = await requestJson(
-      localAdminFetchImpl,
-      `${resolveLocalAdminApiBase(target.baseUrl)}/credentials`,
-      target.adminApiKey.trim(),
-      Math.max(3, target.timeoutSeconds) * 1000,
-      { method: 'GET' }
-    )
-
-    const { claimed, ambiguousEmail } = matchRemoteCredentialToLocalAccount({
-      accounts,
-      remote: readRemoteCredentials(payload)
-        .map((credential) => ({
-          id: remoteCredentialId(credential) ?? '',
-          credentialIdentity: credential.credentialIdentity,
-          email: credential.email,
-          authMethod: credential.authMethod,
-          apiKeyHash: credential.apiKeyHash,
-          refreshTokenHash: credential.refreshTokenHash
-        }))
-        .filter((credential) => credential.id.length > 0),
-      now: Date.now()
-    })
-
-    for (const entry of claimed) {
-      await recordAdminManagedAccount(entry)
+      })
+      return synced.status === 'active'
+    } catch (error) {
+      sendRendererEvent('background-refresh-result', {
+        id: accountId,
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return false
     }
-    await reloadAdminManagedIds()
-    store.set(ADMIN_MANAGED_ADOPTION_KEY, true)
-    console.log(
-      `[AdminManaged] 认领完成：${claimed.length} 个账号登记为反代托管` +
-        (ambiguousEmail.length > 0 ? `；${ambiguousEmail.length} 个因邮箱在本地重复未认领` : '')
-    )
-  } catch (error) {
-    // 反代未配置或不可达：不落 flag，下次启动重试
-    console.warn(
-      '[AdminManaged] 认领未完成（反代不可达或未配置），下次启动重试：',
-      error instanceof Error ? error.message : error
-    )
   }
-}
+
+  const ADMIN_MANAGED_ADOPTION_KEY = 'adminManagedAdoptionDone'
+
+  /**
+   * 升级时的一次性认领：把反代里已有的凭据认回本地账号并登记为托管。
+   *
+   * 不做的话，改造前推给反代的账号在登记表里没有条目，升级后会立刻恢复本地刷新、
+   * 重新开始双边抢刷——而烧号不可逆。
+   *
+   * 认领结果直接落盘、不要求用户先确认：漏认的代价是继续烧号，误认的代价只是该账号
+   * 暂时不本地刷新（UI 可一键取消）。两边代价不对称，所以宁枉勿纵。
+   */
+  async function runAdminManagedAdoptionOnce(): Promise<void> {
+    if (!store) return
+    // 账号库模式：库里的账号全部由 kiro-rs 管理，不需要认领
+    if (isAccountDbMode()) return
+    if (store.get(ADMIN_MANAGED_ADOPTION_KEY, false) === true) return
+
+    try {
+      const accountData = store.get('accountData') as
+        | {
+            accounts?: Record<
+              string,
+              { email?: string; credentials?: { refreshToken?: string; kiroApiKey?: string } }
+            >
+          }
+        | undefined
+      const accounts = Object.entries(accountData?.accounts ?? {}).map(([id, account]) => {
+        const refreshToken = account.credentials?.refreshToken?.trim()
+        const kiroApiKey = account.credentials?.kiroApiKey?.trim()
+        return {
+          id,
+          email: account.email,
+          refreshTokenHash: refreshToken ? sha256Hex(refreshToken) : undefined,
+          kiroApiKeyHash: kiroApiKey ? sha256Hex(kiroApiKey) : undefined
+        }
+      })
+      if (accounts.length === 0) return
+
+      const target = await resolveLocalAdminTarget()
+      const payload = await requestJson(
+        localAdminFetchImpl,
+        `${resolveLocalAdminApiBase(target.baseUrl)}/credentials`,
+        target.adminApiKey.trim(),
+        Math.max(3, target.timeoutSeconds) * 1000,
+        { method: 'GET' }
+      )
+
+      const { claimed, ambiguousEmail } = matchRemoteCredentialToLocalAccount({
+        accounts,
+        remote: readRemoteCredentials(payload)
+          .map((credential) => ({
+            id: remoteCredentialId(credential) ?? '',
+            credentialIdentity: credential.credentialIdentity,
+            email: credential.email,
+            authMethod: credential.authMethod,
+            apiKeyHash: credential.apiKeyHash,
+            refreshTokenHash: credential.refreshTokenHash
+          }))
+          .filter((credential) => credential.id.length > 0),
+        now: Date.now()
+      })
+
+      for (const entry of claimed) {
+        await recordAdminManagedAccount(entry)
+      }
+      await reloadAdminManagedIds()
+      store.set(ADMIN_MANAGED_ADOPTION_KEY, true)
+      console.log(
+        `[AdminManaged] 认领完成：${claimed.length} 个账号登记为反代托管` +
+          (ambiguousEmail.length > 0 ? `；${ambiguousEmail.length} 个因邮箱在本地重复未认领` : '')
+      )
+    } catch (error) {
+      // 反代未配置或不可达：不落 flag，下次启动重试
+      console.warn(
+        '[AdminManaged] 认领未完成（反代不可达或未配置），下次启动重试：',
+        error instanceof Error ? error.message : error
+      )
+    }
+  }
 
   const backgroundBatchRefresh = async (
     accounts: BackgroundRefreshAccount[],
@@ -7157,17 +7321,24 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
         kiroApiKey: account.credentials?.kiroApiKey,
         idp: account.credentials?.provider || account.idp
       })
+      // 账号库模式：凭据以库为准，先请 kiro-rs 确保新鲜
+      const context = await accountDbUpstreamContext(account.id)
+      if (context && 'error' in context) {
+        console.warn('[Diagnose] 账号库凭据不可用：', context.error)
+        return { models: [] }
+      }
       const models = await fetchKiroModels({
         id: account.id,
         email: account.email,
-        ...credential,
+        ...(context?.credential ?? credential),
         refreshToken: account.credentials?.refreshToken,
-        profileArn: account.profileArn || account.credentials?.profileArn,
+        profileArn: context?.profileArn ?? (account.profileArn || account.credentials?.profileArn),
         expiresAt: account.credentials?.expiresAt,
         clientId: account.credentials?.clientId,
         clientSecret: account.credentials?.clientSecret,
-        region: account.credentials?.region || 'us-east-1',
-        authMethod: account.credentials?.authMethod
+        region: context?.region ?? (account.credentials?.region || 'us-east-1'),
+        authMethod: context?.authMethod ?? account.credentials?.authMethod,
+        proxyUrl: context?.proxyUrl
       } as ProxyAccount)
       return {
         models: models.map((m) => ({
@@ -7203,15 +7374,24 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
             ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
             : resolveUpstreamKiroCredential(credentialInput)
         const boundProxyUrl = accountId ? readAccountBoundProxyUrl(accountId) : undefined
-        const models = await fetchKiroModels({
-          id: accountId || 'model-list-request',
-          ...credential,
-          region: region || 'us-east-1',
-          profileArn,
-          provider,
-          authMethod: authMethod as ProxyAccount['authMethod'],
-          proxyUrl: boundProxyUrl
-        } as ProxyAccount)
+        // 账号库模式：凭据不经渲染层，先请 kiro-rs 确保新鲜再从库里取
+        const context = await accountDbUpstreamContext(accountId)
+        if (context && 'error' in context)
+          return { success: false, error: context.error, models: [] }
+        const models = await withAccountDbRetry(
+          accountId,
+          (fresh) =>
+            fetchKiroModels({
+              id: accountId || 'model-list-request',
+              ...(fresh?.credential ?? credential),
+              region: fresh?.region || region || 'us-east-1',
+              profileArn: fresh?.profileArn ?? profileArn,
+              provider: fresh?.provider ?? provider,
+              authMethod: (fresh?.authMethod ?? authMethod) as ProxyAccount['authMethod'],
+              proxyUrl: fresh?.proxyUrl ?? boundProxyUrl
+            } as ProxyAccount),
+          context
+        )
         return {
           success: true,
           models: models.map((m) => ({
@@ -7252,14 +7432,23 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
           typeof credentialInput === 'string'
             ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
             : resolveUpstreamKiroCredential(credentialInput)
-        const result = await fetchAvailableSubscriptions({
-          id: accountId || 'subscription-request',
-          ...credential,
-          region: region || 'us-east-1',
-          profileArn,
-          provider,
-          authMethod
-        } as ProxyAccount)
+        const context = await accountDbUpstreamContext(accountId)
+        if (context && 'error' in context)
+          return { success: false, error: context.error, plans: [] }
+        const result = await withAccountDbRetry(
+          accountId,
+          (fresh) =>
+            fetchAvailableSubscriptions({
+              id: accountId || 'subscription-request',
+              ...(fresh?.credential ?? credential),
+              region: fresh?.region || region || 'us-east-1',
+              profileArn: fresh?.profileArn ?? profileArn,
+              provider: fresh?.provider ?? provider,
+              authMethod: fresh?.authMethod ?? authMethod,
+              proxyUrl: fresh?.proxyUrl
+            } as ProxyAccount),
+          context
+        )
         if (result.subscriptionPlans) {
           return { success: true, plans: result.subscriptionPlans, disclaimer: result.disclaimer }
         }
@@ -7292,16 +7481,24 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
           typeof credentialInput === 'string'
             ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
             : resolveUpstreamKiroCredential(credentialInput)
-        const result = await fetchSubscriptionToken(
-          {
-            id: accountId || 'subscription-request',
-            ...credential,
-            region: region || 'us-east-1',
-            profileArn,
-            provider,
-            authMethod
-          } as ProxyAccount,
-          subscriptionType
+        const context = await accountDbUpstreamContext(accountId)
+        if (context && 'error' in context) return { success: false, error: context.error }
+        const result = await withAccountDbRetry(
+          accountId,
+          (fresh) =>
+            fetchSubscriptionToken(
+              {
+                id: accountId || 'subscription-request',
+                ...(fresh?.credential ?? credential),
+                region: fresh?.region || region || 'us-east-1',
+                profileArn: fresh?.profileArn ?? profileArn,
+                provider: fresh?.provider ?? provider,
+                authMethod: fresh?.authMethod ?? authMethod,
+                proxyUrl: fresh?.proxyUrl
+              } as ProxyAccount,
+              subscriptionType
+            ),
+          context
         )
         if (result.encodedVerificationUrl)
           return { success: true, url: result.encodedVerificationUrl, status: result.status }
@@ -7435,7 +7632,12 @@ async function runAccountDbCommand(argv: readonly string[]): Promise<void> {
   try {
     if (!rawAccountStore) throw new Error('electron-store 未初始化')
     if (argv.includes('--rollback-account-db')) {
-      rollbackAccountDb({ config, userDataDir, rawStore: rawAccountStore, credentialsDir: dirname(credentialsPath) })
+      rollbackAccountDb({
+        config,
+        userDataDir,
+        rawStore: rawAccountStore,
+        credentialsDir: dirname(credentialsPath)
+      })
     } else {
       if (config.enabled) throw new Error('账号库模式已启用，无需再次迁移')
       await runMigration(

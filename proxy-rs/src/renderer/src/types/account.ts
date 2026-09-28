@@ -43,21 +43,33 @@ export interface AccountCredentials {
   endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
   /** 连续可重试错误达到该次数后，临时熔断当前端点。 */
   endpointFallbackAfterFailures?: number
+  /**
+   * 账号库模式下渲染层不再收到 token 明文（改造方案 §6.3），用这两个标志表达"有没有"，
+   * 供按钮可用性判断。非账号库模式为 undefined，判断回退到明文字段。
+   */
+  hasAccessToken?: boolean
+  hasRefreshToken?: boolean
 }
 
 export function hasUpstreamKiroCredential(
-  credentials?: Pick<AccountCredentials, 'credentialKind' | 'accessToken' | 'kiroApiKey'>
+  credentials?: Pick<
+    AccountCredentials,
+    'credentialKind' | 'accessToken' | 'kiroApiKey' | 'hasAccessToken'
+  >
 ): boolean {
-  return Boolean(credentials?.accessToken || credentials?.kiroApiKey)
+  return Boolean(credentials?.accessToken || credentials?.kiroApiKey || credentials?.hasAccessToken)
 }
 
 export function canRefreshUpstreamCredential(
-  credentials?: Pick<AccountCredentials, 'credentialKind' | 'kiroApiKey' | 'refreshToken'>
+  credentials?: Pick<
+    AccountCredentials,
+    'credentialKind' | 'kiroApiKey' | 'refreshToken' | 'hasRefreshToken'
+  >
 ): boolean {
   return (
     credentials?.credentialKind !== 'kiro_api_key' &&
     !credentials?.kiroApiKey &&
-    Boolean(credentials?.refreshToken)
+    Boolean(credentials?.refreshToken || credentials?.hasRefreshToken)
   )
 }
 
@@ -171,6 +183,19 @@ export interface Account {
   status: AccountStatus
   lastError?: string
   isActive: boolean // 是否为当前激活账号
+
+  /**
+   * 共享账号库模式下由主进程附带的库信息（改造方案 §0）。
+   * 未启用账号库时为 undefined。
+   */
+  accountDb?: {
+    credentialId: number
+    /** 是否在反代号池中（号池成员才接反代请求） */
+    inPool: boolean
+    enabled: boolean
+    disabledReason: string | null
+    credentialVersion: number
+  }
 
   // 时间戳
   createdAt: number

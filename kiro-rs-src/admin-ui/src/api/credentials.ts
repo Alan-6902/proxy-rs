@@ -8,6 +8,7 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  StoreInfoResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -27,9 +28,31 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// 获取所有凭据状态
-export async function getCredentials(): Promise<CredentialsStatusResponse> {
-  const { data } = await api.get<CredentialsStatusResponse>('/credentials')
+/**
+ * 获取凭据状态。
+ *
+ * 共享账号库模式下后端默认只返回号池中的账号（Admin 列表保持"反代号池"语义）；
+ * all=true 时连未入池的账号一起返回，用于在界面上把它们加入号池。
+ */
+export async function getCredentials(all = false): Promise<CredentialsStatusResponse> {
+  const { data } = await api.get<CredentialsStatusResponse>('/credentials', {
+    params: all ? { all: true } : undefined,
+  })
+  return data
+}
+
+// 共享账号库信息
+export async function getStoreInfo(): Promise<StoreInfoResponse> {
+  const { data } = await api.get<StoreInfoResponse>('/store/info')
+  return data
+}
+
+// 加入 / 移出反代号池（仅共享账号库模式）
+export async function setCredentialInPool(
+  id: number,
+  inPool: boolean
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/pool`, { inPool })
   return data
 }
 
@@ -88,8 +111,17 @@ export async function addCredential(
 }
 
 // 删除凭据
-export async function deleteCredential(id: number): Promise<SuccessResponse> {
-  const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
+/**
+ * 删除凭据。共享账号库模式下默认只是移出号池（账号仍由 proxy-rs 管理）；
+ * purge=true 才从账号库彻底删除。传统模式忽略该参数。
+ */
+export async function deleteCredential(
+  id: number,
+  purge = false
+): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`, {
+    params: purge ? { purge: true } : undefined,
+  })
   return data
 }
 

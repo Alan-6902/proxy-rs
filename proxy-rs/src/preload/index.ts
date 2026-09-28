@@ -120,6 +120,19 @@ const api = {
     return ipcRenderer.invoke('account-db:delete', ids)
   },
 
+  // 账号库模式：加入 / 移出反代号池
+  accountDbSetInPool: (
+    accountId: string,
+    inPool: boolean
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('account-db:set-in-pool', accountId, inPool)
+  },
+
+  // 账号库模式：取带凭据的账号（导出 / 复制凭据；普通列表已脱敏）。非账号库模式返回 null
+  accountDbAccountsWithSecrets: (ids: string[]): Promise<Record<string, unknown> | null> => {
+    return ipcRenderer.invoke('account-db:accounts-with-secrets', ids)
+  },
+
   // 账号库模式：状态（是否启用、kiro-rs 子进程状态、待导入数量）
   accountDbStatus: (): Promise<AccountDbStatusView> => ipcRenderer.invoke('account-db:status'),
 

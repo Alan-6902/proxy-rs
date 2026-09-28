@@ -12,7 +12,8 @@ import type { AdminManagedAccountEntry } from '../../shared/adminManaged'
 import { reloadAdminManagedIds, setAdminManagedSource } from '../adminManaged/gate'
 import { AccountDb, type AccountDbRow } from './db'
 import { AccountDataBridge, type BridgeDeps, type RawStore } from './bridge'
-import type { KiroRsAdminTarget } from './adminApi'
+import { toAccount } from './projection'
+import { ensureFresh, type KiroRsAdminTarget } from './adminApi'
 import { KiroRsProcess, type KiroRsState } from './kiroRsProcess'
 
 export const ACCOUNT_DB_CONFIG_FILE = 'account-db.json'
@@ -186,8 +187,88 @@ export async function syncAccountDbPending(): Promise<void> {
   }
 }
 
-/** 拉起 kiro-rs 子进程（config.kiroRs.manage=false 时不拉起） */
-export async function startManagedKiroRs(input: {
+/** 明文凭据投影：仅供导出 / 复制这类显式用户操作，不进普通列表（改造方案 §6.5） */
+export function accountDbAccountsWithSecrets(ids?: readonly string[]): Record<string, unknown> {
+  if (!runtime) return {}
+  const wanted = ids && ids.length > 0 ? new Set(ids) : null
+  const entries = runtime.db
+    .listRows()
+    .filter((row) => !wanted || wanted.has(row.accountUuid))
+    .map((row) => [row.accountUuid, toAccount(row)] as const)
+  return Object.fromEntries(entries)
+}
+
+/** 单个账号的库行（未启用账号库或账号未入库时返回 null） */
+export function accountDbRow(accountId: string): AccountDbRow | null {
+  if (!runtime || !accountId) return null
+  return runtime.db.listRows().find((row) => row.accountUuid === accountId) ?? null
+}
+
+export interface FreshCredentialResult {
+  success: boolean
+  accessToken?: string
+  refreshToken?: string
+  expiresAt?: number
+  /** 账号库凭据版本（作为 credentialRevision 使用） */
+  credentialRevision?: string
+  error?: string
+}
+
+/**
+ * 确保账号 token 新鲜，返回库中最新凭据。刷新只在 kiro-rs 发生（改造方案 §0.2 D3）。
+ *
+ * - 非账号库模式、或账号尚未入库：返回 null，调用方按原有逻辑处理
+ * - `expectedCredentialVersion` 是调用方所用 token 的版本：与库中不同说明已被别处轮换，
+ *   kiro-rs 直接返回新版本而不再轮换一次（401 重试就靠这个避免连环轮换）
+ * - kiro-rs 不可用时返回失败，不退回本地刷新（否则又变成双边抢刷）
+ */
+export async function ensureFreshAccountDbCredential(input: {
+  accountId: string
+  expectedCredentialVersion?: number
+  force?: boolean
+}): Promise<FreshCredentialResult | null> {
+  if (!runtime) return null
+  const row = runtime.db.listRows().find((item) => item.accountUuid === input.accountId)
+  if (!row) return null
+
+  const read = (): FreshCredentialResult => {
+    const latest = runtime?.db.listRows().find((item) => item.accountUuid === input.accountId)
+    if (!latest) return { success: false, error: '账号已不在账号库中' }
+    const token = latest.authKind === 'api_key' ? latest.kiroApiKey : latest.accessToken
+    if (!token) return { success: false, error: 'kiro-rs 尚未取得可用凭据' }
+    return {
+      success: true,
+      accessToken: token,
+      refreshToken: latest.refreshToken ?? undefined,
+      expiresAt: latest.expiresAtMs ?? undefined,
+      credentialRevision: String(latest.credentialVersion)
+    }
+  }
+
+  // API Key 不刷新，直接给当前值
+  if (row.authKind === 'api_key') return read()
+
+  const target = accountDbAdminTarget()
+  if (!target) {
+    return { success: false, error: 'kiro-rs 尚未就绪，无法刷新凭据' }
+  }
+  try {
+    await ensureFresh(
+      target,
+      row.id,
+      input.expectedCredentialVersion ?? row.credentialVersion,
+      input.force ?? false
+    )
+  } catch (error) {
+    return {
+      success: false,
+      error: `kiro-rs 刷新凭据失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  return read()
+}
+
+/** 拉起 kiro-rs 子进程（config.kiroRs.manage=false 时不拉起） */ export async function startManagedKiroRs(input: {
   binary: string
   onLog?: (line: string, stream: 'stdout' | 'stderr') => void
   onStateChange?: (state: KiroRsState, detail?: string) => void

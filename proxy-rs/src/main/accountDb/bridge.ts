@@ -42,6 +42,24 @@ export interface PendingSyncResult {
   failed: Array<{ id: string; reason: string }>
 }
 
+function parseMetadata(value: string | null | undefined): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value ?? '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function parseTags(value: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(value ?? '[]')
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 export class AccountDataBridge {
   private cache: { seq: number; accounts: Record<string, AccountLike> } | null = null
   private syncing: Promise<PendingSyncResult> | null = null
@@ -171,9 +189,11 @@ export class AccountDataBridge {
   }
 
   /**
-   * 账号绑定的代理同步给 kiro-rs（它负责刷新，必须走同一出口）。
-   * 只在 proxy 侧有绑定且与库中不同时下发；没有绑定时不清除库里的代理
-   * （迁移自 credentials.json 的账号可能本来就配了代理）。
+   * 账号绑定的代理同步给 kiro-rs（它负责刷新与反代请求，必须走同一出口）。
+   *
+   * 解绑时只清除"proxy 自己设过"的代理：迁移自 credentials.json 的账号可能本来就配了
+   * 代理，proxy 侧代理池里没有对应条目，不能因此把它抹掉。标记存在 account_ui 的
+   * metadata 里（proxySyncedByProxyRs）。
    */
   async syncProxyBindings(target: KiroRsAdminTarget): Promise<number> {
     if (!this.deps.proxyUrlFor) return 0
@@ -181,12 +201,35 @@ export class AccountDataBridge {
     let updated = 0
     for (const row of this.db.listRows()) {
       const desired = this.deps.proxyUrlFor(row.accountUuid, base)
+      const metadata = parseMetadata(row.metadataJson)
+      const managed = metadata.proxySyncedByProxyRs === true
       if (desired && desired !== row.proxyUrl) {
         await setProxy(target, row.id, desired, this.deps.fetchImpl)
+        this.writeMetadataFlag(row, metadata, true)
+        updated++
+      } else if (!desired && row.proxyUrl && managed) {
+        await setProxy(target, row.id, null, this.deps.fetchImpl)
+        this.writeMetadataFlag(row, metadata, false)
         updated++
       }
     }
     return updated
+  }
+
+  private writeMetadataFlag(
+    row: AccountDbRow,
+    metadata: Record<string, unknown>,
+    synced: boolean
+  ): void {
+    const next = { ...metadata }
+    if (synced) next.proxySyncedByProxyRs = true
+    else delete next.proxySyncedByProxyRs
+    this.db.writeUi(row.id, {
+      nickname: row.nickname,
+      groupId: row.groupId,
+      tags: parseTags(row.tagsJson),
+      metadata: next
+    })
   }
 }
 

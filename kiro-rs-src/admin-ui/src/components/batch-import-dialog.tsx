@@ -67,7 +67,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     }
 
     try {
-      await deleteCredential(id)
+      await deleteCredential({ id, purge: true })
       return { success: true }
     } catch (error) {
       return {

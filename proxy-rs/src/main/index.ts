@@ -38,7 +38,10 @@ import {
   setAdminManagedChangeListener,
   setAdminManagedRefreshTokenResolver
 } from './adminManaged/gate'
-import { syncManagedAccountFromAdmin } from './adminManaged/accountSync'
+import {
+  refreshManagedAccountFromAdmin,
+  syncManagedAccountFromAdmin
+} from './adminManaged/accountSync'
 import { startManagedAccountRefresh } from './adminManaged/startup'
 import { recordAdminManagedAccount } from './adminManaged/registryStore'
 import { matchRemoteCredentialToLocalAccount } from '../shared/adminManaged'
@@ -3980,7 +3983,9 @@ app.whenReady().then(async () => {
               const target = await resolveLocalAdminTarget()
               const { usage, errors } = await fetchLocalAdminUsage(
                 { ...target, fetchImpl: localAdminFetchImpl },
-                [managedEntry.credentialId]
+                [managedEntry.credentialId],
+                undefined,
+                true
               )
               if (usage.size > 0) {
                 return { success: true, latencyMs: Date.now() - probeStart }
@@ -4159,6 +4164,18 @@ app.whenReady().then(async () => {
       { success: false as const, error: { message: CREDENTIAL_REFRESH_UNAVAILABLE } },
       async () => {
         try {
+          const managed = adminManagedEntry(account?.id)
+          if (managed) {
+            if (managed.authMethod === 'api_key') {
+              return { success: false, error: { message: 'Kiro API key accounts cannot refresh' } }
+            }
+            const target = await resolveLocalAdminTarget()
+            await refreshManagedAccountFromAdmin(
+              { ...target, fetchImpl: localAdminFetchImpl },
+              managed.credentialId
+            )
+            return { success: true, adminManaged: true }
+          }
           const {
             credentialKind,
             kiroApiKey,
@@ -4720,8 +4737,13 @@ app.whenReady().then(async () => {
         const target = await resolveLocalAdminTarget()
         const synced = await syncManagedAccountFromAdmin(
           { ...target, fetchImpl: localAdminFetchImpl },
-          entry.credentialId
+          entry.credentialId,
+          Date.now(),
+          true
         )
+        if (synced.status !== 'active') {
+          return { success: false, error: { message: synced.errorMessage || '反代状态同步失败' } }
+        }
         return {
           success: true,
           data: {
@@ -4908,24 +4930,29 @@ app.whenReady().then(async () => {
  */
 async function syncManagedAccountIntoBatch(
   account: BackgroundRefreshAccount,
-  syncInfo: boolean
+  syncInfo: boolean,
+  refreshManaged: boolean = false
 ): Promise<boolean> {
   const accountId = account.id
   const entry = accountId ? adminManagedEntry(accountId) : undefined
   if (!accountId || !entry) return true
 
   // syncInfo=false 的轮次只关心 token，托管账号没有 token 可刷，省掉这次 loopback
-  if (!syncInfo) return true
+  if (!syncInfo && !refreshManaged) return true
 
   try {
     const target = await resolveLocalAdminTarget()
-    const synced = await syncManagedAccountFromAdmin(
-      { ...target, fetchImpl: localAdminFetchImpl },
-      entry.credentialId
-    )
+    const adminTarget = { ...target, fetchImpl: localAdminFetchImpl }
+    if (refreshManaged && entry.authMethod !== 'api_key') {
+      await refreshManagedAccountFromAdmin(adminTarget, entry.credentialId)
+    }
+    const synced = syncInfo
+      ? await syncManagedAccountFromAdmin(adminTarget, entry.credentialId, Date.now(), refreshManaged)
+      : { status: 'active' as const, usage: undefined, subscription: undefined, errorMessage: undefined }
     sendRendererEvent('background-refresh-result', {
       id: accountId,
       success: synced.status === 'active',
+      error: synced.errorMessage,
       data: {
         usage: synced.usage,
         subscription: synced.subscription,
@@ -5025,7 +5052,8 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
   const backgroundBatchRefresh = async (
     accounts: BackgroundRefreshAccount[],
     concurrency: number = 10,
-    syncInfo: boolean = true
+    syncInfo: boolean = true,
+    refreshManaged: boolean = false
   ): Promise<{
     success: boolean
     completed: number
@@ -5058,7 +5086,7 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
            * （否则每一轮都会弹「账号刷新失败」）。用量与订阅状态改从反代读。
            */
           if (isAdminManagedAccount(account.id)) {
-            const ok = await syncManagedAccountIntoBatch(account, syncInfo)
+            const ok = await syncManagedAccountIntoBatch(account, syncInfo, refreshManaged)
             completed++
             if (ok) success++
             else failed++
@@ -5499,8 +5527,9 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
       _event,
       accounts: BackgroundRefreshAccount[],
       concurrency: number = 10,
-      syncInfo: boolean = true
-    ) => backgroundBatchRefresh(accounts, concurrency, syncInfo)
+      syncInfo: boolean = true,
+      refreshManaged: boolean = false
+    ) => backgroundBatchRefresh(accounts, concurrency, syncInfo, refreshManaged)
   )
   /*
    * 托管登记表必须在刷新调度启动前加载完，并注入反查实现。
@@ -5566,6 +5595,27 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
         await Promise.allSettled(
           batch.map(async (account) => {
             try {
+              const managed = adminManagedEntry(account.id)
+              if (managed) {
+                const target = await resolveLocalAdminTarget()
+                const synced = await syncManagedAccountFromAdmin(
+                  { ...target, fetchImpl: localAdminFetchImpl },
+                  managed.credentialId,
+                  Date.now(),
+                  true
+                )
+                const ok = synced.status === 'active'
+                sendRendererEvent('background-check-result', {
+                  id: account.id,
+                  success: ok,
+                  data: synced,
+                  error: synced.errorMessage
+                })
+                completed++
+                if (ok) success++
+                else failed++
+                return
+              }
               const { accessToken, kiroApiKey, credentialKind, authMethod, provider } =
                 account.credentials
               const upstreamCredential = resolveUpstreamKiroCredential({

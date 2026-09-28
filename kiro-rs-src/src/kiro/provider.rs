@@ -264,7 +264,7 @@ impl KiroProvider {
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
                     if self
                         .token_manager
-                        .force_refresh_token_for(ctx.id)
+                        .refresh_token_if_current(ctx.id, Some(&ctx.token))
                         .await
                         .is_ok()
                     {
@@ -496,7 +496,7 @@ impl KiroProvider {
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
                     if self
                         .token_manager
-                        .force_refresh_token_for(ctx.id)
+                        .refresh_token_if_current(ctx.id, Some(&ctx.token))
                         .await
                         .is_ok()
                     {

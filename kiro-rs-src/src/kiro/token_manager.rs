@@ -319,6 +319,21 @@ async fn refresh_idc_token(
     Ok(new_credentials)
 }
 
+/// 保留额度接口的 HTTP 状态，认证重试不依赖响应正文匹配。
+#[derive(Debug)]
+pub(crate) struct UsageLimitsHttpError {
+    pub status: u16,
+    message: String,
+}
+
+impl fmt::Display for UsageLimitsHttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UsageLimitsHttpError {}
+
 /// 获取使用额度信息
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
@@ -385,7 +400,11 @@ pub(crate) async fn get_usage_limits(
             500..=599 => "服务器错误，AWS 服务暂时不可用",
             _ => "获取使用额度失败",
         };
-        bail!("{}: {} {}", error_msg, status, body_text);
+        return Err(UsageLimitsHttpError {
+            status: status.as_u16(),
+            message: format!("{}: {} {}", error_msg, status, body_text),
+        }
+        .into());
     }
 
     let data: UsageLimitsResponse = response.json().await?;
@@ -1826,7 +1845,34 @@ impl MultiTokenManager {
 
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
         let usage_limits =
-            get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
+            match get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref())
+                .await
+            {
+                Err(error)
+                    if !credentials.is_api_key_credential()
+                        && error
+                            .downcast_ref::<UsageLimitsHttpError>()
+                            .is_some_and(|error| error.status == 401) =>
+                {
+                    self.refresh_token_if_current(id, Some(&token)).await?;
+                    let current = {
+                        let entries = self.entries.lock();
+                        entries
+                            .iter()
+                            .find(|e| e.id == id)
+                            .map(|e| e.credentials.clone())
+                            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+                    };
+                    let current_token = current
+                        .access_token
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?;
+                    let proxy = current.effective_proxy(self.proxy.as_ref());
+                    // 只重试一次；再次 401、403 或限流均交给调用方展示。
+                    get_usage_limits(&current, &self.config, current_token, proxy.as_ref()).await?
+                }
+                result => result?,
+            };
 
         // 更新订阅等级到凭据（仅在发生变化时持久化）
         if let Some(subscription_title) = usage_limits.subscription_title() {
@@ -2068,11 +2114,29 @@ impl MultiTokenManager {
         Ok(())
     }
 
-    /// 强制刷新指定凭据的 Token（Admin API）
-    ///
-    /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
-    /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
+    /// 强制刷新指定凭据；排队期间已被其他请求轮换时复用新凭据。
     pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
+        let observed_token = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+                .credentials
+                .access_token
+                .clone()
+        };
+        self.refresh_token_if_current(id, observed_token.as_deref())
+            .await
+    }
+
+    /// 所有强刷入口共用刷新锁；401 请求携带失败的 access token，避免重复轮换。
+    pub async fn refresh_token_if_current(
+        &self,
+        id: u64,
+        expected_access_token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let _guard = self.refresh_lock.lock().await;
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2081,28 +2145,27 @@ impl MultiTokenManager {
                 .map(|e| e.credentials.clone())
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
-
-        // 获取刷新锁防止并发刷新
-        let _guard = self.refresh_lock.lock().await;
-
-        // 无条件调用 refresh_token
+        if credentials.access_token.as_deref() != expected_access_token
+            && credentials.access_token.is_some()
+            && !is_token_expired(&credentials)
+            && !is_token_expiring_soon(&credentials)
+        {
+            return Ok(());
+        }
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
         let new_creds = refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
-
-        // 更新 entries 中对应凭据
         {
             let mut entries = self.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.credentials = new_creds;
-                entry.refresh_failure_count = 0;
-            }
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials = new_creds;
+            entry.refresh_failure_count = 0;
         }
-
-        // 持久化
         if let Err(e) = self.persist_credentials() {
             tracing::warn!("强制刷新 Token 后持久化失败: {}", e);
         }
-
         tracing::info!("凭据 #{} Token 已强制刷新", id);
         Ok(())
     }
@@ -2820,6 +2883,68 @@ mod tests {
         c2.expires_at = Some(expires);
 
         MultiTokenManager::new(config, vec![c1, c2], None, None, false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_forced_refresh_reuses_rotation_while_waiting_for_lock() {
+        let manager = manager_with_two_live_creds(false);
+        let id = manager.entries.lock()[0].id;
+        let guard = manager.refresh_lock.lock().await;
+        let refresh = manager.force_refresh_token_for(id);
+        tokio::pin!(refresh);
+        assert!(futures::poll!(refresh.as_mut()).is_pending());
+
+        // 模拟持锁的反代请求已经完成轮换；旧凭据没有 refreshToken，
+        // 若排队请求继续使用旧快照，就会报错。
+        manager.entries.lock()[0].credentials.access_token = Some("rotated-token".into());
+        drop(guard);
+
+        refresh.await.expect("排队期间已经轮换，应复用新凭据");
+        assert_eq!(
+            manager.entries.lock()[0]
+                .credentials
+                .access_token
+                .as_deref(),
+            Some("rotated-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_unauthorized_requests_reuse_current_token() {
+        let manager = manager_with_two_live_creds(false);
+        let id = manager.entries.lock()[0].id;
+        let (first, second) = tokio::join!(
+            manager.refresh_token_if_current(id, Some("old-rejected-token")),
+            manager.refresh_token_if_current(id, Some("old-rejected-token")),
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            manager.entries.lock()[0]
+                .credentials
+                .access_token
+                .as_deref(),
+            Some("token-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forced_refresh_rechecks_deleted_credential_after_lock() {
+        let manager = manager_with_two_live_creds(false);
+        let id = manager.entries.lock()[0].id;
+        let guard = manager.refresh_lock.lock().await;
+        let refresh = manager.force_refresh_token_for(id);
+        tokio::pin!(refresh);
+        assert!(futures::poll!(refresh.as_mut()).is_pending());
+        manager.entries.lock().retain(|entry| entry.id != id);
+        drop(guard);
+        assert!(
+            refresh
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("凭据不存在")
+        );
     }
 
     #[tokio::test]

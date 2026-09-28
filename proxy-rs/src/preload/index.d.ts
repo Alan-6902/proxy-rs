@@ -81,6 +81,8 @@ interface AccountData {
 
 interface RefreshResult {
   success: boolean
+  /** 托管账号只返回操作结果，不返回 OAuth 凭据。 */
+  adminManaged?: boolean
   data?: {
     accessToken: string
     refreshToken?: string
@@ -217,7 +219,8 @@ interface KiroApi {
       }
     }>,
     concurrency?: number,
-    syncInfo?: boolean
+    syncInfo?: boolean,
+    refreshManaged?: boolean
   ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
   onBackgroundRefreshProgress: (
     callback: (data: { completed: number; total: number; success: number; failed: number }) => void

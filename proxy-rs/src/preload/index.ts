@@ -141,14 +141,21 @@ const api = {
       }
     }>,
     concurrency?: number,
-    syncInfo?: boolean
+    syncInfo?: boolean,
+    refreshManaged?: boolean
   ): Promise<{
     success: boolean
     completed: number
     successCount: number
     failedCount: number
   }> => {
-    return ipcRenderer.invoke('background-batch-refresh', accounts, concurrency, syncInfo)
+    return ipcRenderer.invoke(
+      'background-batch-refresh',
+      accounts,
+      concurrency,
+      syncInfo,
+      refreshManaged
+    )
   },
 
   // 监听后台刷新进度

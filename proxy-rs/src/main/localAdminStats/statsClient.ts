@@ -174,7 +174,8 @@ export interface LocalAdminUsageRefreshResult {
 export async function fetchLocalAdminUsage(
   target: LocalAdminStatsTarget,
   credentialIds: string[],
-  onProgress?: (done: number, total: number) => void
+  onProgress?: (done: number, total: number) => void,
+  fresh: boolean = false
 ): Promise<LocalAdminUsageRefreshResult> {
   const baseUrl = resolveLocalAdminApiBase(target.baseUrl)
   const adminApiKey = target.adminApiKey.trim()
@@ -188,7 +189,7 @@ export async function fetchLocalAdminUsage(
     try {
       const payload = await requestJson(
         target.fetchImpl,
-        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance`,
+        `${baseUrl}/credentials/${encodeURIComponent(credentialId)}/balance${fresh ? '?fresh=true' : ''}`,
         adminApiKey,
         timeoutMs,
         { method: 'GET' }

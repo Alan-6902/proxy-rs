@@ -172,6 +172,13 @@ pub struct AddCredentialResponse {
 
 // ============ 余额查询 ============
 
+/// 人工查询/验活绕过余额缓存；周期同步保留默认缓存。
+#[derive(Debug, Default, Deserialize)]
+pub struct BalanceQuery {
+    #[serde(default)]
+    pub fresh: bool,
+}
+
 /// 余额查询响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

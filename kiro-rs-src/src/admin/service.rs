@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{MultiTokenManager, UsageLimitsHttpError};
 
 use super::error::AdminServiceError;
 use super::types::{
@@ -141,9 +141,13 @@ impl AdminService {
     }
 
     /// 获取凭据余额（带缓存）
-    pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
+    pub async fn get_balance(
+        &self,
+        id: u64,
+        fresh: bool,
+    ) -> Result<BalanceResponse, AdminServiceError> {
         // 先查缓存
-        {
+        if !fresh {
             let cache = self.balance_cache.lock();
             if let Some(cached) = cache.get(&id) {
                 let now = Utc::now().timestamp() as f64;
@@ -320,7 +324,10 @@ impl AdminService {
         self.token_manager
             .force_refresh_token_for(id)
             .await
-            .map_err(|e| self.classify_balance_error(e, id))
+            .map_err(|e| self.classify_balance_error(e, id))?;
+        self.balance_cache.lock().remove(&id);
+        self.save_balance_cache();
+        Ok(())
     }
 
     // ============ 余额缓存持久化 ============
@@ -395,6 +402,9 @@ impl AdminService {
     /// 分类余额查询错误（可能涉及上游 API 调用）
     fn classify_balance_error(&self, e: anyhow::Error, id: u64) -> AdminServiceError {
         let msg = e.to_string();
+        if e.is::<UsageLimitsHttpError>() {
+            return AdminServiceError::UpstreamError(msg);
+        }
 
         // 1. 凭据不存在
         if msg.contains("不存在") {
@@ -469,5 +479,50 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::config::Config;
+
+    #[tokio::test]
+    async fn fresh_balance_does_not_treat_cached_balance_as_live_authentication() {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                Config::default(),
+                vec![KiroCredentials::default()],
+                None,
+                None,
+                false,
+            )
+            .unwrap(),
+        );
+        let service = AdminService::new(manager, Vec::<String>::new());
+        // 模拟凭据已不在运行态、缓存尚未淘汰；新鲜查询必须查服务端凭据。
+        service.balance_cache.lock().insert(
+            999,
+            CachedBalance {
+                cached_at: Utc::now().timestamp() as f64,
+                data: BalanceResponse {
+                    id: 999,
+                    subscription_title: None,
+                    current_usage: 1.0,
+                    usage_limit: 100.0,
+                    remaining: 99.0,
+                    usage_percentage: 1.0,
+                    next_reset_at: None,
+                },
+            },
+        );
+        assert_eq!(
+            service.get_balance(999, false).await.unwrap().current_usage,
+            1.0
+        );
+        assert!(matches!(
+            service.get_balance(999, true).await,
+            Err(AdminServiceError::NotFound { id: 999 })
+        ));
     }
 }

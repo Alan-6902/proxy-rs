@@ -444,7 +444,9 @@ async function probeAccountLiveness(
   let result: AccountLivenessResult
   try {
     result = await window.api.diagnoseAccountLiveness({
-      account: buildAccountLivenessRequestAccount(account, get().getAccountProxyUrl(account.id)),
+      account: get().adminManagedIds.has(id)
+        ? { id }
+        : buildAccountLivenessRequestAccount(account, get().getAccountProxyUrl(account.id)),
       model,
       message
     })
@@ -456,7 +458,7 @@ async function probeAccountLiveness(
     }
   }
   // 验活途中上游可能轮换凭据，落盘避免下次请求用到旧 token
-  if (result.credentials) {
+  if (result.credentials && !get().adminManagedIds.has(id)) {
     const latest = get().accounts.get(account.id)
     if (latest) {
       get().updateAccount(account.id, {
@@ -1285,13 +1287,23 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   refreshAccountToken: async (id) => {
     const { accounts, updateAccountStatus } = get()
     const account = accounts.get(id)
-    if (!account || !canRefreshUpstreamCredential(account.credentials)) return false
+    if (
+      !account ||
+      (!get().adminManagedIds.has(id) && !canRefreshUpstreamCredential(account.credentials))
+    )
+      return false
 
     updateAccountStatus(id, 'refreshing')
     try {
-      const result = await window.api.refreshAccountToken(account)
+      const result = await window.api.refreshAccountToken(
+        get().adminManagedIds.has(id) ? { id } : account
+      )
+      if (result.success && result.adminManaged) {
+        updateAccountStatus(id, 'active')
+        return true
+      }
       const refreshed = result.data
-      if (result.success && refreshed) {
+      if (result.success && refreshed && !get().adminManagedIds.has(id)) {
         set((state) => {
           const accounts = new Map(state.accounts)
           const acc = accounts.get(id)
@@ -1397,6 +1409,17 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     for (const id of ids) {
       const account = accounts.get(id)
       if (!account) continue
+      if (get().adminManagedIds.has(id)) {
+        if (account.credentials.credentialKind !== 'kiro_api_key') {
+          accountsToRefresh.push({
+            id,
+            email: account.email,
+            needsTokenRefresh: false,
+            credentials: {}
+          })
+        }
+        continue
+      }
       const refreshPlan = resolveBackgroundRefreshPlan(account.credentials, true)
       if (!refreshPlan.shouldRefreshToken || !account.credentials.refreshToken) continue
 
@@ -1430,7 +1453,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     )
     const result = await window.api.backgroundBatchRefresh(
       accountsToRefresh,
-      autoRefreshConcurrency
+      autoRefreshConcurrency,
+      true,
+      true
     )
 
     return {
@@ -1451,25 +1476,28 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     try {
       // 通过主进程调用 Kiro API 获取状态（避免 CORS）
-      const result = await window.api.checkAccountStatus(account)
+      const result = await window.api.checkAccountStatus(
+        get().adminManagedIds.has(id) ? { id, email: account.email } : account
+      )
       if (result.success && result.data) {
         set((state) => {
           const accounts = new Map(state.accounts)
           const acc = accounts.get(id)
           if (acc) {
             // 如果 token 被刷新，更新凭证
-            const updatedCredentials = result.data!.newCredentials
-              ? {
-                  ...acc.credentials,
-                  accessToken: result.data!.newCredentials.accessToken,
-                  refreshToken:
-                    result.data!.newCredentials.refreshToken ?? acc.credentials.refreshToken,
-                  expiresAt: result.data!.newCredentials.expiresAt ?? acc.credentials.expiresAt,
-                  credentialRevision:
-                    result.data!.newCredentials.credentialRevision ??
-                    acc.credentials.credentialRevision
-                }
-              : acc.credentials
+            const updatedCredentials =
+              result.data!.newCredentials && !state.adminManagedIds.has(id)
+                ? {
+                    ...acc.credentials,
+                    accessToken: result.data!.newCredentials.accessToken,
+                    refreshToken:
+                      result.data!.newCredentials.refreshToken ?? acc.credentials.refreshToken,
+                    expiresAt: result.data!.newCredentials.expiresAt ?? acc.credentials.expiresAt,
+                    credentialRevision:
+                      result.data!.newCredentials.credentialRevision ??
+                      acc.credentials.credentialRevision
+                  }
+                : acc.credentials
 
             // 合并 usage 数据，确保包含所有必要字段
             const apiUsage = result.data!.usage
@@ -1574,7 +1602,12 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     for (const id of ids) {
       const account = accounts.get(id)
-      if (!account || !hasUpstreamKiroCredential(account.credentials)) continue
+      if (!account) continue
+      if (get().adminManagedIds.has(id)) {
+        accountsToCheck.push({ id, email: account.email, credentials: {} })
+        continue
+      }
+      if (!hasUpstreamKiroCredential(account.credentials)) continue
 
       accountsToCheck.push({
         id,
@@ -2178,7 +2211,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const timeUntilExpiry = expiresAt ? expiresAt - now : Infinity
       const needsTokenRefresh = expiresAt && timeUntilExpiry <= refreshLeadMs
 
-      accountsToProcess.push({ id, email: account.email, needsTokenRefresh: !!needsTokenRefresh })
+      accountsToProcess.push({
+        id,
+        email: account.email,
+        needsTokenRefresh: !get().adminManagedIds.has(id) && !!needsTokenRefresh
+      })
     }
 
     console.log(`[AutoRefresh] Processing ${accountsToProcess.length} accounts...`)
@@ -2245,7 +2282,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const timeUntilExpiry = expiresAt ? expiresAt - now : Infinity
 
       // Token 已过期或即将过期
-      if (expiresAt && timeUntilExpiry <= refreshLeadMs) {
+      if (!get().adminManagedIds.has(id) && expiresAt && timeUntilExpiry <= refreshLeadMs) {
         expiredAccounts.push({ id, email: account.email })
       }
     }
@@ -2355,9 +2392,19 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
       const expiresAt = account.credentials.expiresAt
       const timeUntilExpiry = expiresAt ? expiresAt - now : Infinity
-      const needsTokenRefresh = expiresAt && timeUntilExpiry <= refreshLeadMs
+      const needsTokenRefresh =
+        !get().adminManagedIds.has(id) && expiresAt && timeUntilExpiry <= refreshLeadMs
 
       if (needsTokenRefresh || autoRefreshSyncInfo || autoSwitchEnabled) {
+        if (get().adminManagedIds.has(id)) {
+          accountsToRefresh.push({
+            id,
+            email: account.email,
+            needsTokenRefresh: false,
+            credentials: {}
+          })
+          continue
+        }
         accountsToRefresh.push({
           id,
           email: account.email,
@@ -2486,19 +2533,21 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accounts.set(id, {
           ...account,
           ...(bgProfileArn ? { profileArn: bgProfileArn } : {}),
-          credentials: {
-            ...account.credentials,
-            accessToken: refreshData?.accessToken || account.credentials.accessToken,
-            refreshToken: refreshData?.refreshToken || account.credentials.refreshToken,
-            expiresAt:
-              refreshData?.expiresAt ??
-              (refreshData?.expiresIn
-                ? now + refreshData.expiresIn * 1000
-                : account.credentials.expiresAt),
-            credentialRevision:
-              refreshData?.credentialRevision ?? account.credentials.credentialRevision,
-            ...(bgProfileArn ? { profileArn: bgProfileArn } : {})
-          },
+          credentials: state.adminManagedIds.has(id)
+            ? account.credentials
+            : {
+                ...account.credentials,
+                accessToken: refreshData?.accessToken || account.credentials.accessToken,
+                refreshToken: refreshData?.refreshToken || account.credentials.refreshToken,
+                expiresAt:
+                  refreshData?.expiresAt ??
+                  (refreshData?.expiresIn
+                    ? now + refreshData.expiresIn * 1000
+                    : account.credentials.expiresAt),
+                credentialRevision:
+                  refreshData?.credentialRevision ?? account.credentials.credentialRevision,
+                ...(bgProfileArn ? { profileArn: bgProfileArn } : {})
+              },
           usage: refreshData?.usage
             ? (() => {
                 const newCurrent = refreshData.usage.current ?? account.usage.current

@@ -14,10 +14,27 @@ import {
   type SubscriptionType
 } from '../../shared/localAdminStats'
 import { fetchLocalAdminUsage } from '../localAdminStats/statsClient'
+import { requestJson, resolveLocalAdminApiBase } from '../kskAutomation/localAdminClient'
 
 type LocalAdminStatsTarget = Parameters<typeof fetchLocalAdminUsage>[0]
 
 const MS_PER_DAY = 86_400_000
+
+/** 只让反代刷新；不读取、回传或在本地轮换托管凭据。 */
+export async function refreshManagedAccountFromAdmin(
+  target: LocalAdminStatsTarget,
+  credentialId: string
+): Promise<void> {
+  const adminApiKey = target.adminApiKey.trim()
+  if (!adminApiKey) throw new Error('未配置本机 Admin API Key')
+  await requestJson(
+    target.fetchImpl,
+    `${resolveLocalAdminApiBase(target.baseUrl)}/credentials/${encodeURIComponent(credentialId)}/refresh`,
+    adminApiKey,
+    Math.max(3, target.timeoutSeconds) * 1000,
+    { method: 'POST' }
+  )
+}
 
 /** 与渲染进程 AccountUsage 对齐的子集。反代只给总量，不带 base/bonus/freeTrial 子项。 */
 export interface ManagedAccountUsage {
@@ -52,9 +69,10 @@ export interface ManagedAccountSyncResult {
 export async function syncManagedAccountFromAdmin(
   target: LocalAdminStatsTarget,
   credentialId: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  fresh: boolean = false
 ): Promise<ManagedAccountSyncResult> {
-  const { usage, errors } = await fetchLocalAdminUsage(target, [credentialId])
+  const { usage, errors } = await fetchLocalAdminUsage(target, [credentialId], undefined, fresh)
   const parsed = usage.get(credentialId)
   if (!parsed) {
     return {

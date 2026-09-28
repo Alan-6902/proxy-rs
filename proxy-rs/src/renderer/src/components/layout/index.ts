@@ -1,2 +1,2 @@
-export { Sidebar, type PageType } from './Sidebar'
+export { Sidebar, isPageType, type PageType } from './Sidebar'
 export { TitleBar } from './TitleBar'

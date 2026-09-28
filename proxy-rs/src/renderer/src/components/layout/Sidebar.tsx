@@ -5,18 +5,11 @@ import {
   Settings,
   Info,
   ChevronRight,
-  UserPlus,
   ScrollText,
-  Network,
   Stethoscope,
   Archive,
   GripVertical,
-  BadgeCheck,
   ListChecks,
-  Crosshair,
-  ChartLine,
-  BookOpenCheck,
-  Handshake,
   MousePointer2,
   Bot
 } from 'lucide-react'
@@ -32,13 +25,6 @@ export type PageType =
   | 'cursor'
   | 'grok'
   | 'tasks'
-  | 'hunter'
-  | 'kskLedger'
-  | 'downstream'
-  | 'proxyStats'
-  | 'proxyPool'
-  | 'register'
-  | 'seats'
   | 'diagnose'
   | 'configSync'
   | 'logs'
@@ -58,13 +44,6 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'cursor', labelKey: 'nav.cursor', icon: MousePointer2 },
   { id: 'grok', labelKey: 'nav.grok', icon: Bot },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
-  { id: 'hunter', labelKey: 'nav.hunter', icon: Crosshair },
-  { id: 'kskLedger', labelKey: 'nav.kskLedger', icon: BookOpenCheck },
-  { id: 'downstream', labelKey: 'nav.downstream', icon: Handshake },
-  { id: 'proxyStats', labelKey: 'nav.proxyStats', icon: ChartLine },
-  { id: 'proxyPool', labelKey: 'nav.proxyPool', icon: Network },
-  { id: 'register', labelKey: 'nav.register', icon: UserPlus },
-  { id: 'seats', labelKey: 'nav.seats', icon: BadgeCheck },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
@@ -73,6 +52,10 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
 ]
 
 const SIDEBAR_ORDER_STORAGE_KEY = 'proxy-rs.sidebar-order'
+
+export function isPageType(value: unknown): value is PageType {
+  return menuItemsConfig.some((item) => item.id === value)
+}
 
 function getInitialMenuItems(): typeof menuItemsConfig {
   try {

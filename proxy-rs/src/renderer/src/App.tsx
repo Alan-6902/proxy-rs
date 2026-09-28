@@ -1,22 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AccountManager } from './components/accounts'
-import { Sidebar, TitleBar, type PageType } from './components/layout'
+import { Sidebar, TitleBar, isPageType, type PageType } from './components/layout'
 import {
   HomePage,
   AboutPage,
   SettingsPage,
-  ProxyPoolPage,
   DiagnosePage,
   ConfigSyncPage,
-  RegisterPage,
-  SeatsPage,
   LogsPage,
   TaskManagerPage,
-  HunterPage,
-  KskLedgerPage,
-  DownstreamSettlementPage,
-  ProxyStatsPage,
   CursorAccountsPage,
   GrokAccountsPage
 } from './components/pages'
@@ -134,8 +127,8 @@ function App(): React.JSX.Element {
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
     const handler = (e: Event): void => {
-      const detail = (e as CustomEvent<PageType>).detail
-      if (detail) setCurrentPage(detail)
+      const detail: unknown = (e as CustomEvent<unknown>).detail
+      if (isPageType(detail)) setCurrentPage(detail)
     }
     window.addEventListener('navigate-page', handler)
     return () => window.removeEventListener('navigate-page', handler)
@@ -143,7 +136,9 @@ function App(): React.JSX.Element {
 
   // 本机通知点击后跳转到对应页面。
   useEffect(() => {
-    const unsubscribe = window.api.onLocalNotificationNavigate((page) => setCurrentPage(page))
+    const unsubscribe = window.api.onLocalNotificationNavigate((page) => {
+      if (isPageType(page)) setCurrentPage(page)
+    })
     return () => unsubscribe()
   }, [])
 
@@ -264,20 +259,6 @@ function App(): React.JSX.Element {
         return <GrokAccountsPage />
       case 'tasks':
         return <TaskManagerPage />
-      case 'hunter':
-        return <HunterPage />
-      case 'kskLedger':
-        return <KskLedgerPage />
-      case 'downstream':
-        return <DownstreamSettlementPage />
-      case 'proxyStats':
-        return <ProxyStatsPage />
-      case 'proxyPool':
-        return <ProxyPoolPage />
-      case 'register':
-        return <RegisterPage />
-      case 'seats':
-        return <SeatsPage />
       case 'diagnose':
         return <DiagnosePage />
       case 'configSync':

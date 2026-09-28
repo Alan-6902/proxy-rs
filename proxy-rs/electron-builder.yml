@@ -14,11 +14,17 @@ files:
   - '!downstream-example/**'
   # KiroApp 渠道的 mock 上游同理，只在联调时用
   - '!kiroapp-mock/**'
+  # better-sqlite3 运行时只需 lib/ 与 macOS 预编译包
+  - '!node_modules/better-sqlite3/{deps,src}/**'
+  - '!node_modules/better-sqlite3/binding.gyp'
+  - '!node_modules/better-sqlite3/prebuilds/{win32,linux,linuxmusl}-*.node'
 asarUnpack:
   - resources/**
   - node_modules/koffi/**
   - node_modules/tlsclientwrapper/**
   - node_modules/piscina/**
+  # 共享账号库驱动（Node-API 预编译包，Electron 直接加载，见改造方案 §0.8）
+  - node_modules/better-sqlite3/**
 extraResources:
   - from: 'resources/tls-client-xgo-1.14.0-windows-amd64.dll'
     to: 'tls-client-xgo-1.14.0-windows-amd64.dll'
@@ -44,6 +50,10 @@ nsis:
   installerIcon: resources/icon.ico
   uninstallerIcon: resources/icon.ico
 mac:
+  # proxy-rs 拉起的 kiro-rs 子进程；由 scripts/build-kiro-rs.sh 生成（只支持 macOS）
+  extraResources:
+    - from: 'build/kiro-rs/kiro-rs'
+      to: 'kiro-rs'
   identity: null # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
   # 使用无空格的包名作为本地产物文件名前缀，保证各平台命名一致。
   artifactName: ${name}-${version}-${arch}-mac.${ext}

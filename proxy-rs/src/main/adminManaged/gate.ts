@@ -59,9 +59,19 @@ export function setAdminManagedRefreshTokenResolver(resolver: RefreshTokenResolv
   resolveAccountIdByRefreshToken = resolver
 }
 
-/** 从磁盘重建内存索引。启动时、以及每次登记表变更后调用。 */
+/**
+ * 账号库模式下的托管来源：库里的每个账号都由 kiro-rs 刷新，proxy 一律不本地刷新
+ * （改造方案 §0.2 D3）。设置后登记表文件不再读写。
+ */
+let managedSource: (() => AdminManagedAccountEntry[]) | undefined
+
+export function setAdminManagedSource(source: () => AdminManagedAccountEntry[]): void {
+  managedSource = source
+}
+
+/** 从磁盘（或账号库）重建内存索引。启动时、以及每次登记表变更后调用。 */
 export async function reloadAdminManagedIds(): Promise<ReadonlySet<string>> {
-  const entries = await loadAdminManagedEntries()
+  const entries = managedSource ? managedSource() : await loadAdminManagedEntries()
   managedById = new Map(entries.map((entry) => [entry.accountId, entry]))
   managedIds = new Set(managedById.keys())
   managedIdsListener?.([...managedIds])
@@ -94,6 +104,10 @@ export function isAdminManagedAccount(accountId?: string): boolean {
  *
  * resolver 未注入或反查抛错时返回 false（同样 fail-open）。
  */
+export function isAdminManagedSourceActive(): boolean {
+  return managedSource !== undefined
+}
+
 export async function isAdminManagedRefreshToken(refreshToken: string): Promise<boolean> {
   const trimmed = refreshToken.trim()
   if (!trimmed || !resolveAccountIdByRefreshToken) return false
@@ -107,19 +121,19 @@ export async function isAdminManagedRefreshToken(refreshToken: string): Promise<
 
 /** 登记一个账号已托管，并立即刷新内存索引。 */
 export async function recordManagedAccount(entry: AdminManagedAccountEntry): Promise<void> {
-  await recordAdminManagedAccount(entry)
+  if (!managedSource) await recordAdminManagedAccount(entry)
   await reloadAdminManagedIds()
 }
 
 /** 本地账号被删除时注销托管。 */
 export async function forgetManagedAccount(accountId: string): Promise<void> {
-  await forgetAdminManagedAccount(accountId)
+  if (!managedSource) await forgetAdminManagedAccount(accountId)
   await reloadAdminManagedIds()
 }
 
 /** 反代凭据被删除时注销托管。 */
 export async function forgetManagedByCredentialId(credentialId: string): Promise<void> {
-  await forgetAdminManagedByCredentialId(credentialId)
+  if (!managedSource) await forgetAdminManagedByCredentialId(credentialId)
   await reloadAdminManagedIds()
 }
 
@@ -132,6 +146,8 @@ export async function reconcileManagedAccounts(
   remote: readonly AdminManagedRemoteCredential[],
   now?: number
 ): Promise<{ dropped: AdminManagedReconcileDrop[] }> {
+  // 账号库模式：托管关系就是库本身，没有需要回收的登记
+  if (managedSource) return { dropped: [] }
   const result = await applyAdminManagedReconcile(remote, now)
   if (result.dropped.length > 0) await reloadAdminManagedIds()
   return result

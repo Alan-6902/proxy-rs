@@ -274,6 +274,8 @@ interface AccountsActions {
 
   // 持久化
   loadFromStorage: () => Promise<boolean>
+  /** 账号库模式：kiro-rs 更新了账号后只重载账号列表（不重置选择与定时器） */
+  reloadAccountsFromMain: () => Promise<void>
   /** 防抖触发持久化（推荐：高频 mutation 自动合并写盘） */
   saveToStorage: () => Promise<void>
   /** 立即持久化（用于 beforeunload 或关键操作场景） */
@@ -469,6 +471,21 @@ async function probeAccountLiveness(
   return result
 }
 
+/**
+ * 账号库模式下删除必须显式经主进程（kiro-rs）执行：保存快照不会删除库里的账号。
+ * 旧模式下主进程为空操作。失败时账号会在下次重载时重新出现，这里只记录原因。
+ */
+function deleteFromAccountDb(ids: string[]): void {
+  if (ids.length === 0 || typeof window === 'undefined' || !window.api?.accountDbDelete) return
+  void window.api
+    .accountDbDelete(ids)
+    .then((result) => {
+      for (const item of result.failed)
+        console.warn(`[AccountDb] 删除账号 ${item.id} 失败：${item.reason}`)
+    })
+    .catch((error) => console.warn('[AccountDb] 删除账号失败：', error))
+}
+
 export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // 初始状态
   appVersion: '1.0.0',
@@ -569,6 +586,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       }
     })
     get().saveToStorage()
+    deleteFromAccountDb([id])
   },
 
   removeAccounts: (ids) => {
@@ -603,6 +621,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     })
 
     get().saveToStorage()
+    deleteFromAccountDb(ids)
     return result
   },
 
@@ -1704,6 +1723,24 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   // ==================== 持久化 ====================
+
+  reloadAccountsFromMain: async () => {
+    // 先落盘本地未保存的 UI 修改，再读回库里的最新数据
+    await get().flushSaveImmediately()
+    const data = await window.api.loadAccounts()
+    if (!data) return
+    const accounts = new Map(Object.entries(data.accounts ?? {}) as [string, Account][])
+    const activeAccountId = get().activeAccountId
+    for (const [id, account] of accounts) {
+      const shouldBeActive = id === activeAccountId
+      if (account.isActive !== shouldBeActive)
+        accounts.set(id, { ...account, isActive: shouldBeActive })
+    }
+    set((state) => {
+      const selectedIds = new Set([...state.selectedIds].filter((id) => accounts.has(id)))
+      return { accounts, selectedIds }
+    })
+  },
 
   loadFromStorage: async () => {
     set({ isLoading: true })

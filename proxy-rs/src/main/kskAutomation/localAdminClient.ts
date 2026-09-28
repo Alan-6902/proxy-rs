@@ -11,6 +11,7 @@ import {
 } from '../../shared/localAdminPush'
 import type { KskCredentialCleanupResult } from './credentialCleanup'
 import { forgetManagedByCredentialId } from '../adminManaged/gate'
+import { isAccountDbMode, syncAccountDbPending } from '../accountDb/runtime'
 
 export interface LocalAdminAccount {
   kiroApiKey: string
@@ -176,7 +177,8 @@ async function deleteRemoteCredential(input: {
   fetchImpl: KskAutomationFetch
 }): Promise<void> {
   const target = `${input.baseUrl}/credentials/${encodeURIComponent(input.credentialId)}`
-  if (!input.disabled) {
+  // 账号库模式：DELETE 只是移出号池，账号仍由 proxy 管理，不能顺手把它禁用
+  if (!input.disabled && !isAccountDbMode()) {
     await requestJson(input.fetchImpl, `${target}/disabled`, input.adminApiKey, input.timeoutMs, {
       method: 'POST',
       body: { disabled: true }
@@ -378,6 +380,9 @@ export async function syncKskAccountsToLocalAdmin(input: {
   timeoutSeconds: number
   fetchImpl: KskAutomationFetch
 }): Promise<LocalAdminSyncResult> {
+  // 账号库模式：先把尚未入库的账号交给 kiro-rs（原样导入、不刷新），再按凭据判重入池。
+  // 顺序反过来的话，Admin 新增时会先刷新一次 token，库里随后导入的那份就成了作废的旧 token。
+  if (isAccountDbMode()) await syncAccountDbPending()
   const baseUrl = resolveLocalAdminApiBase(input.baseUrl)
   const adminApiKey = input.adminApiKey.trim()
   if (!adminApiKey) throw new Error('未配置本机 Admin API Key')
@@ -598,6 +603,9 @@ export async function pushAccountToLocalAdmin(input: {
    */
   probeLiveness?: (candidate: LocalAdminPushCandidate) => Promise<LocalAdminProbeOutcome>
 }): Promise<LocalAdminPushResult> {
+  // 账号库模式：先把尚未入库的账号交给 kiro-rs（原样导入、不刷新），再按凭据判重入池。
+  // 顺序反过来的话，Admin 新增时会先刷新一次 token，库里随后导入的那份就成了作废的旧 token。
+  if (isAccountDbMode()) await syncAccountDbPending()
   const resolved = resolveLocalAdminCredentialPayload(input.candidate)
   if (!resolved.ok) throw new Error(resolved.reason)
 

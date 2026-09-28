@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { accountDbAdminTarget, isAccountDbMode } from '../accountDb/runtime'
 import { ipcMain, type BrowserWindow } from 'electron'
 import type {
   KskAutomationStatusEvent,
@@ -172,6 +173,20 @@ export interface LocalAdminTarget {
  */
 export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
   const store = await loadKskAutomationStore()
+  // 账号库模式：本机 Admin 就是 proxy 拉起的 kiro-rs 子进程
+  const accountDbTarget = accountDbAdminTarget()
+  if (isAccountDbMode()) {
+    if (!accountDbTarget)
+      throw new Error('kiro-rs 尚未就绪（账号库模式由 proxy-rs 拉起），请稍后重试')
+    const task = store.tasks.find((item) => item.config.localAdminEnabled) ?? store.tasks[0]
+    return {
+      baseUrl: accountDbTarget.baseUrl,
+      adminApiKey: accountDbTarget.adminApiKey,
+      timeoutSeconds:
+        task?.config.requestTimeoutSeconds ?? Math.ceil(accountDbTarget.timeoutMs / 1000),
+      autoDeleteExhausted: task?.config.autoDeleteExhausted ?? false
+    }
+  }
   const candidates = store.tasks.filter(
     (task) => task.config.localAdminEnabled && task.secrets.localAdminApiKey
   )

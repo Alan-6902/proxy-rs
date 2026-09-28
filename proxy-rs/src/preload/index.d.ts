@@ -191,6 +191,19 @@ interface KiroApi {
 
   // 账号管理
   loadAccounts: () => Promise<AccountData | null>
+  accountDbDelete: (
+    ids: string[]
+  ) => Promise<{ success: boolean; failed: Array<{ id: string; reason: string }> }>
+  accountDbStatus: () => Promise<{
+    enabled: boolean
+    dbPath?: string
+    databaseId?: string
+    kiroRsState?: string
+    kiroRsDetail?: string
+    pending?: number
+    error?: string
+  }>
+  onAccountDbChanged: (callback: () => void) => () => void
   saveAccounts: (data: AccountData) => Promise<void>
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
   switchAccountCli: (accountId: string) => Promise<SwitchAccountCliResult>

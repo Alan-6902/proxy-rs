@@ -124,6 +124,13 @@ function App(): React.JSX.Element {
     })
   }, [loadFromStorage])
 
+  // 账号库模式：kiro-rs 刷新 token / 查额度 / 改状态后，重载账号列表
+  useEffect(() => {
+    return window.api.onAccountDbChanged(() => {
+      void useAccountsStore.getState().reloadAccountsFromMain()
+    })
+  }, [])
+
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
     const handler = (e: Event): void => {

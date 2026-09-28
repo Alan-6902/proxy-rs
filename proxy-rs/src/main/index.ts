@@ -45,7 +45,7 @@ import {
 import { startManagedAccountRefresh } from './adminManaged/startup'
 import { recordAdminManagedAccount } from './adminManaged/registryStore'
 import { matchRemoteCredentialToLocalAccount } from '../shared/adminManaged'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { writeFile, readFile } from 'fs/promises'
@@ -172,7 +172,12 @@ import {
 } from './tray'
 
 app.setName(APP_NAME)
-app.setPath('userData', join(app.getPath('appData'), APP_DATA_DIRECTORY_NAME))
+// PROXY_RS_USER_DATA_DIR：联调用独立 userData（账号库配置、electron-store、单实例锁随之隔离），
+// 可在本机正式版运行时安全地起第二个实例做验证
+app.setPath(
+  'userData',
+  process.env.PROXY_RS_USER_DATA_DIR?.trim() || join(app.getPath('appData'), APP_DATA_DIRECTORY_NAME)
+)
 
 // ============ 自动更新配置 ============
 // ============ Kiro API 调用 ============
@@ -1261,6 +1266,24 @@ let store: {
 let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
+import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
+import {
+  accountDbAdminTarget,
+  accountDbBackupPayload,
+  accountDbBridge,
+  accountDbStatus,
+  activateAccountDb,
+  defaultAccountDbConfig,
+  isAccountDbMode,
+  loadAccountDbConfig,
+  startAccountDbWatcher,
+  startManagedKiroRs,
+  stopAccountDbWatcher,
+  stopManagedKiroRs,
+  type AccountDbConfig
+} from './accountDb/runtime'
+import { rollbackAccountDb, runMigration } from './accountDb/migrate'
+import { loadAdminManagedEntries } from './adminManaged/registryStore'
 const accountStoreCoordinator = new AccountStoreCoordinator()
 type CanonicalKiroCredentialRefreshResult = OidcRefreshResult & {
   expiresAt?: number
@@ -2517,6 +2540,7 @@ async function cleanupInvalidStoredKskAccounts(
     const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
     const { data: next, removedIds } = removeMatchingInvalidKskAccounts(current, permanentlyInvalid)
     if (removedIds.length === 0) return removedIds
+    await deleteFromAccountDb(removedIds)
     store!.set('accountData', next)
     lastSavedData = next
     await createBackup(next)
@@ -2551,6 +2575,14 @@ async function cleanupInvalidStoredKskAccounts(
  * 明文要回给调用方拉黑：只删不拉黑的话，下一轮 Provider 返回同一个号就会重新入库、
  * 再被同步回 Admin，变成删了又回来的死循环。
  */
+/** 账号库模式：store.set 不会删库里的账号（快照可能是旧的），删除必须显式走 kiro-rs */
+async function deleteFromAccountDb(ids: readonly string[]): Promise<void> {
+  const bridge = accountDbBridge()
+  if (!bridge || ids.length === 0) return
+  const failed = await bridge.deleteAccounts(ids, accountDbAdminTarget())
+  for (const item of failed) console.warn(`[AccountDb] 删除账号 ${item.id} 失败：${item.reason}`)
+}
+
 async function removeStoredKskAccountsByHash(
   hashes: ReadonlySet<string>
 ): Promise<{ removedIds: string[]; removedKeys: string[] }> {
@@ -2570,6 +2602,7 @@ async function removeStoredKskAccountsByHash(
 
     const { data: next, removedIds } = removeMatchingInvalidKskAccounts(current, doomed)
     if (removedIds.length === 0) return { removedIds: [], removedKeys: [] }
+    await deleteFromAccountDb(removedIds)
     store!.set('accountData', next)
     lastSavedData = next
     await createBackup(next)
@@ -2910,6 +2943,30 @@ const downstreamSettlementManager = new DownstreamSettlementManager({
   log: (message) => console.log(message)
 })
 
+/** 未经账号库包装的 electron-store（迁移 / 回滚用） */
+let rawAccountStore: (RawStore & { path: string }) | null = null
+/** 账号库模式启用但打不开时的原因，启动后弹窗提示 */
+let accountDbStartupError: string | null = null
+
+/** 账号绑定的出口代理（与 readAccountBoundProxyUrl 同一判据），供账号库同步给 kiro-rs */
+function resolveBoundProxyUrl(accountId: string, data: Record<string, unknown>): string | undefined {
+  const bindings = data.accountProxyBindings as Record<string, string> | undefined
+  const pool = data.proxyPool as
+    | Record<string, { url?: string; enabled?: boolean; status?: string }>
+    | undefined
+  const proxyId = bindings?.[accountId]
+  const proxy = proxyId ? pool?.[proxyId] : undefined
+  if (!proxy?.enabled || proxy.status === 'dead') return undefined
+  return proxy.url
+}
+
+function resolveKiroRsBinary(config: AccountDbConfig): string {
+  if (config.kiroRs.binary) return config.kiroRs.binary
+  return app.isPackaged
+    ? join(process.resourcesPath, 'kiro-rs')
+    : join(app.getAppPath(), '..', 'kiro-rs-src', 'target', 'release', 'kiro-rs')
+}
+
 async function initStoreInternal(): Promise<void> {
   const Store = (await import('electron-store')).default
   const path = await import('path')
@@ -2920,11 +2977,31 @@ async function initStoreInternal(): Promise<void> {
   })
 
   store = storeInstance as unknown as typeof store
+  rawAccountStore = storeInstance as unknown as RawStore & { path: string }
+
+  // 账号库模式（account-db.json enabled=true）：账号读写转到共享 SQLite，见 accountDb/bridge.ts。
+  // 库打不开时不退回 electron-store 里的旧账号，只报错。
+  const accountDbConfig = loadAccountDbConfig(app.getPath('userData'))
+  if (accountDbConfig?.enabled) {
+    try {
+      const bridge = activateAccountDb({
+        config: accountDbConfig,
+        rawStore: storeInstance as unknown as RawStore,
+        proxyUrlFor: resolveBoundProxyUrl
+      })
+      store = wrapStoreWithBridge(storeInstance, bridge) as unknown as typeof store
+      console.log(`[AccountDb] 账号库模式已启用：${accountDbConfig.dbPath}`)
+    } catch (error) {
+      accountDbStartupError = error instanceof Error ? error.message : String(error)
+      console.error('[AccountDb] 账号库打开失败，账号数据不可用：', accountDbStartupError)
+    }
+  }
 
   // 尝试从备份恢复数据（如果主数据损坏）。备份优先读加密 .enc，兼容旧明文 .json
+  // 账号库模式跳过：旧备份里的 token 可能已被轮换作废，恢复回来会被当成新账号重新导入
   try {
     const mainData = storeInstance.get('accountData')
-    if (!mainData) {
+    if (!mainData && !isAccountDbMode()) {
       try {
         const { readSecureBackup } = await import('./secureBackup')
         const backupData = (await readSecureBackup(path.dirname(storeInstance.path))) as {
@@ -3020,7 +3097,7 @@ let pendingBackupTimer: ReturnType<typeof setTimeout> | null = null
  * - 退出前可手动调用 flushBackupNow() 强制写盘
  */
 async function createBackup(data: unknown): Promise<void> {
-  pendingBackupData = data
+  pendingBackupData = accountDbBackupPayload(data)
   const now = Date.now()
   const elapsed = now - lastBackupTime
 
@@ -3555,6 +3632,16 @@ app.whenReady().then(async () => {
   proxyLogStore.initialize(app.getPath('userData'))
   interceptConsole()
   await initStore()
+
+  // 账号库迁移 / 回滚命令行（改造方案 P5）：执行完即退出，不进入正常启动
+  if (process.argv.some((arg) => arg.startsWith('--migrate-account-db') || arg === '--rollback-account-db')) {
+    await runAccountDbCommand(process.argv)
+    return
+  }
+  if (accountDbStartupError) {
+    dialog.showErrorBox('账号库不可用', `${accountDbStartupError}\n\n账号操作已停用，请检查账号库文件后重启。`)
+  }
+  if (isAccountDbMode()) void startAccountDbServices()
 
   // 注册自定义协议
   registerProtocol()
@@ -4132,6 +4219,23 @@ app.whenReady().then(async () => {
       return null
     }
   })
+
+  // IPC: 删除账号（账号库模式经 kiro-rs 删除；旧模式由 save-accounts 快照完成，这里无操作）
+  ipcMain.handle('account-db:delete', async (_event, ids: unknown) => {
+    const list = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
+    const bridge = accountDbBridge()
+    if (!bridge) return { success: true, failed: [] }
+    const failed = await accountStoreCoordinator.runExclusive(() =>
+      bridge.deleteAccounts(list, accountDbAdminTarget())
+    )
+    return { success: failed.length === 0, failed }
+  })
+
+  // IPC: 账号库状态（是否启用、kiro-rs 子进程状态、待导入数量）
+  ipcMain.handle('account-db:status', () => ({
+    ...accountDbStatus(),
+    error: accountDbStartupError ?? undefined
+  }))
 
   // IPC: 保存账号数据
   ipcMain.handle('save-accounts', async (_event, data) => {
@@ -4949,6 +5053,12 @@ async function syncManagedAccountIntoBatch(
     const synced = syncInfo
       ? await syncManagedAccountFromAdmin(adminTarget, entry.credentialId, Date.now(), refreshManaged)
       : { status: 'active' as const, usage: undefined, subscription: undefined, errorMessage: undefined }
+    // 账号库模式：kiro-rs 已把上游原样额度写进库，用它补全 base / bonus / 试用明细
+    const projected = syncInfo ? accountDbBridge()?.projectedAccount(accountId) : undefined
+    if (projected && synced.status === 'active') {
+      synced.usage = projected.usage as typeof synced.usage
+      synced.subscription = projected.subscription as typeof synced.subscription
+    }
     sendRendererEvent('background-refresh-result', {
       id: accountId,
       success: synced.status === 'active',
@@ -4984,6 +5094,8 @@ const ADMIN_MANAGED_ADOPTION_KEY = 'adminManagedAdoptionDone'
  */
 async function runAdminManagedAdoptionOnce(): Promise<void> {
   if (!store) return
+  // 账号库模式：库里的账号全部由 kiro-rs 管理，不需要认领
+  if (isAccountDbMode()) return
   if (store.get(ADMIN_MANAGED_ADOPTION_KEY, false) === true) return
 
   try {
@@ -7313,6 +7425,58 @@ app.on('window-all-closed', () => {
   }
 })
 
+async function runAccountDbCommand(argv: readonly string[]): Promise<void> {
+  const userDataDir = app.getPath('userData')
+  const config = loadAccountDbConfig(userDataDir) ?? defaultAccountDbConfig()
+  const credentialsArg = argv.find((arg) => arg.startsWith('--kiro-credentials='))
+  const credentialsPath =
+    credentialsArg?.slice('--kiro-credentials='.length) ??
+    join(dirname(config.kiroRs.configPath), 'credentials.json')
+  try {
+    if (!rawAccountStore) throw new Error('electron-store 未初始化')
+    if (argv.includes('--rollback-account-db')) {
+      rollbackAccountDb({ config, userDataDir, rawStore: rawAccountStore, credentialsDir: dirname(credentialsPath) })
+    } else {
+      if (config.enabled) throw new Error('账号库模式已启用，无需再次迁移')
+      await runMigration(
+        {
+          config,
+          userDataDir,
+          rawStore: rawAccountStore,
+          registry: await loadAdminManagedEntries(),
+          kiroRsBinary: resolveKiroRsBinary(config),
+          credentialsPath,
+          proxyUrlFor: resolveBoundProxyUrl
+        },
+        { dryRun: !argv.includes('--migrate-account-db=apply') }
+      )
+    }
+    app.exit(0)
+  } catch (error) {
+    console.error('[AccountDb] 命令失败：', error instanceof Error ? error.message : error)
+    app.exit(1)
+  }
+}
+
+/** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
+async function startAccountDbServices(): Promise<void> {
+  startAccountDbWatcher(() => sendRendererEvent('account-db-changed', null))
+  const config = loadAccountDbConfig(app.getPath('userData'))
+  if (!config) return
+  try {
+    await startManagedKiroRs({
+      binary: resolveKiroRsBinary(config),
+      onLog: (line) => console.log(`[kiro-rs] ${line}`),
+      onStateChange: (state, detail) => {
+        console.log(`[kiro-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
+        sendRendererEvent('account-db-status', { ...accountDbStatus(), error: detail })
+      }
+    })
+  } catch (error) {
+    console.error('[kiro-rs] 启动失败：', error instanceof Error ? error.message : error)
+  }
+}
+
 // 应用退出前注销 URI 协议处理器并保存数据
 app.on('will-quit', async (event) => {
   // 防止重复处理
@@ -7329,6 +7493,7 @@ app.on('will-quit', async (event) => {
   // 停止反代统计采样
   localAdminStatsManager.stop()
   void localAdminDirectAgent.close()
+  stopAccountDbWatcher()
 
   // 防止应用立即退出，先保存数据
   if (lastSavedData && store) {
@@ -7368,11 +7533,16 @@ app.on('will-quit', async (event) => {
     } catch (error) {
       console.error('[Exit] Failed to save data:', error)
     }
+    // kiro-rs 与 proxy 同生共死：先让它把统计写完再退出
+    await stopManagedKiroRs().catch((error) =>
+      console.error('[Exit] Failed to stop kiro-rs:', error)
+    )
 
     clearTimeout(forceQuitTimer)
     unregisterProtocol()
     app.exit(0)
   } else {
+    void stopManagedKiroRs()
     unregisterProtocol()
   }
 })

@@ -62,6 +62,16 @@ type UpstreamKiroCredentialInput =
       kiroApiKey?: string
     }
 
+interface AccountDbStatusView {
+  enabled: boolean
+  dbPath?: string
+  databaseId?: string
+  kiroRsState?: string
+  kiroRsDetail?: string
+  pending?: number
+  error?: string
+}
+
 const api = {
   // 打开外部链接
   openExternal: (url: string): void => {
@@ -101,6 +111,25 @@ const api = {
   // 账号管理 - 保存账号数据
   saveAccounts: (data: unknown): Promise<void> => {
     return ipcRenderer.invoke('save-accounts', data)
+  },
+
+  // 账号库模式：删除账号（经 kiro-rs）。旧模式下为空操作，删除仍由 saveAccounts 快照完成
+  accountDbDelete: (
+    ids: string[]
+  ): Promise<{ success: boolean; failed: Array<{ id: string; reason: string }> }> => {
+    return ipcRenderer.invoke('account-db:delete', ids)
+  },
+
+  // 账号库模式：状态（是否启用、kiro-rs 子进程状态、待导入数量）
+  accountDbStatus: (): Promise<AccountDbStatusView> => ipcRenderer.invoke('account-db:status'),
+
+  // 账号库模式：kiro-rs 更新了凭据 / 额度 / 状态（事件不带数据，收到后重新加载账号）
+  onAccountDbChanged: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on('account-db-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('account-db-changed', handler)
+    }
   },
 
   // 账号管理 - 刷新 Token

@@ -102,6 +102,34 @@ pub async fn get_models() -> impl IntoResponse {
             max_tokens: 128_000,
         },
         Model {
+            id: "claude-opus-5-5".to_string(),
+            object: "model".to_string(),
+            created: 1790035200, // Sep 22, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5.5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-5-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1790035200, // Sep 22, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5.5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            // Kiro Enterprise 预览，需管理员在 Model Governance 放行后才可用
+            id: "claude-fable-5-1".to_string(),
+            object: "model".to_string(),
+            created: 1789516800, // Sep 16, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5.1 (Preview)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
             id: "claude-opus-5".to_string(),
             object: "model".to_string(),
             created: 1782777600, // Jun 30, 2026

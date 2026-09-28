@@ -18,6 +18,10 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
 
+    /// 稳定身份：token 轮换和重启时保留，删除重建时重新生成。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_identity: Option<String>,
+
     /// 访问令牌
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
@@ -323,6 +327,7 @@ mod tests {
     fn test_to_json() {
         let creds = KiroCredentials {
             id: None,
+            credential_identity: None,
             access_token: Some("token".to_string()),
             refresh_token: None,
             profile_arn: None,
@@ -441,6 +446,7 @@ mod tests {
     fn test_region_field_serialization() {
         let creds = KiroCredentials {
             id: None,
+            credential_identity: None,
             access_token: None,
             refresh_token: Some("test".to_string()),
             profile_arn: None,
@@ -472,6 +478,7 @@ mod tests {
     fn test_region_field_none_not_serialized() {
         let creds = KiroCredentials {
             id: None,
+            credential_identity: None,
             access_token: None,
             refresh_token: Some("test".to_string()),
             profile_arn: None,
@@ -586,6 +593,7 @@ mod tests {
         // 测试序列化和反序列化的往返一致性
         let original = KiroCredentials {
             id: Some(42),
+            credential_identity: None,
             access_token: Some("token".to_string()),
             refresh_token: Some("refresh".to_string()),
             profile_arn: None,

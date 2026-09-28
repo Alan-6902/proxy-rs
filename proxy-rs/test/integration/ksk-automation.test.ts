@@ -835,7 +835,7 @@ describe('单账号推送到本机 Admin', () => {
     }
 
     const result = await pushAccountToLocalAdmin({
-      candidate: { refreshToken: REFRESH_TOKEN },
+      candidate: { credentialKind: 'kiro_api_key', kiroApiKey: KSK_ONE, region: 'us-east-1' },
       baseUrl: 'http://127.0.0.1:12888/admin',
       adminApiKey: 'admin_secret',
       timeoutSeconds: 5,
@@ -860,7 +860,7 @@ describe('单账号推送到本机 Admin', () => {
       status: 'created',
       credentialId: '9',
       verified: true,
-      authMethod: 'social',
+      authMethod: 'api_key',
       probeVerdict: 'alive'
     })
     expect(calls).toEqual([
@@ -880,7 +880,7 @@ describe('单账号推送到本机 Admin', () => {
       status: 'created',
       credentialId: '9',
       verified: true,
-      authMethod: 'social',
+      authMethod: 'api_key',
       probeVerdict: 'transient'
     })
     expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
@@ -903,7 +903,7 @@ describe('单账号推送到本机 Admin', () => {
       status: 'created',
       credentialId: '9',
       verified: true,
-      authMethod: 'social',
+      authMethod: 'api_key',
       probeVerdict: 'skipped'
     })
     expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
@@ -932,7 +932,7 @@ describe('单账号推送到本机 Admin', () => {
 
       await expect(
         pushAccountToLocalAdmin({
-          candidate: { refreshToken: REFRESH_TOKEN },
+          candidate: { credentialKind: 'kiro_api_key', kiroApiKey: KSK_ONE, region: 'us-east-1' },
           baseUrl: 'http://127.0.0.1:12888/admin',
           adminApiKey: 'admin_secret',
           timeoutSeconds: 5,
@@ -964,7 +964,7 @@ describe('单账号推送到本机 Admin', () => {
       status: 'created',
       credentialId: '9',
       verified: false,
-      authMethod: 'social',
+      authMethod: 'api_key',
       probeVerdict: 'alive'
     })
     expect(probe).toHaveBeenCalledOnce()
@@ -1007,7 +1007,7 @@ describe('单账号推送到本机 Admin', () => {
       credentialId: '9',
       // 余额没验成，如实报 false；可用性由发消息验活背书
       verified: false,
-      authMethod: 'social',
+      authMethod: 'api_key',
       probeVerdict: 'alive'
     })
     expect(probe).toHaveBeenCalledOnce()

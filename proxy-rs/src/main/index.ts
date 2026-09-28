@@ -39,6 +39,7 @@ import {
   setAdminManagedRefreshTokenResolver
 } from './adminManaged/gate'
 import { syncManagedAccountFromAdmin } from './adminManaged/accountSync'
+import { startManagedAccountRefresh } from './adminManaged/startup'
 import { recordAdminManagedAccount } from './adminManaged/registryStore'
 import { matchRemoteCredentialToLocalAccount } from '../shared/adminManaged'
 import { join } from 'path'
@@ -2417,56 +2418,21 @@ async function probeLocalAdminPushCandidateLiveness(
   candidate: LocalAdminPushCandidate
 ): Promise<LocalAdminProbeOutcome> {
   const isApiKey = candidate.credentialKind === 'kiro_api_key' || Boolean(candidate.kiroApiKey)
-  const region = candidate.region?.trim() || 'us-east-1'
-
-  let probeAccount: ProxyAccount
-  if (isApiKey) {
-    const key = candidate.kiroApiKey?.trim()
-    if (!key) {
-      return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Kiro API Key' }
-    }
-    probeAccount = {
-      id: 'local-admin-push-probe',
-      credentialKind: 'kiro_api_key',
-      kiroApiKey: key,
-      region,
-      provider: 'BuilderId'
-    }
-  } else {
-    const refreshToken = candidate.refreshToken?.trim()
-    if (!refreshToken) {
-      return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Refresh Token' }
-    }
-    /*
-     * 不在这里本地刷新。
-     *
-     * 候选凭据此刻已经 POST 给 Admin，而 Admin 的 balance 门禁会用它刷一次 token，
-     * 那次刷新会把 refreshToken 轮换掉——本地这份随即作废。所以「本地刷不出
-     * accessToken」只说明我们手上是旧货，不说明凭据失效；据此判 PERMANENTLY_INVALID
-     * 会让 verifyOrRollback 删掉 Admin 里刚建好的凭据，形成「推一次删一次」。
-     *
-     * 改用调用方传进来的、可能仍然有效的 accessToken 做消息级验活；拿不到就跳过，
-     * 交给 Admin 自己的 balance 门禁兜底。
-     */
-    const accessToken = candidate.accessToken?.trim()
-    if (!accessToken) {
-      return {
-        verdict: LOCAL_ADMIN_PROBE_VERDICT.SKIPPED,
-        error: '无可用 accessToken，跳过消息验活'
-      }
-    }
-    probeAccount = {
-      id: 'local-admin-push-probe',
-      accessToken,
-      refreshToken,
-      clientId: candidate.clientId,
-      clientSecret: candidate.clientSecret,
-      region,
-      authMethod: candidate.authMethod,
-      provider: 'BuilderId'
-    }
+  if (!isApiKey) {
+    // OAuth token 已由 Admin 独占维护，本地副本的认证失败不能证明远端凭据失效。
+    return { verdict: LOCAL_ADMIN_PROBE_VERDICT.SKIPPED }
   }
-
+  const key = candidate.kiroApiKey?.trim()
+  if (!key) {
+    return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Kiro API Key' }
+  }
+  const probeAccount: ProxyAccount = {
+    id: 'local-admin-push-probe',
+    credentialKind: 'kiro_api_key',
+    kiroApiKey: key,
+    region: candidate.region?.trim() || 'us-east-1',
+    provider: 'BuilderId'
+  }
   const model = await resolveKskLivenessModelId(probeAccount)
   const message = resolveKskLivenessMessage()
   try {
@@ -2485,7 +2451,6 @@ async function probeLocalAdminPushCandidateLiveness(
           : '发消息验活暂时无法确认（超时 / 限流 / 上游 5xx）'
     }
   } catch (error) {
-    // 探针自身出错（不是上游拒绝）不能算账号失效
     return {
       verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT,
       error: error instanceof Error ? error.message : String(error)
@@ -2799,6 +2764,7 @@ const localAdminStatsManager = new LocalAdminStatsManager({
     const { dropped } = await reconcileManagedAccounts(
       credentials.map((credential) => ({
         id: credential.id,
+        credentialIdentity: credential.credentialIdentity,
         apiKeyHash: credential.apiKeyHash,
         refreshTokenHash: credential.refreshTokenHash
       }))
@@ -3629,9 +3595,6 @@ app.whenReady().then(async () => {
   void proxyPoolScheduler.start().catch((err) => {
     console.warn('[ProxyPoolScheduler] Failed to start:', err)
   })
-
-  // Kiro CLI 社交凭据续期：每分钟检查，剩余不超过 10 分钟时用账号库里匹配的账号续期
-  kiroCliSocialRenewal.start()
 
   // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
   registerKskAutomationIpcHandlers({
@@ -5031,6 +4994,7 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
       remote: readRemoteCredentials(payload)
         .map((credential) => ({
           id: remoteCredentialId(credential) ?? '',
+          credentialIdentity: credential.credentialIdentity,
           email: credential.email,
           authMethod: credential.authMethod,
           apiKeyHash: credential.apiKeyHash,
@@ -5550,15 +5514,18 @@ async function runAdminManagedAdoptionOnce(): Promise<void> {
   })
   // 托管集合一变就推给渲染进程，用于把 CLI 切号之类的入口置灰
   setAdminManagedChangeListener((ids) => sendRendererEvent('admin-managed-changed', ids))
-  await reloadAdminManagedIds()
-  // 升级时把反代里已有的凭据认回来；必须先于刷新调度，否则存量号会被本地刷一次
-  await runAdminManagedAdoptionOnce()
+  await startManagedAccountRefresh({
+    reload: reloadAdminManagedIds,
+    adopt: runAdminManagedAdoptionOnce,
+    start: () => {
+      // CLI start() 会立即检查临期凭据，主池也必须等托管初始化完成。
+      kiroCliSocialRenewal.start()
+      startMainPoolTokenRefresh()
+    }
+  })
 
   // 渲染进程启动时拉一次托管集合（事件只推增量，首帧需要主动取）
   ipcMain.handle('get-admin-managed-ids', () => [...adminManagedIdsSnapshot()])
-
-  // 启动主进程池 token 刷新调度器（不依赖窗口可见/存活，挂托盘也照常刷新）
-  startMainPoolTokenRefresh()
 
   // IPC: 后台批量检查账号状态（不刷新 Token，只检查状态）
   ipcMain.handle(

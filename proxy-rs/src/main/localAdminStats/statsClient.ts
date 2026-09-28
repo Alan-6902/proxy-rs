@@ -87,6 +87,7 @@ export function toCredentialStats(
   const refreshFailureCount = readCount(credential.refreshFailureCount)
   return {
     id,
+    credentialIdentity: readOptionalString(credential.credentialIdentity),
     maskedKey: readOptionalString(credential.maskedApiKey),
     authMethod: readOptionalString(credential.authMethod),
     endpoint: readOptionalString(credential.endpoint),

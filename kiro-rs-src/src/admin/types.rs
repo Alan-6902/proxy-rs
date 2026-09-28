@@ -24,6 +24,8 @@ pub struct CredentialsStatusResponse {
 pub struct CredentialStatusItem {
     /// 凭据唯一 ID
     pub id: u64,
+    /// 不随 token 轮换变化的凭据身份
+    pub credential_identity: Option<String>,
     /// 优先级（数字越小优先级越高）
     pub priority: u32,
     /// 是否被禁用
@@ -162,6 +164,7 @@ pub struct AddCredentialResponse {
     pub message: String,
     /// 新添加的凭据 ID
     pub credential_id: u64,
+    pub credential_identity: Option<String>,
     /// 用户邮箱（如果获取成功）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,

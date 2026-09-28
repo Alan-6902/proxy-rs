@@ -126,10 +126,10 @@ describe('admin managed registry helpers', () => {
       expect(dropped).toEqual([{ accountId: 'acct-1', credentialId: '7', reason: 'missing' }])
     })
 
-    it('id 还在但 hash 不符 → 判为 id 被复用并丢弃', () => {
+    it('旧 API Key 登记的 hash 不符 → 判为 id 被复用并丢弃', () => {
       const { kept, dropped } = reconcileAdminManagedEntries(
-        [entry()],
-        [{ id: '7', refreshTokenHash: 'someone-else' }],
+        [entry({ authMethod: 'api_key', remoteApiKeyHash: 'original-key' })],
+        [{ id: '7', apiKeyHash: 'someone-else' }],
         now
       )
       expect(kept).toEqual([])
@@ -150,13 +150,13 @@ describe('admin managed registry helpers', () => {
       expect(kept).toHaveLength(1)
     })
 
-    it('条目没记 hash 时判为 hash 不符（宁可恢复本地刷新，也不永久冻结）', () => {
+    it('旧 OAuth 登记没记 hash 时保持托管，不能据此恢复刷新', () => {
       const { dropped } = reconcileAdminManagedEntries(
         [entry({ remoteRefreshTokenHash: undefined })],
         [{ id: '7', refreshTokenHash: 'hash-a' }],
         now
       )
-      expect(dropped[0].reason).toBe('hash_changed')
+      expect(dropped).toEqual([])
     })
   })
 

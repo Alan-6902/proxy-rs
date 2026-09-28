@@ -72,6 +72,7 @@ impl AdminService {
             .into_iter()
             .map(|entry| CredentialStatusItem {
                 id: entry.id,
+                credential_identity: entry.credential_identity,
                 priority: entry.priority,
                 disabled: entry.disabled,
                 failure_count: entry.failure_count,
@@ -222,6 +223,7 @@ impl AdminService {
         let email = req.email.clone();
         let new_cred = KiroCredentials {
             id: None,
+            credential_identity: None,
             access_token: None,
             refresh_token: req.refresh_token,
             profile_arn: None,
@@ -260,6 +262,13 @@ impl AdminService {
             success: true,
             message: format!("凭据添加成功，ID: {}", credential_id),
             credential_id,
+            credential_identity: self
+                .token_manager
+                .snapshot()
+                .entries
+                .into_iter()
+                .find(|entry| entry.id == credential_id)
+                .and_then(|entry| entry.credential_identity),
             email,
         })
     }

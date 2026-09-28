@@ -8,8 +8,8 @@
  *
  * 关键约束：托管关系一旦建立，本地那份 refreshToken 就随时可能被反代轮换掉，
  * 因而永久失去权威性——**不能用它做任何比对**。唯一可信的锚点是
- * accountId → credentialId，而 credentialId 是否仍然有效，只能拿反代自己
- * 返回的 hash 来校验（防 id 复用）。
+ * accountId → credentialId，再用反代持久化的 credentialIdentity 防止数字 id 复用。
+ * 旧反代没有稳定身份时保留 OAuth 托管保护，不能拿轮换哈希判断身份。
  */
 
 export type AdminManagedAuthMethod = 'api_key' | 'idc' | 'social'
@@ -30,7 +30,9 @@ export interface AdminManagedAccountEntry {
   authMethod: AdminManagedAuthMethod
   /** 登记时从反代读到的 kiroApiKey 哈希，仅用于校验 credentialId 未被复用 */
   remoteApiKeyHash?: string
-  /** 登记时从反代读到的 refreshToken 哈希，同上 */
+  /** 反代持久化的身份；不会随 token 轮换变化。 */
+  remoteCredentialIdentity?: string
+  /** 历史登记的 refreshToken 哈希，仅保留兼容性，不用于解除托管。 */
   remoteRefreshTokenHash?: string
   pushedAt: number
   /** 每次在反代凭据列表里仍能看到该 credentialId 时刷新为当前时间 */
@@ -42,8 +44,8 @@ export interface AdminManagedAccountEntry {
 export interface AdminManagedReconcileDrop {
   accountId: string
   credentialId: string
-  /** missing = 反代已无此凭据；hash_changed = 该 id 已被别的凭据复用 */
-  reason: 'missing' | 'hash_changed'
+  /** missing = 凭据消失；identity_changed = 身份变化；hash_changed = 旧 API Key 身份变化 */
+  reason: 'missing' | 'hash_changed' | 'identity_changed'
 }
 
 export interface AdminManagedReconcileResult {
@@ -54,6 +56,7 @@ export interface AdminManagedReconcileResult {
 /** 反代凭据列表里本模块关心的字段（结构与 RemoteCredential 兼容）。 */
 export interface AdminManagedRemoteCredential {
   id: string
+  credentialIdentity?: string | null
   apiKeyHash?: string | null
   refreshTokenHash?: string | null
 }
@@ -89,6 +92,7 @@ export function normalizeAdminManagedEntry(value: unknown): AdminManagedAccountE
     accountId,
     credentialId,
     authMethod: raw.authMethod,
+    remoteCredentialIdentity: asNonEmptyString(raw.remoteCredentialIdentity),
     remoteApiKeyHash: asNonEmptyString(raw.remoteApiKeyHash),
     remoteRefreshTokenHash: asNonEmptyString(raw.remoteRefreshTokenHash),
     pushedAt,
@@ -140,9 +144,8 @@ export function shouldSuppressKiroRefresh(
  * 按反代当前的凭据列表核对登记表。
  *
  * - credentialId 已不在远端 → dropped('missing')，该账号恢复本地刷新；
- * - id 还在但两个 hash 都对不上 → dropped('hash_changed')。反代删掉旧凭据后
- *   新建的凭据可能拿到同一个 id，不校验就会把新凭据误当成托管对象，永久停掉
- *   本地刷新，形成死角；
+ * - 稳定身份改变 → dropped('identity_changed')，防止删除重建后数字 id 复用；
+ * - 旧 API Key 登记仍可核对不轮换的 apiKeyHash；OAuth 不比较 refreshTokenHash；
  * - 对得上 → kept，并把 lastSeenRemoteAt 刷新为 now。
  */
 export function reconcileAdminManagedEntries(
@@ -156,31 +159,38 @@ export function reconcileAdminManagedEntries(
 
   for (const entry of entries) {
     const found = byId.get(entry.credentialId)
+    let reason: AdminManagedReconcileDrop['reason'] | undefined
     if (!found) {
-      dropped.push({
-        accountId: entry.accountId,
-        credentialId: entry.credentialId,
-        reason: 'missing'
-      })
+      reason = 'missing'
+    } else if (
+      entry.remoteCredentialIdentity &&
+      found.credentialIdentity &&
+      entry.remoteCredentialIdentity !== found.credentialIdentity
+    ) {
+      reason = 'identity_changed'
+    } else if (
+      !entry.remoteCredentialIdentity &&
+      entry.authMethod === 'api_key' &&
+      entry.remoteApiKeyHash &&
+      found.apiKeyHash &&
+      entry.remoteApiKeyHash !== found.apiKeyHash
+    ) {
+      reason = 'hash_changed'
+    }
+    if (reason) {
+      dropped.push({ accountId: entry.accountId, credentialId: entry.credentialId, reason })
       continue
     }
 
-    const matchesApiKey =
-      Boolean(entry.remoteApiKeyHash) && found.apiKeyHash === entry.remoteApiKeyHash
-    const matchesRefresh =
-      Boolean(entry.remoteRefreshTokenHash) &&
-      found.refreshTokenHash === entry.remoteRefreshTokenHash
-
-    if (!matchesApiKey && !matchesRefresh) {
-      dropped.push({
-        accountId: entry.accountId,
-        credentialId: entry.credentialId,
-        reason: 'hash_changed'
-      })
-      continue
-    }
-
-    kept.push({ ...entry, lastSeenRemoteAt: now })
+    // 旧登记表在首次看到稳定身份时升级；旧服务未返回身份时保持托管保护。
+    // OAuth refreshTokenHash 随正常轮换改变，不能作为解除托管的证据。
+    kept.push({
+      ...entry,
+      ...(found?.credentialIdentity
+        ? { remoteCredentialIdentity: entry.remoteCredentialIdentity ?? found.credentialIdentity }
+        : {}),
+      lastSeenRemoteAt: now
+    })
   }
 
   return { kept, dropped }
@@ -197,6 +207,7 @@ export interface AdoptionLocalAccount {
 /** 认领用的远端凭据视图（与反代 `GET /credentials` 的字段兼容）。 */
 export interface AdoptionRemoteCredential {
   id: string
+  credentialIdentity?: string | null
   email?: string | null
   authMethod?: string | null
   apiKeyHash?: string | null
@@ -225,6 +236,7 @@ function buildAdoptionEntry(
     accountId: account.id,
     credentialId: credential.id,
     authMethod: toManagedAuthMethod(credential.authMethod),
+    remoteCredentialIdentity: credential.credentialIdentity ?? undefined,
     remoteApiKeyHash: credential.apiKeyHash ?? undefined,
     remoteRefreshTokenHash: credential.refreshTokenHash ?? undefined,
     pushedAt: now,

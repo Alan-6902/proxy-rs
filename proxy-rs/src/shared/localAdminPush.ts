@@ -195,6 +195,7 @@ export type LocalAdminProbeVerdict =
 export interface LocalAdminPushResult {
   status: 'created' | 'existing'
   credentialId?: string
+  credentialIdentity?: string
   /**
    * 新建后余额接口是否调通。existing 时恒为 false。
    *

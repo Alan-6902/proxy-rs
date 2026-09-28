@@ -402,6 +402,8 @@ struct CredentialEntry {
     id: u64,
     /// 凭据信息
     credentials: KiroCredentials,
+    /// 新增条目写盘完成前，快照不得发布其临时身份。
+    identity_pending: bool,
     /// API 调用连续失败次数
     failure_count: u32,
     /// Token 刷新连续失败次数
@@ -465,6 +467,7 @@ struct StatsEntry {
 pub struct CredentialEntrySnapshot {
     /// 凭据唯一 ID
     pub id: u64,
+    pub credential_identity: Option<String>,
     /// 优先级
     pub priority: u32,
     /// 是否被禁用
@@ -604,6 +607,7 @@ impl MultiTokenManager {
         let mut next_id = max_existing_id + 1;
         let mut has_new_ids = false;
         let mut has_new_machine_ids = false;
+        let mut new_identity_ids = Vec::new();
         let config_ref = &config;
 
         let entries: Vec<CredentialEntry> = credentials
@@ -617,6 +621,14 @@ impl MultiTokenManager {
                     has_new_ids = true;
                     id
                 });
+                if cred
+                    .credential_identity
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    cred.credential_identity = Some(uuid::Uuid::new_v4().to_string());
+                    new_identity_ids.push(id);
+                }
                 if cred.machine_id.is_none() {
                     cred.machine_id =
                         Some(machine_id::generate_from_credentials(&cred, config_ref));
@@ -624,6 +636,7 @@ impl MultiTokenManager {
                 }
                 CredentialEntry {
                     id,
+                    identity_pending: false,
                     credentials: cred.clone(),
                     failure_count: 0,
                     refresh_failure_count: 0,
@@ -696,12 +709,19 @@ impl MultiTokenManager {
             session_affinity: Mutex::new(HashMap::new()),
         };
 
-        // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-        if has_new_ids || has_new_machine_ids {
-            if let Err(e) = manager.persist_credentials() {
-                tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e);
-            } else {
-                tracing::info!("已补全凭据 ID/machineId 并写回配置文件");
+        // 补全的 ID、machineId 和稳定身份必须写回，重启后继续使用同一身份。
+        if has_new_ids || has_new_machine_ids || !new_identity_ids.is_empty() {
+            let persisted = manager.persist_credentials();
+            if !matches!(persisted, Ok(true)) {
+                // 未写盘的随机身份不能对外发布，否则重启后会被误判为凭据重建。
+                for entry in manager.entries.lock().iter_mut() {
+                    if new_identity_ids.contains(&entry.id) {
+                        entry.credentials.credential_identity = None;
+                    }
+                }
+            }
+            if let Err(e) = persisted {
+                tracing::warn!("补全凭据身份持久化失败，新身份暂不发布: {}", e);
             }
         }
 
@@ -1121,20 +1141,15 @@ impl MultiTokenManager {
     /// 将凭据列表回写到源文件
     ///
     /// 仅在以下条件满足时回写：
-    /// - 源文件是多凭据格式（数组）
+    /// - 保持源文件格式：多凭据写数组，单凭据写对象
     /// - credentials_path 已设置
     ///
     /// # Returns
     /// - `Ok(true)` - 成功写入文件
-    /// - `Ok(false)` - 跳过写入（非多凭据格式或无路径配置）
+    /// - `Ok(false)` - 跳过写入（单凭据文件无法表达当前列表或无路径配置）
     /// - `Err(_)` - 写入失败
     fn persist_credentials(&self) -> anyhow::Result<bool> {
         use anyhow::Context;
-
-        // 仅多凭据格式才回写
-        if !self.is_multiple_format {
-            return Ok(false);
-        }
 
         let path = match &self.credentials_path {
             Some(p) => p,
@@ -1157,7 +1172,15 @@ impl MultiTokenManager {
         };
 
         // 序列化为 pretty JSON
-        let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
+        let json = if self.is_multiple_format {
+            serde_json::to_string_pretty(&credentials)
+        } else if let [credential] = credentials.as_slice() {
+            serde_json::to_string_pretty(credential)
+        } else {
+            // 单凭据文件不能表达多个凭据，沿用不回写的行为。
+            return Ok(false);
+        }
+        .context("序列化凭据失败")?;
 
         // 写入文件（在 Tokio runtime 内使用 block_in_place 避免阻塞 worker）
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -1594,6 +1617,11 @@ impl MultiTokenManager {
                 .iter()
                 .map(|e| CredentialEntrySnapshot {
                     id: e.id,
+                    credential_identity: if e.identity_pending {
+                        None
+                    } else {
+                        e.credentials.credential_identity.clone()
+                    },
                     priority: e.credentials.priority,
                     disabled: e.disabled,
                     failure_count: e.failure_count,
@@ -1921,6 +1949,8 @@ impl MultiTokenManager {
 
         // 5. 设置 ID 并保留用户输入的元数据
         validated_cred.id = Some(new_id);
+        // 不能沿用调用方或已删除凭据的身份，数字 ID 复用时也必须产生新身份。
+        validated_cred.credential_identity = Some(uuid::Uuid::new_v4().to_string());
         validated_cred.priority = new_cred.priority;
         validated_cred.auth_method = new_cred.auth_method.map(|m| {
             if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
@@ -1946,6 +1976,7 @@ impl MultiTokenManager {
             entries.push(CredentialEntry {
                 id: new_id,
                 credentials: validated_cred,
+                identity_pending: true,
                 failure_count: 0,
                 refresh_failure_count: 0,
                 disabled: false,
@@ -1957,8 +1988,15 @@ impl MultiTokenManager {
             });
         }
 
-        // 6. 持久化
-        self.persist_credentials()?;
+        // 6. 只有写盘成功的身份才能对外发布。
+        let persisted = self.persist_credentials();
+        if let Some(entry) = self.entries.lock().iter_mut().find(|entry| entry.id == new_id) {
+            if !matches!(persisted, Ok(true)) {
+                entry.credentials.credential_identity = None;
+            }
+            entry.identity_pending = false;
+        }
+        persisted?;
 
         tracing::info!("成功添加凭据 #{}", new_id);
         Ok(new_id)
@@ -2130,6 +2168,217 @@ impl Drop for MultiTokenManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn credential_identity_test_path() -> PathBuf {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("credential-identity-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("credentials.json")
+    }
+
+    #[test]
+    fn test_credential_identity_survives_rotation_and_reload() {
+        let path = credential_identity_test_path();
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![KiroCredentials {
+                id: Some(7),
+                refresh_token: Some("before".into()),
+                ..Default::default()
+            }],
+            None,
+            Some(path.clone()),
+            true,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&manager.snapshot().entries[0]).unwrap();
+        let identity = before["credentialIdentity"]
+            .as_str()
+            .expect("stable identity")
+            .to_owned();
+        {
+            let mut entries = manager.entries.lock();
+            entries[0].credentials.refresh_token = Some("after".into());
+        }
+        assert!(manager.persist_credentials().unwrap());
+        let reloaded = MultiTokenManager::new(
+            Config::default(),
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            None,
+            Some(path),
+            true,
+        )
+        .unwrap();
+        let after = serde_json::to_value(&reloaded.snapshot().entries[0]).unwrap();
+        assert_eq!(after["credentialIdentity"], identity);
+        assert_ne!(before["refreshTokenHash"], after["refreshTokenHash"]);
+        let recreated = MultiTokenManager::new(
+            Config::default(),
+            vec![KiroCredentials {
+                id: Some(7),
+                refresh_token: Some("after".into()),
+                ..Default::default()
+            }],
+            None,
+            Some(credential_identity_test_path()),
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            serde_json::to_value(&recreated.snapshot().entries[0]).unwrap()["credentialIdentity"],
+            identity
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_credential_identity_changes_when_numeric_id_is_reused() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![],
+            None,
+            Some(credential_identity_test_path()),
+            true,
+        )
+        .unwrap();
+        let credential = KiroCredentials {
+            auth_method: Some("api_key".into()),
+            kiro_api_key: Some("ksk_test_identity".into()),
+            ..Default::default()
+        };
+        let id = manager.add_credential(credential.clone()).await.unwrap();
+        let identity = manager.snapshot().entries[0]
+            .credential_identity
+            .clone()
+            .unwrap();
+        manager.set_disabled(id, true).unwrap();
+        manager.delete_credential(id).unwrap();
+        let reused_id = manager.add_credential(credential).await.unwrap();
+        assert_eq!(id, reused_id);
+        assert_ne!(
+            manager.snapshot().entries[0].credential_identity.as_deref(),
+            Some(identity.as_str())
+        );
+    }
+
+    #[test]
+    fn test_credential_identity_persisted_for_single_and_array_formats() {
+        for multiple in [false, true] {
+            let path = credential_identity_test_path();
+            let manager = MultiTokenManager::new(
+                Config::default(),
+                vec![KiroCredentials {
+                    id: Some(7),
+                    refresh_token: Some("test-only".into()),
+                    ..Default::default()
+                }],
+                None,
+                Some(path.clone()),
+                multiple,
+            )
+            .unwrap();
+            let identity = manager.snapshot().entries[0]
+                .credential_identity
+                .clone()
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(value.is_array(), multiple);
+            let credentials = if multiple {
+                serde_json::from_value(value).unwrap()
+            } else {
+                vec![serde_json::from_value(value).unwrap()]
+            };
+            let reloaded =
+                MultiTokenManager::new(Config::default(), credentials, None, Some(path), multiple)
+                    .unwrap();
+            assert_eq!(
+                reloaded.snapshot().entries[0]
+                    .credential_identity
+                    .as_deref(),
+                Some(identity.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn test_credential_identity_not_published_when_persistence_fails_or_is_skipped() {
+        let directory = credential_identity_test_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        for path in [None, Some(directory)] {
+            let manager = MultiTokenManager::new(
+                Config::default(),
+                vec![
+                    KiroCredentials {
+                        id: Some(1),
+                        ..Default::default()
+                    },
+                    KiroCredentials {
+                        id: Some(2),
+                        credential_identity: Some("persisted-identity".into()),
+                        ..Default::default()
+                    },
+                ],
+                None,
+                path,
+                true,
+            )
+            .unwrap();
+            let entries = manager.snapshot().entries;
+            assert_eq!(entries[0].credential_identity, None);
+            assert_eq!(
+                entries[1].credential_identity.as_deref(),
+                Some("persisted-identity")
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_hides_identity_until_new_entry_persistence_finishes() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![KiroCredentials {
+                id: Some(1),
+                credential_identity: Some("pending-identity".into()),
+                ..Default::default()
+            }],
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        manager.entries.lock()[0].identity_pending = true;
+        assert_eq!(manager.snapshot().entries[0].credential_identity, None);
+        manager.entries.lock()[0].identity_pending = false;
+        assert_eq!(
+            manager.snapshot().entries[0].credential_identity.as_deref(),
+            Some("pending-identity")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_added_credential_identity_not_published_without_persistence() {
+        let directory = credential_identity_test_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        for path in [None, Some(directory)] {
+            let should_fail = path.is_some();
+            let manager =
+                MultiTokenManager::new(Config::default(), vec![], None, path, true).unwrap();
+            let result = manager
+                .add_credential(KiroCredentials {
+                    auth_method: Some("api_key".into()),
+                    kiro_api_key: Some("ksk_test_identity".into()),
+                    ..Default::default()
+                })
+                .await;
+            assert_eq!(result.is_err(), should_fail);
+            assert_eq!(manager.snapshot().entries[0].credential_identity, None);
+        }
+    }
 
     #[test]
     fn test_is_token_expired_with_expired_token() {

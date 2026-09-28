@@ -48,6 +48,7 @@ export type KskAutomationFetch = (
  */
 export interface RemoteCredential {
   id?: string | number
+  credentialIdentity?: string | null
   apiKeyHash?: string | null
   refreshTokenHash?: string | null
   authMethod?: string
@@ -590,7 +591,7 @@ export async function pushAccountToLocalAdmin(input: {
   timeoutSeconds: number
   fetchImpl: KskAutomationFetch
   /**
-   * 发消息验活：推进 Admin 之后用同一份凭据真发一条消息，确认这个号真能出活。
+   * API Key 消息验活；OAuth 的本地 token 不可信，不调用此探针。
    *
    * 不注入时跳过这一关（只保留 balance 门禁）。之所以做成注入而不是在这里直接调
    * callKiroApi：这个模块跑在测试里也要能用假 fetch 走完整流程，不该把上游 SDK 拖进来。
@@ -618,6 +619,7 @@ export async function pushAccountToLocalAdmin(input: {
     return {
       status: 'existing',
       credentialId: remoteCredentialId(existing),
+      credentialIdentity: existing.credentialIdentity ?? undefined,
       verified: false,
       authMethod: payload.authMethod,
       probeVerdict: LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
@@ -633,6 +635,11 @@ export async function pushAccountToLocalAdmin(input: {
   )
   const credentialId = readCredentialId(created)
   if (!credentialId) throw new Error('本机 Admin 未返回 credentialId')
+  const identity = (created as { credentialIdentity?: unknown }).credentialIdentity
+  const credentialIdentity =
+    typeof identity === 'string' && identity.trim() ? identity.trim() : undefined
+  // OAuth 的本地 access token 可能已过期；只能由 Admin 校验它自己的凭据。
+  const probeLiveness = isApiKey ? input.probeLiveness : undefined
 
   /*
    * 两道门禁，只有明确证明凭据不可用时，才把刚建的凭据删掉并抛错：
@@ -644,7 +651,8 @@ export async function pushAccountToLocalAdmin(input: {
    * 2) 发消息：直接用同一份账号真实出活。alive 明确可用；transient 只表示
    *    暂时无法确认，不能据此删除好号；只有 permanently_invalid 才回滚。
    *
-   * 没有注入发消息探针时，无法替 transient balance 失败兜底，仍按失败回滚。
+   * OAuth 不使用本地 token 探针，余额的权限限制或暂时故障只记未验证，不删除。
+   * API Key 没有注入探针时，仍按原有余额门禁处理。
    */
   let balanceVerified = true
   await verifyOrRollback(
@@ -660,7 +668,7 @@ export async function pushAccountToLocalAdmin(input: {
     },
     (detail) => `本机 Admin 无法使用该凭据（余额接口失败）：${detail}`,
     (detail) => {
-      if (!input.probeLiveness) return false
+      if (isApiKey && !probeLiveness) return false
       if (!isBalanceQueryUnauthorized(detail) && !isTransientBalanceQueryFailure(detail)) {
         return false
       }
@@ -670,11 +678,11 @@ export async function pushAccountToLocalAdmin(input: {
   )
 
   let probeVerdict: LocalAdminPushResult['probeVerdict'] = LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
-  if (input.probeLiveness) {
+  if (probeLiveness) {
     await verifyOrRollback(
       { baseUrl, adminApiKey, timeoutMs, credentialId, fetchImpl: input.fetchImpl },
       async () => {
-        const outcome = await input.probeLiveness!(input.candidate)
+        const outcome = await probeLiveness(input.candidate)
         probeVerdict = outcome.verdict
         /*
          * 只有 permanently_invalid 才回滚。skipped 表示「没跑成验活」（例如本地
@@ -696,6 +704,7 @@ export async function pushAccountToLocalAdmin(input: {
   return {
     status: 'created',
     credentialId,
+    credentialIdentity,
     /*
      * verified 说的是「余额接口调通了」。余额失败被发消息验活兜底时如实报 false；
      * probeVerdict 则独立说明真实发消息是 alive、transient 还是未执行。

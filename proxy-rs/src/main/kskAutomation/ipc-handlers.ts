@@ -400,6 +400,7 @@ async function rememberManagedAccount(
     await recordManagedAccount({
       accountId,
       credentialId,
+      remoteCredentialIdentity: result.credentialIdentity,
       authMethod: isApiKey ? 'api_key' : result.authMethod,
       remoteApiKeyHash: isApiKey ? hash : undefined,
       remoteRefreshTokenHash: isApiKey ? undefined : hash,

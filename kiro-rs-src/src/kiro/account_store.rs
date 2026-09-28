@@ -49,12 +49,9 @@ pub mod status {
 #[derive(Debug, Clone)]
 pub struct StoredAccount {
     pub credentials: KiroCredentials,
-    pub account_uuid: String,
     pub in_pool: bool,
     pub disabled_reason: Option<String>,
     pub credential_version: i64,
-    /// 上次进程退出时刷新是否仍在途（上游可能已轮换）
-    pub refresh_was_running: bool,
     pub counters: StoredCounters,
 }
 
@@ -314,11 +311,9 @@ impl AccountStore {
             };
             Ok(StoredAccount {
                 credentials,
-                account_uuid: r.get(1)?,
                 in_pool: r.get(4)?,
                 disabled_reason: r.get(6)?,
                 credential_version: r.get(10)?,
-                refresh_was_running: r.get::<_, String>(8)? == "running",
                 counters: StoredCounters {
                     success_count: r.get::<_, Option<i64>>(27)?.unwrap_or(0).max(0) as u64,
                     input_tokens: r.get::<_, Option<i64>>(28)?.unwrap_or(0).max(0) as u64,
@@ -949,7 +944,7 @@ mod tests {
             rfc3339_to_ms(Some("2030-01-01T00:00:00+00:00"))
         );
         assert!(a.in_pool);
-        assert_eq!(a.account_uuid, "proxy-1");
+        assert_eq!(reopened.find_by_uuid("proxy-1").unwrap(), Some((id, false)));
     }
 
     #[test]
@@ -989,7 +984,7 @@ mod tests {
         let a = &store.load_all().unwrap()[0];
         assert_eq!(a.credentials.refresh_token.as_deref(), Some("rt-1"));
         assert_eq!(a.credentials.access_token.as_deref(), Some("at-2"));
-        assert!(!a.refresh_was_running);
+        assert!(store.clear_stale_refresh_marks().unwrap().is_empty());
     }
 
     #[test]
@@ -999,9 +994,8 @@ mod tests {
             .insert_account(&oauth("rt-1"), &NewAccountMeta::default())
             .unwrap();
         store.begin_refresh(id).unwrap();
-        assert!(store.load_all().unwrap()[0].refresh_was_running);
         assert_eq!(store.clear_stale_refresh_marks().unwrap(), vec![id]);
-        assert!(!store.load_all().unwrap()[0].refresh_was_running);
+        assert!(store.clear_stale_refresh_marks().unwrap().is_empty());
     }
 
     #[test]

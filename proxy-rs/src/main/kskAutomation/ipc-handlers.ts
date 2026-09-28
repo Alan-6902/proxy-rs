@@ -23,9 +23,11 @@ import { parseKskEmailRecipients } from './emailNotifier'
 import {
   pushAccountToLocalAdmin,
   resolveLocalAdminApiBase,
+  sha256Hex,
   type KskAutomationFetch,
   type LocalAdminProbeOutcome
 } from './localAdminClient'
+import { recordManagedAccount } from '../adminManaged/gate'
 import type { KskAutomationManager } from './syncManager'
 
 export const KSK_AUTOMATION_CHANNEL = {
@@ -359,6 +361,7 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
             ? `Admin 已有同一凭据，未新建（#${result.credentialId ?? '未知'}）：${who}`
             : `推送完成并保留凭据（#${result.credentialId ?? '未知'}，验活=${result.probeVerdict}）：${who}`
         )
+        await rememberManagedAccount(candidate, result, who)
         return { success: true, data: result }
       } catch (error) {
         const failure = toError(error)
@@ -367,4 +370,45 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
       }
     }
   )
+}
+
+/**
+ * 推送成功后登记「该账号已由本机反代托管」，此后本地不再刷新它的 Token。
+ *
+ * hash 用本地算的那一份：判重时用的就是同一个 sha256，与 Admin 返回的
+ * refreshTokenHash / apiKeyHash 同值，后续回收器正是拿它校验 credentialId
+ * 有没有被复用。
+ *
+ * 登记失败不影响推送结果——凭据已经交付给 Admin 了，不该因为本地账没记上就报错；
+ * 只是下一轮回收器会把它视为未托管，退回改造前的行为。
+ */
+async function rememberManagedAccount(
+  candidate: LocalAdminPushCandidate,
+  result: LocalAdminPushResult,
+  who: string
+): Promise<void> {
+  const accountId = candidate.accountId?.trim()
+  const credentialId = result.credentialId
+  if (!accountId || !credentialId) return
+
+  const isApiKey = candidate.credentialKind === 'kiro_api_key' || Boolean(candidate.kiroApiKey)
+  const secret = (isApiKey ? candidate.kiroApiKey : candidate.refreshToken)?.trim()
+  if (!secret) return
+
+  const hash = sha256Hex(secret)
+  try {
+    await recordManagedAccount({
+      accountId,
+      credentialId,
+      authMethod: isApiKey ? 'api_key' : result.authMethod,
+      remoteApiKeyHash: isApiKey ? hash : undefined,
+      remoteRefreshTokenHash: isApiKey ? undefined : hash,
+      pushedAt: Date.now()
+    })
+    logLocalAdminPush(`已登记为反代托管，本地不再刷新其 Token：${who}`)
+  } catch (error) {
+    logLocalAdminPushError(
+      `登记托管失败（本次推送已成功，但本地仍会刷新该账号）：${toError(error).error}（${who}）`
+    )
+  }
 }

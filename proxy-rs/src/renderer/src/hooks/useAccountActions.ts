@@ -79,6 +79,8 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     void (async () => {
       try {
         const response = await window.api.kskAutomationPushAccountToLocalAdmin({
+          // 推送成功后主进程据此登记「已托管」，此后本地不再刷新这个账号的 Token
+          accountId: account.id,
           credentialKind: account.credentials.credentialKind,
           kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,

@@ -10,6 +10,25 @@
  * 容器重启即归零；历史时间序列上游也不存。所以趋势由本地按快照自己攒，见 statsStore。
  */
 
+/** 订阅类型，与渲染进程 AccountSubscription.type 同一套取值。 */
+export type SubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise' | 'Teams'
+
+/**
+ * 从 Kiro 返回的订阅标题推断订阅类型。
+ *
+ * main 与 renderer 共用这一份：这个判断原先在 main/index.ts 里有两个版本
+ * （`resolveKskSubscriptionType` 与一处内联的 `toUpperCase().includes` 链），
+ * 现在反代凭据余额的展示又需要第三个，索性收敛到一处。
+ */
+export function resolveSubscriptionTypeFromTitle(title: string): SubscriptionType {
+  const normalized = title.toUpperCase()
+  if (normalized.includes('PRO+') || normalized.includes('PRO_PLUS')) return 'Pro_Plus'
+  if (normalized.includes('PRO')) return 'Pro'
+  if (normalized.includes('POWER') || normalized.includes('ENTERPRISE')) return 'Enterprise'
+  if (normalized.includes('TEAMS')) return 'Teams'
+  return 'Free'
+}
+
 /** 快照采样间隔（秒）：计数类字段免费，抓得密一点趋势才有形状。 */
 export const LOCAL_ADMIN_STATS_POLL_INTERVAL_SECONDS = 60
 

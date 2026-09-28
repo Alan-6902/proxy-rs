@@ -24,6 +24,11 @@ export const LOCAL_ADMIN_DEFAULT_PRIORITY = 0
  * email 例外——它挂在 Account 上而不在 credentials 里，由调用方单独带进来。
  */
 export interface LocalAdminPushCandidate {
+  /**
+   * 本地账号 id。推送成功后用它登记「已托管」，此后本地不再刷新该账号的 Token
+   * （见 shared/adminManaged.ts）。缺失时不登记，行为与改造前一致。
+   */
+  accountId?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
   refreshToken?: string

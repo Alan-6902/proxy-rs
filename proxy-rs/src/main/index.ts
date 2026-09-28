@@ -27,6 +27,15 @@ import {
   isAppCallbackUrl
 } from '../shared/appIdentity'
 import { AccountStoreCoordinator } from './accountStoreCoordinator'
+import {
+  ADMIN_MANAGED_REFRESH_SUPPRESSED,
+  adminManagedEntry,
+  isAdminManagedAccount,
+  isAdminManagedRefreshToken,
+  reloadAdminManagedIds,
+  setAdminManagedRefreshTokenResolver
+} from './adminManaged/gate'
+import { syncManagedAccountFromAdmin } from './adminManaged/accountSync'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -94,6 +103,7 @@ import {
 import { LOCAL_ADMIN_PROBE_VERDICT, type LocalAdminPushCandidate } from '../shared/localAdminPush'
 import {
   EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
+  resolveSubscriptionTypeFromTitle,
   selectExhaustedLocalAdminCredentials,
   type LocalAdminCredentialStats,
   type LocalAdminExhaustedCleanupSummary
@@ -247,6 +257,13 @@ interface OidcRefreshResult {
   refreshToken?: string
   expiresIn?: number
   error?: string
+  /**
+   * 这次刷新被托管闸门拦下：该账号已推给本机反代，token 由反代维护。
+   *
+   * 必须与「刷新失败」区分开——调用方据此提示「由反代托管」，而不是把卡片标红。
+   * 用可选字段而不是拆联合类型，是为了让既有调用点的成功语义保持不变。
+   */
+  suppressedByAdmin?: boolean
 }
 
 // 社交登录 (GitHub/Google) 的 Token 刷新端点
@@ -1469,6 +1486,22 @@ async function refreshStoredKiroCredentials(params: {
   authMethod?: string
   proxyUrl?: string
 }): Promise<CanonicalKiroCredentialRefreshResult> {
+  /*
+   * 权威闸门：账号已托管给反代时本地一律不刷。
+   *
+   * 放在函数最前面而不是散到各调用点——绕过 singleflight 的入口有七八处
+   * （手动刷新、CLI 切号、验活、401 重试、导入验活……），散着堵必然漏一处，
+   * 漏掉的那处就会重新变成双边抢刷。堵在这里之后，各调用点只需把
+   * suppressedByAdmin 映射成合适的提示文案。
+   */
+  if (isAdminManagedAccount(params.accountId)) {
+    return {
+      success: false,
+      suppressedByAdmin: true,
+      error: ADMIN_MANAGED_REFRESH_SUPPRESSED
+    }
+  }
+
   const canonical = await readCanonicalKiroCredentials(params.accountId)
   if (!canonical?.refreshToken) {
     return { success: false, error: 'Canonical credential not found' }
@@ -1518,7 +1551,7 @@ async function refreshStoredKiroCredentials(params: {
   }
 }
 
-function refreshUnmanagedKiroCredentials(
+async function refreshUnmanagedKiroCredentials(
   refreshToken: string,
   clientId: string,
   clientSecret: string,
@@ -1526,6 +1559,19 @@ function refreshUnmanagedKiroCredentials(
   authMethod?: string,
   proxyUrl?: string
 ): Promise<CanonicalKiroCredentialRefreshResult> {
+  /*
+   * 这条路径只拿得到 refreshToken（推送探针、导入前验活），没有 accountId，
+   * 所以走反查判断托管关系。反查要读账号库，代价不低——只在这两个低频入口用，
+   * 不进定时刷新。
+   */
+  if (await isAdminManagedRefreshToken(refreshToken)) {
+    return {
+      success: false,
+      suppressedByAdmin: true,
+      error: ADMIN_MANAGED_REFRESH_SUPPRESSED
+    }
+  }
+
   return refreshKiroCredentialsSingleflight({
     refreshToken,
     clientId,
@@ -1831,13 +1877,9 @@ function isKskAutomationStoredAccount(
   return account.credentials?.credentialKind === 'kiro_api_key'
 }
 
+/** 抢号链路沿用旧名，实现与 shared 的 resolveSubscriptionTypeFromTitle 是同一份。 */
 function resolveKskSubscriptionType(title: string): KskAutomationSubscriptionType {
-  const normalized = title.toUpperCase()
-  if (normalized.includes('PRO+') || normalized.includes('PRO_PLUS')) return 'Pro_Plus'
-  if (normalized.includes('PRO')) return 'Pro'
-  if (normalized.includes('POWER') || normalized.includes('ENTERPRISE')) return 'Enterprise'
-  if (normalized.includes('TEAMS')) return 'Teams'
-  return 'Free'
+  return resolveSubscriptionTypeFromTitle(title)
 }
 
 function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boolean {
@@ -3132,6 +3174,11 @@ async function runMainPoolTokenRefreshTick(): Promise<void> {
       const creds = acc?.credentials
       const refreshPlan = buildBackgroundRefreshPlan(creds || {}, true)
       if (!refreshPlan.shouldRefreshToken || !creds?.refreshToken) continue
+      /*
+       * 已交给反代托管的账号由反代独占刷新，本地跳过。
+       * 放在入队之前，省掉在途记账与每轮一次的刷屏日志。
+       */
+      if (isAdminManagedAccount(id)) continue
       if (isBannedAccountErrorMain(acc.lastError)) continue
       const expiresAt = creds.expiresAt
       if (!expiresAt || expiresAt - now > leadMs) continue
@@ -4762,6 +4809,52 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 后台批量刷新账号（在主进程执行，不阻塞 UI）
+/**
+ * 托管账号在后台轮询里的处理：不发 token 刷新请求，改为从反代读用量与订阅状态。
+ *
+ * 返回值表示这一轮是否算成功——「跳过同步」（syncInfo=false）也算成功，它不是失败。
+ *
+ * 特意不弹 TokenRefreshFailed 通知：那个通知的语义是「token 刷新失败」，而托管账号
+ * 压根没刷 token；上百个托管号每 5 分钟误报一次会把通知系统淹掉。
+ */
+async function syncManagedAccountIntoBatch(
+  account: BackgroundRefreshAccount,
+  syncInfo: boolean
+): Promise<boolean> {
+  const accountId = account.id
+  const entry = accountId ? adminManagedEntry(accountId) : undefined
+  if (!accountId || !entry) return true
+
+  // syncInfo=false 的轮次只关心 token，托管账号没有 token 可刷，省掉这次 loopback
+  if (!syncInfo) return true
+
+  try {
+    const target = await resolveLocalAdminTarget()
+    const synced = await syncManagedAccountFromAdmin(
+      { ...target, fetchImpl: localAdminFetchImpl },
+      entry.credentialId
+    )
+    sendRendererEvent('background-refresh-result', {
+      id: accountId,
+      success: synced.status === 'active',
+      data: {
+        usage: synced.usage,
+        subscription: synced.subscription,
+        status: synced.status,
+        errorMessage: synced.errorMessage
+      }
+    })
+    return synced.status === 'active'
+  } catch (error) {
+    sendRendererEvent('background-refresh-result', {
+      id: accountId,
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return false
+  }
+}
+
   const backgroundBatchRefresh = async (
     accounts: BackgroundRefreshAccount[],
     concurrency: number = 10,
@@ -4791,6 +4884,17 @@ app.whenReady().then(async () => {
           // 对同一账号并发刷新会让其中一个用到被 rotate 作废的旧 refreshToken。
           // 已在途则跳过本次（不计入成败，等在途那次的结果回流即可）。
           if (account.id && poolRefreshInFlightIds.has(account.id)) {
+            return
+          }
+          /*
+           * 托管账号由反代独占刷新：本地既不发刷新请求，也不能把闸门拦下当成失败
+           * （否则每一轮都会弹「账号刷新失败」）。用量与订阅状态改从反代读。
+           */
+          if (isAdminManagedAccount(account.id)) {
+            const ok = await syncManagedAccountIntoBatch(account, syncInfo)
+            completed++
+            if (ok) success++
+            else failed++
             return
           }
           const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）
@@ -5231,6 +5335,18 @@ app.whenReady().then(async () => {
       syncInfo: boolean = true
     ) => backgroundBatchRefresh(accounts, concurrency, syncInfo)
   )
+  /*
+   * 托管登记表必须在刷新调度启动前加载完，并注入反查实现。
+   *
+   * 顺序不能反：调度器启动 15 秒后就跑第一轮，若那时 registry 还没读进来，
+   * managedIds 是空集，已托管的账号会被本地刷一次——正是要避免的事。
+   */
+  setAdminManagedRefreshTokenResolver(async (refreshToken) => {
+    const candidates = await readCanonicalKiroRefreshTransportCandidates(refreshToken)
+    return candidates[0]?.accountId
+  })
+  await reloadAdminManagedIds()
+
   // 启动主进程池 token 刷新调度器（不依赖窗口可见/存活，挂托盘也照常刷新）
   startMainPoolTokenRefresh()
 

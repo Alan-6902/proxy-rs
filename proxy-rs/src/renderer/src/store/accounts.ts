@@ -253,6 +253,8 @@ interface AccountsActions {
   // 状态管理
   updateAccountStatus: (id: string, status: AccountStatus, error?: string) => void
   refreshAccountToken: (id: string) => Promise<boolean>
+  /** 把账号切换为 Kiro CLI 当前账号；成功后该账号标为当前使用 */
+  switchAccountToCli: (id: string) => Promise<{ success: boolean; error?: string }>
   batchRefreshTokens: (ids: string[]) => Promise<BatchOperationResult>
   checkAccountStatus: (id: string) => Promise<void>
   batchCheckStatus: (ids: string[]) => Promise<BatchOperationResult>
@@ -1302,6 +1304,46 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     } catch (error) {
       updateAccountStatus(id, 'error', error instanceof Error ? error.message : 'Unknown error')
       return false
+    }
+  },
+
+  switchAccountToCli: async (id) => {
+    if (!get().accounts.has(id)) return { success: false, error: '账号不存在' }
+    // 主进程从账号库读凭据，先把内存里的改动落盘
+    await get().flushSaveImmediately()
+    try {
+      const result = await window.api.switchAccountCli(id)
+      const switched = result.data
+      if (!result.success || !switched) {
+        return { success: false, error: result.error || 'Kiro CLI 切换失败' }
+      }
+      set((state) => {
+        const accounts = new Map(state.accounts)
+        const previous = state.activeAccountId ? accounts.get(state.activeAccountId) : undefined
+        if (previous && previous.id !== id) {
+          accounts.set(previous.id, { ...previous, isActive: false })
+        }
+        const acc = accounts.get(id)
+        if (acc) {
+          accounts.set(id, {
+            ...acc,
+            isActive: true,
+            lastUsedAt: Date.now(),
+            credentials: {
+              ...acc.credentials,
+              accessToken: switched.accessToken,
+              refreshToken: switched.refreshToken,
+              expiresAt: switched.expiresAt,
+              credentialRevision: switched.credentialRevision ?? acc.credentials.credentialRevision
+            }
+          })
+        }
+        return { accounts, activeAccountId: id }
+      })
+      get().saveToStorage()
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
   },
 

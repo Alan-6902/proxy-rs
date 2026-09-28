@@ -34,6 +34,14 @@ export interface LocalAdminPushCandidate {
   authMethod?: 'IdC' | 'social'
   /** 账号邮箱，仅用于 Admin 侧展示，见 normalizeLocalAdminEmail。 */
   email?: string
+  /**
+   * 调用方手上这份 accessToken（可选），仅供推送后的消息级验活使用。
+   *
+   * 不能用 refreshToken 现刷：候选凭据一旦 POST 给 Admin，Admin 的 balance 门禁
+   * 就可能已经刷过一次并把 refreshToken 轮换掉，本地这份随即作废。拿它去刷必然
+   * 失败，而失败并不证明凭据失效——据此判永久失效会删掉 Admin 里刚建好的凭据。
+   */
+  accessToken?: string
 }
 
 /** Admin 创建凭据的请求体。 */

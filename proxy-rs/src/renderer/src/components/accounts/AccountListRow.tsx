@@ -25,7 +25,8 @@ import {
   Zap,
   CloudUpload,
   CloudCheck,
-  XCircle
+  XCircle,
+  Terminal
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -104,7 +105,11 @@ function AccountListRowComponent({
     showPushError,
     dismissPushError,
     canPush,
-    pushTitle
+    pushTitle,
+    switchToCli,
+    cliSwitchState,
+    canSwitchCli,
+    cliSwitchTitle
   } = useAccountActions(account, isEn)
 
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -642,6 +647,29 @@ function AccountListRowComponent({
             </a>
           </>
         )}
+
+        <Button
+          size="icon"
+          variant="ghost"
+          className={cn(
+            'h-7 w-7',
+            cliSwitchState === 'done' ? 'text-success' : 'text-muted-foreground hover:text-primary'
+          )}
+          onClick={(e) => {
+            e.stopPropagation()
+            switchToCli()
+          }}
+          disabled={!canSwitchCli || cliSwitchState === 'switching'}
+          title={cliSwitchTitle}
+        >
+          {cliSwitchState === 'switching' ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : cliSwitchState === 'done' ? (
+            <Check className="h-3.5 w-3.5" />
+          ) : (
+            <Terminal className="h-3.5 w-3.5" />
+          )}
+        </Button>
 
         <Button
           size="icon"

@@ -8,13 +8,23 @@ import {
   type RotatedKiroCredentialUpdate
 } from './kiroCredentialRefresh'
 import {
+  createKiroCliSocialRenewal,
+  kiroCliDbExists,
+  resolveKiroCliDbPath,
+  resolveKiroCliSocialProvider,
+  switchKiroCliAccount,
+  syncRefreshedKiroCliCredentials,
+  type KiroCliSocialToken
+} from './kiroCli/cliCredentials'
+import {
   APP_ACCOUNT_STORE_ENCRYPTION_KEY,
   APP_ACCOUNT_STORE_NAME,
   APP_DATA_DIRECTORY_NAME,
   APP_ID,
   APP_NAME,
   APP_PROTOCOL_SCHEME,
-  APP_SOCIAL_AUTH_REDIRECT_URI
+  APP_SOCIAL_AUTH_REDIRECT_URI,
+  isAppCallbackUrl
 } from '../shared/appIdentity'
 import { AccountStoreCoordinator } from './accountStoreCoordinator'
 import { join } from 'path'
@@ -35,7 +45,11 @@ import {
   fetchSubscriptionToken,
   fetchAvailableSubscriptions,
   callKiroApi,
-  fetchEnterpriseProfileArn
+  fetchEnterpriseProfileArn,
+  getEnterpriseFallbackArn,
+  isPlaceholderProfileArn,
+  KIRO_BUILDER_ID_PLACEHOLDER_ARN,
+  KIRO_SOCIAL_PROFILE_ARN
 } from './proxy/kiroApi'
 import { openaiToKiro } from './proxy/translator'
 import {
@@ -364,8 +378,9 @@ function openBrowserInPrivateMode(url: string): void {
     event: { preventDefault: () => void },
     navigationUrl: string
   ): void => {
-    if (!navigationUrl.startsWith(`${PROTOCOL_PREFIX}://`)) return
+    if (!isAppCallbackUrl(navigationUrl)) return
 
+    // 必须拦下：放行的话系统会把 kiro:// 交给 Kiro IDE
     event.preventDefault()
     handleProtocolUrl(navigationUrl)
     // 不在此处关窗：协议回调只代表拿到 code，账号是否成功入库由渲染进程决定，
@@ -1411,10 +1426,37 @@ function refreshKiroCredentialsSingleflight(params: {
         candidate.authMethod,
         candidate.proxyUrl
       )
-      if (lastResult.success) return lastResult
+      if (lastResult.success) {
+        await syncKiroCliAfterRefresh(params.refreshToken, lastResult)
+        return lastResult
+      }
     }
     return lastResult
   })
+}
+
+/**
+ * 所有刷新（手动、后台批量、状态检查、验活）都经过 singleflight，在这里统一同步 CLI：
+ * 旧 refresh token 一旦轮换就失效，CLI 若还拿着它会被登出。只改 CLI 里与旧 token
+ * 匹配的那条，刷新别的账号不影响 CLI。同步失败只记日志，不影响刷新结果。
+ */
+async function syncKiroCliAfterRefresh(
+  oldRefreshToken: string,
+  refreshed: OidcRefreshResult
+): Promise<void> {
+  if (!refreshed.accessToken) return
+  try {
+    await syncRefreshedKiroCliCredentials(oldRefreshToken, {
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      expiresIn: refreshed.expiresIn
+    })
+  } catch (error) {
+    console.warn(
+      '[KiroCLI] 刷新后同步 CLI 凭据失败:',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
 }
 
 async function refreshStoredKiroCredentials(params: {
@@ -1497,6 +1539,163 @@ function refreshUnmanagedKiroCredentials(
 function sendRendererEvent(channel: string, value: unknown): void {
   mainWindow?.webContents.send(channel, value)
 }
+
+// ============ Kiro CLI 切号与社交凭据续期 ============
+
+type StoredKiroAccountForCli = {
+  idp?: string
+  profileArn?: string
+  credentials?: CanonicalKiroCredentials & {
+    provider?: string
+    profileArn?: string
+    credentialKind?: string
+    kiroApiKey?: string
+  }
+}
+
+async function readStoredKiroAccountForCli(
+  accountId: string
+): Promise<StoredKiroAccountForCli | null> {
+  return accountStoreCoordinator.runExclusive(async () => {
+    await initStore()
+    if (!store) return null
+    const accountData = store.get('accountData', null) as {
+      accounts?: Record<string, StoredKiroAccountForCli>
+    } | null
+    return accountData?.accounts?.[accountId] ?? null
+  })
+}
+
+/** 写进 CLI 凭据的 profileArn，与 Kiro Account Manager 的 resolveProfileArnForWrite 同口径 */
+function resolveKiroCliProfileArn(
+  account: StoredKiroAccountForCli,
+  isSocial: boolean,
+  region: string
+): string {
+  const stored = account.profileArn || account.credentials?.profileArn
+  if (stored && !isPlaceholderProfileArn(stored)) return stored
+  if (isSocial) return KIRO_SOCIAL_PROFILE_ARN
+  const provider = account.credentials?.provider || account.idp
+  if (provider === 'Enterprise' || account.credentials?.authMethod === 'external_idp') {
+    return getEnterpriseFallbackArn(region)
+  }
+  return KIRO_BUILDER_ID_PLACEHOLDER_ARN
+}
+
+type KiroCliSwitchResult = {
+  dbPath: string
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+  credentialRevision?: string
+}
+
+/**
+ * 把账号切成 Kiro CLI 当前账号。
+ * 切号前强制刷新一次：拿到新 access token，轮换后的凭据先落回账号库，再写 CLI。
+ */
+async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchResult> {
+  const account = await readStoredKiroAccountForCli(accountId)
+  const credentials = account?.credentials
+  if (!account || !credentials) throw new Error('账号不存在或尚未保存')
+  if (credentials.credentialKind === 'kiro_api_key' || credentials.kiroApiKey) {
+    throw new Error('Kiro API Key 账号无法切换到 Kiro CLI')
+  }
+  if (!credentials.refreshToken) throw new Error('缺少 Refresh Token')
+
+  const socialProvider = resolveKiroCliSocialProvider(credentials.provider, account.idp)
+  const isSocial = socialProvider !== undefined || credentials.authMethod === 'social'
+  if (isSocial && !socialProvider) {
+    throw new Error('社交登录账号缺少 provider（Github / Google）')
+  }
+  if (!isSocial && (!credentials.clientId || !credentials.clientSecret)) {
+    throw new Error('缺少 OIDC 凭证 (clientId/clientSecret)')
+  }
+
+  const dbPath = resolveKiroCliDbPath()
+  if (!(await kiroCliDbExists(dbPath))) {
+    throw new Error(`未找到 Kiro CLI 数据库（${dbPath}），请先安装并运行一次 kiro-cli`)
+  }
+
+  const region = credentials.region || 'us-east-1'
+  const refreshed = await refreshStoredKiroCredentials({
+    accountId,
+    expectedRefreshToken: credentials.refreshToken,
+    expectedCredentialRevision: credentials.credentialRevision,
+    clientId: credentials.clientId,
+    clientSecret: credentials.clientSecret,
+    region,
+    authMethod: isSocial ? 'social' : credentials.authMethod,
+    proxyUrl: readAccountBoundProxyUrl(accountId)
+  })
+  if (!refreshed.success || !refreshed.accessToken || !refreshed.refreshToken) {
+    throw new Error(`切号前刷新失败：${refreshed.error || '未知错误'}`)
+  }
+
+  const expiresAt = refreshed.expiresAt ?? Date.now() + (refreshed.expiresIn ?? 3600) * 1000
+  await switchKiroCliAccount(
+    {
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      expiresAt: new Date(expiresAt).toISOString(),
+      region,
+      profileArn: resolveKiroCliProfileArn(account, isSocial, region),
+      socialProvider,
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret
+    },
+    dbPath
+  )
+  console.log(`[KiroCLI] 已切换 Kiro CLI 账号 ${accountId}（${socialProvider ?? 'IdC'}）`)
+  return {
+    dbPath,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken,
+    expiresAt,
+    credentialRevision: refreshed.credentialRevision
+  }
+}
+
+/**
+ * CLI 社交凭据临期续期：在账号库里找 refresh_token 与 CLI 相同的账号并刷新。
+ * 刷新成功后 singleflight 已把新凭据同步给 CLI，这里再通知渲染进程更新账号。
+ */
+async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise<void> {
+  const [candidate] = await readCanonicalKiroRefreshTransportCandidates(token.refresh_token)
+  // CLI 当前账号不在账号库里，交给 kiro-cli 自己续期
+  if (!candidate) return
+  const canonical = await readCanonicalKiroCredentials(candidate.accountId)
+  const result = await refreshStoredKiroCredentials({
+    accountId: candidate.accountId,
+    expectedRefreshToken: token.refresh_token,
+    expectedCredentialRevision: canonical?.credentialRevision,
+    region: token.region || candidate.region,
+    authMethod: 'social',
+    proxyUrl: candidate.proxyUrl
+  })
+  if (!result.success || !result.accessToken) {
+    console.warn('[KiroCLI] 社交凭据续期失败，一分钟后重试:', result.error)
+    return
+  }
+  // 账号库里已有更新的凭据时不会真的发刷新请求，singleflight 也就不会同步 CLI，这里补一次
+  if (result.reusedCanonical) await syncKiroCliAfterRefresh(token.refresh_token, result)
+  sendRendererEvent('background-refresh-result', {
+    id: candidate.accountId,
+    success: true,
+    data: {
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      expiresIn: result.expiresIn,
+      expiresAt: result.expiresAt,
+      credentialRevision: result.credentialRevision
+    }
+  })
+  console.log('[KiroCLI] 社交凭据已续期并同步到 CLI')
+}
+
+const kiroCliSocialRenewal = createKiroCliSocialRenewal({
+  renew: renewKiroCliSocialCredentials
+})
 
 const LEGACY_ACCOUNT_DATA_KEYS = ['switchTarget'] as const
 const LEGACY_PROACTIVE_RENEWAL_KEY = 'proactiveRenewalEnabled'
@@ -2167,26 +2366,27 @@ async function probeLocalAdminPushCandidateLiveness(
     if (!refreshToken) {
       return { verdict: LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT, error: '账号缺少 Refresh Token' }
     }
-    const refreshed = await refreshUnmanagedKiroCredentials(
-      refreshToken,
-      candidate.clientId?.trim() || '',
-      candidate.clientSecret?.trim() || '',
-      region,
-      candidate.authMethod === 'social' ? 'social' : undefined
-    )
-    if (!refreshed.success || !refreshed.accessToken) {
-      /*
-       * 刷不出 accessToken 就是这份凭据废了：Admin 每次调用都要先刷 token，
-       * 这一步过不去它在 Admin 里也一样不能用，按永久失效处理并回滚。
-       */
+    /*
+     * 不在这里本地刷新。
+     *
+     * 候选凭据此刻已经 POST 给 Admin，而 Admin 的 balance 门禁会用它刷一次 token，
+     * 那次刷新会把 refreshToken 轮换掉——本地这份随即作废。所以「本地刷不出
+     * accessToken」只说明我们手上是旧货，不说明凭据失效；据此判 PERMANENTLY_INVALID
+     * 会让 verifyOrRollback 删掉 Admin 里刚建好的凭据，形成「推一次删一次」。
+     *
+     * 改用调用方传进来的、可能仍然有效的 accessToken 做消息级验活；拿不到就跳过，
+     * 交给 Admin 自己的 balance 门禁兜底。
+     */
+    const accessToken = candidate.accessToken?.trim()
+    if (!accessToken) {
       return {
-        verdict: LOCAL_ADMIN_PROBE_VERDICT.PERMANENTLY_INVALID,
-        error: refreshed.error || '刷新 Access Token 失败'
+        verdict: LOCAL_ADMIN_PROBE_VERDICT.SKIPPED,
+        error: '无可用 accessToken，跳过消息验活'
       }
     }
     probeAccount = {
       id: 'local-admin-push-probe',
-      accessToken: refreshed.accessToken,
+      accessToken,
       refreshToken,
       clientId: candidate.clientId,
       clientSecret: candidate.clientSecret,
@@ -3335,6 +3535,9 @@ app.whenReady().then(async () => {
     console.warn('[ProxyPoolScheduler] Failed to start:', err)
   })
 
+  // Kiro CLI 社交凭据续期：每分钟检查，剩余不超过 10 分钟时用账号库里匹配的账号续期
+  kiroCliSocialRenewal.start()
+
   // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
   registerKskAutomationIpcHandlers({
     getManager: () => kskAutomationManager,
@@ -3961,6 +4164,20 @@ app.whenReady().then(async () => {
       }
     )
   )
+
+  // IPC: 把账号切换为 Kiro CLI 当前账号（只传 accountId，凭据由主进程从账号库读取）
+  ipcMain.handle('switch-account-cli', async (_event, accountId: string) => {
+    try {
+      if (typeof accountId !== 'string' || !accountId) throw new Error('缺少账号 ID')
+      return { success: true, data: await switchAccountToKiroCli(accountId) }
+    } catch (error) {
+      console.error('[KiroCLI] 切换失败:', error instanceof Error ? error.message : error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Kiro CLI 切换失败'
+      }
+    }
+  })
 
   // IPC: 从 SSO Token 导入账号 (x-amz-sso_authn)
   ipcMain.handle(
@@ -6660,7 +6877,7 @@ app.whenReady().then(async () => {
   const originalHandleProtocolUrl = handleProtocolUrl
   // @ts-ignore - 重新定义协议处理
   handleProtocolUrl = (url: string): void => {
-    if (!url.startsWith(`${PROTOCOL_PREFIX}://`)) return
+    if (!isAppCallbackUrl(url)) return
 
     try {
       const urlObj = new URL(url)

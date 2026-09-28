@@ -659,9 +659,14 @@ export async function pushAccountToLocalAdmin(input: {
       async () => {
         const outcome = await input.probeLiveness!(input.candidate)
         probeVerdict = outcome.verdict
+        /*
+         * 只有 permanently_invalid 才回滚。skipped 表示「没跑成验活」（例如本地
+         * 没有可用的 accessToken），同样不能证明凭据失效，必须放过。
+         */
         if (
           outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.ALIVE ||
-          outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT
+          outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.TRANSIENT ||
+          outcome.verdict === LOCAL_ADMIN_PROBE_VERDICT.SKIPPED
         ) {
           return
         }

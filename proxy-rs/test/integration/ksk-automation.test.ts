@@ -886,6 +886,30 @@ describe('单账号推送到本机 Admin', () => {
     expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
   })
 
+  /*
+   * 回归：验活被跳过（例如拿不到可用的 accessToken）绝不能触发回滚。
+   *
+   * 推送探针原先会拿本地 refreshToken 现刷一次，而那份在 Admin 的 balance 门禁
+   * 刷过之后已经作废，刷新失败一度被判成 permanently_invalid，于是把 Admin 里
+   * 刚建好的凭据删掉——「推一次删一次」就是这么来的。
+   */
+  it('验活跳过时保留已创建凭据，不触发回滚', async () => {
+    const { result, calls } = await runPushWithProbe(async () => ({
+      verdict: 'skipped',
+      error: '无可用 accessToken，跳过消息验活'
+    }))
+
+    expect(result).toEqual({
+      status: 'created',
+      credentialId: '9',
+      verified: true,
+      authMethod: 'social',
+      probeVerdict: 'skipped'
+    })
+    expect(calls).not.toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
+    expect(calls.some((call) => call.includes('/disabled'))).toBe(false)
+  })
+
   it.each([['账号已失效', 'permanently_invalid', '账号已失效']])(
     '发消息验活明确永久失效才删凭据并抛错：%s',
     async (_name, verdict, error) => {

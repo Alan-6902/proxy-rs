@@ -7,13 +7,14 @@ import { useCallback, useMemo, useState } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { askConfirm } from '@/components/ui/confirmDialogStore'
 import type { Account } from '@/types/account'
+import { canRefreshUpstreamCredential } from '@/types/account'
 import {
   LOCAL_ADMIN_AUTH_METHOD,
   resolveLocalAdminCredentialPayload,
   type LocalAdminPushResult
 } from '../../../shared/localAdminPush'
 
-/** 推送成功提示在按钮上停留的时长。失败不走这个定时器，见 pushToAdmin 的注释。 */
+/** 成功提示在按钮上停留的时长（推送 / 切 CLI）。失败不走这个定时器，见 pushToAdmin 的注释。 */
 const PUSH_FEEDBACK_MS = 4000
 
 export type AdminPushState = 'idle' | 'pushing' | 'created' | 'existing' | 'error'
@@ -36,7 +37,15 @@ interface UseAccountActions {
   canPush: boolean
   /** 按钮 title：说明将要推什么，或为什么不能推 */
   pushTitle: string
+  /** 把该账号切换为 Kiro CLI 当前账号 */
+  switchToCli: () => void
+  cliSwitchState: CliSwitchState
+  /** 只有带 Refresh Token 的 OAuth 账号能切 CLI */
+  canSwitchCli: boolean
+  cliSwitchTitle: string
 }
+
+export type CliSwitchState = 'idle' | 'switching' | 'done'
 
 const AUTH_METHOD_LABEL: Record<string, { zh: string; en: string }> = {
   [LOCAL_ADMIN_AUTH_METHOD.API_KEY]: { zh: 'API Key', en: 'API Key' },
@@ -73,6 +82,9 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
           credentialKind: account.credentials.credentialKind,
           kiroApiKey: account.credentials.kiroApiKey,
           refreshToken: account.credentials.refreshToken,
+          // 推送探针只用它发消息验活，不再用 refreshToken 本地现刷——本地那份在
+          // Admin 刷过之后已经作废，拿它判失效会误删 Admin 里刚建好的凭据。
+          accessToken: account.credentials.accessToken,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
@@ -137,6 +149,44 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
       : `添加到 kiro-admin（以 ${method} 凭据创建；仅明确失效才删除，暂时性故障会保留）`
   }, [resolved, isEn])
 
+  const switchAccountToCli = useAccountsStore((state) => state.switchAccountToCli)
+  const [cliSwitchState, setCliSwitchState] = useState<CliSwitchState>('idle')
+  const canSwitchCli = canRefreshUpstreamCredential(account.credentials)
+
+  const switchToCli = useCallback(() => {
+    if (!canSwitchCli || cliSwitchState === 'switching') return
+    setCliSwitchState('switching')
+    void (async () => {
+      const result = await switchAccountToCli(account.id)
+      if (result.success) {
+        setCliSwitchState('done')
+        setTimeout(() => setCliSwitchState('idle'), PUSH_FEEDBACK_MS)
+        return
+      }
+      setCliSwitchState('idle')
+      const retry = await askConfirm({
+        title: isEn ? 'Failed to switch Kiro CLI' : '切换 Kiro CLI 失败',
+        description: result.error || (isEn ? 'Unknown error' : '未知错误'),
+        confirmText: isEn ? 'Retry' : '重试',
+        cancelText: isEn ? 'Close' : '关闭',
+        tone: 'warning'
+      })
+      if (retry) switchToCli()
+    })()
+  }, [canSwitchCli, cliSwitchState, switchAccountToCli, account.id, isEn])
+
+  const cliSwitchTitle = !canSwitchCli
+    ? isEn
+      ? 'Only OAuth accounts with a refresh token can be used by Kiro CLI'
+      : '只有带 Refresh Token 的 OAuth 账号能切到 Kiro CLI'
+    : cliSwitchState === 'done'
+      ? isEn
+        ? 'Kiro CLI switched to this account'
+        : 'Kiro CLI 已切换到该账号'
+      : isEn
+        ? 'Switch Kiro CLI to this account (refreshes the token first)'
+        : '切换 Kiro CLI 到该账号（会先刷新一次 Token）'
+
   return {
     runLiveness,
     livenessPending,
@@ -146,6 +196,10 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     showPushError,
     dismissPushError,
     canPush: resolved.ok,
-    pushTitle
+    pushTitle,
+    switchToCli,
+    cliSwitchState,
+    canSwitchCli,
+    cliSwitchTitle
   }
 }

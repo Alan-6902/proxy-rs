@@ -108,6 +108,11 @@ const api = {
     return ipcRenderer.invoke('refresh-account-token', account)
   },
 
+  // 账号管理 - 切换为 Kiro CLI 当前账号
+  switchAccountCli: (accountId: string): Promise<unknown> => {
+    return ipcRenderer.invoke('switch-account-cli', accountId)
+  },
+
   // 账号管理 - 检查账号状态
   checkAccountStatus: (account: unknown): Promise<unknown> => {
     return ipcRenderer.invoke('check-account-status', account)

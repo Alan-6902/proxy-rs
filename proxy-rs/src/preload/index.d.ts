@@ -93,6 +93,20 @@ interface RefreshResult {
   error?: { message: string }
 }
 
+/** 切换 Kiro CLI 账号的结果；成功时带切号前刷新得到的新凭据 */
+interface SwitchAccountCliResult {
+  success: boolean
+  data?: {
+    /** 写入的 kiro-cli 数据库路径 */
+    dbPath: string
+    accessToken: string
+    refreshToken: string
+    expiresAt: number
+    credentialRevision?: string
+  }
+  error?: string
+}
+
 /** Kiro IDE 自己 refresh 完写回 token 文件、被检测到后通知 renderer 的 payload */
 interface BonusData {
   code: string
@@ -177,6 +191,7 @@ interface KiroApi {
   loadAccounts: () => Promise<AccountData | null>
   saveAccounts: (data: AccountData) => Promise<void>
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
+  switchAccountCli: (accountId: string) => Promise<SwitchAccountCliResult>
   checkAccountStatus: (account: unknown) => Promise<StatusResult>
 
   // 后台批量刷新（主进程执行，不阻塞 UI）

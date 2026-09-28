@@ -28,7 +28,8 @@ import {
   Zap,
   CloudUpload,
   CloudCheck,
-  XCircle
+  XCircle,
+  Terminal
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ExportDialog } from './ExportDialog'
@@ -227,7 +228,11 @@ export const AccountCard = memo(function AccountCard({
     showPushError,
     dismissPushError,
     canPush,
-    pushTitle
+    pushTitle,
+    switchToCli,
+    cliSwitchState,
+    canSwitchCli,
+    cliSwitchTitle
   } = useAccountActions(account, isEn)
 
   // 格式化使用量数值
@@ -726,10 +731,36 @@ export const AccountCard = memo(function AccountCard({
               </span>
             </Badge>
           )}
+          {/* 切换 Kiro CLI：底部操作栏已满，放在徽章行右侧 */}
+          <button
+            type="button"
+            className={cn(
+              'ml-auto h-5 px-1.5 rounded-md border text-2xs flex items-center gap-1 transition-colors',
+              'disabled:opacity-40 disabled:cursor-not-allowed',
+              cliSwitchState === 'done'
+                ? 'border-success/40 text-success bg-success/10'
+                : 'border-muted-foreground/30 text-muted-foreground hover:text-primary hover:border-primary/50'
+            )}
+            onClick={(e) => {
+              e.stopPropagation()
+              switchToCli()
+            }}
+            disabled={!canSwitchCli || cliSwitchState === 'switching'}
+            title={cliSwitchTitle}
+          >
+            {cliSwitchState === 'switching' ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : cliSwitchState === 'done' ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Terminal className="h-3 w-3" />
+            )}
+            CLI
+          </button>
           {account.isActive && (
             <Badge
               variant="default"
-              className="ml-auto h-5 bg-success text-white border-0 hover:bg-success/90"
+              className="h-5 bg-success text-white border-0 hover:bg-success/90"
             >
               {isEn ? 'Active' : '当前使用'}
             </Badge>

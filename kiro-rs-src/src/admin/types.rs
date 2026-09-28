@@ -357,6 +357,24 @@ pub struct ImportAccountRequest {
     pub group_id: Option<String>,
     pub tags: Option<Vec<String>>,
     pub metadata: Option<serde_json::Value>,
+    /// 旧额度展示数据（{usage, subscription}），kiro-rs 首次查询前 proxy-rs 用它展示
+    pub legacy_usage: Option<serde_json::Value>,
+}
+
+/// GET /credentials 查询参数
+#[derive(Debug, Default, Deserialize)]
+pub struct ListCredentialsQuery {
+    /// 账号库模式下默认只列号池中的账号；all=true 列出全部
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// DELETE /credentials/:id 查询参数
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteCredentialQuery {
+    /// 账号库模式：false（默认）= 移出号池、保留账号；true = 从账号库删除
+    #[serde(default)]
+    pub purge: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -248,6 +248,17 @@ async fn main() {
         }
     }
     let token_manager = Arc::new(token_manager);
+    // 账号库模式：kiro-rs 是唯一刷新方，后台维护所有账号的 token 与首份额度
+    if account_store.is_some() {
+        let tm = token_manager.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                tm.maintain_credentials().await;
+            }
+        });
+    }
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
         proxy_config.clone(),

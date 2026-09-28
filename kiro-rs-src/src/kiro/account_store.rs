@@ -81,6 +81,8 @@ pub struct NewAccountMeta {
     pub group_id: Option<String>,
     pub tags_json: Option<String>,
     pub metadata_json: Option<String>,
+    /// 迁移 / 导入时带入的旧额度展示数据（{usage, subscription}），raw_json 为空时使用
+    pub legacy_usage_json: Option<String>,
 }
 
 /// 一次额度查询写库的内容
@@ -440,8 +442,8 @@ impl AccountStore {
                 params![id, now],
             )?;
             tx.execute(
-                "INSERT INTO account_usage(account_id) VALUES (?1)",
-                params![id],
+                "INSERT INTO account_usage(account_id, legacy_json) VALUES (?1, ?2)",
+                params![id, meta.legacy_usage_json],
             )?;
             tx.execute(
                 "INSERT INTO account_ui(account_id, nickname, group_id, tags_json, metadata_json,
@@ -771,6 +773,20 @@ impl AccountStore {
             )?;
             Ok(())
         })
+    }
+
+    /// 从未成功或失败查过额度的未删除账号
+    pub fn ids_without_usage(&self) -> anyhow::Result<Vec<u64>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT a.id FROM accounts a JOIN account_usage u ON u.account_id = a.id
+             WHERE a.deleted_at_ms IS NULL AND u.sync_state = 'never'",
+        )?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .map(|r| r.map(|v| v as u64))
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// 按 refresh token / API key 查已有账号（导入去重）

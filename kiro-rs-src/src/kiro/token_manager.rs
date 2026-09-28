@@ -2228,19 +2228,27 @@ impl MultiTokenManager {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("缺少 kiroApiKey"))?;
             let new_api_key_hash = sha256_hex(new_api_key);
-            let duplicate_exists = {
+            let duplicate = {
                 let entries = self.entries.lock();
-                entries.iter().any(|entry| {
-                    entry
-                        .credentials
-                        .kiro_api_key
-                        .as_deref()
-                        .map(sha256_hex)
-                        .as_deref()
-                        == Some(new_api_key_hash.as_str())
-                })
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .credentials
+                            .kiro_api_key
+                            .as_deref()
+                            .map(sha256_hex)
+                            .as_deref()
+                            == Some(new_api_key_hash.as_str())
+                    })
+                    .map(|entry| entry.id)
             };
-            if duplicate_exists {
+            if let Some(existing) = duplicate {
+                // 库模式：同一凭据已在库中（proxy-rs 管理的号），"添加到反代"即入池
+                if self.store.is_some() {
+                    self.set_in_pool(existing, true)?;
+                    return Ok(existing);
+                }
                 anyhow::bail!("凭据已存在（kiroApiKey 重复）");
             }
         } else {
@@ -2249,19 +2257,27 @@ impl MultiTokenManager {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
             let new_refresh_token_hash = sha256_hex(new_refresh_token);
-            let duplicate_exists = {
+            let duplicate = {
                 let entries = self.entries.lock();
-                entries.iter().any(|entry| {
-                    entry
-                        .credentials
-                        .refresh_token
-                        .as_deref()
-                        .map(sha256_hex)
-                        .as_deref()
-                        == Some(new_refresh_token_hash.as_str())
-                })
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .credentials
+                            .refresh_token
+                            .as_deref()
+                            .map(sha256_hex)
+                            .as_deref()
+                            == Some(new_refresh_token_hash.as_str())
+                    })
+                    .map(|entry| entry.id)
             };
-            if duplicate_exists {
+            if let Some(existing) = duplicate {
+                // 库模式：同一凭据已在库中（proxy-rs 管理的号），"添加到反代"即入池
+                if self.store.is_some() {
+                    self.set_in_pool(existing, true)?;
+                    return Ok(existing);
+                }
                 anyhow::bail!("凭据已存在（refreshToken 重复）");
             }
         }
@@ -2377,6 +2393,16 @@ impl MultiTokenManager {
     /// - `Ok(())` - 删除成功
     /// - `Err(_)` - 凭据不存在、未禁用或持久化失败
     pub fn delete_credential(&self, id: u64) -> anyhow::Result<()> {
+        self.remove_credential(id, true)
+    }
+
+    /// 从账号库彻底删除（软删除，两端都不再展示）；不要求先禁用。仅库模式。
+    pub fn purge_credential(&self, id: u64) -> anyhow::Result<()> {
+        self.require_store()?;
+        self.remove_credential(id, false)
+    }
+
+    fn remove_credential(&self, id: u64, require_disabled: bool) -> anyhow::Result<()> {
         let was_current = {
             let mut entries = self.entries.lock();
 
@@ -2387,7 +2413,7 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
 
             // 检查是否已禁用
-            if !entry.disabled {
+            if require_disabled && !entry.disabled {
                 anyhow::bail!("只能删除已禁用的凭据（请先禁用凭据 #{}）", id);
             }
 
@@ -2652,6 +2678,55 @@ impl MultiTokenManager {
         entry.credentials.proxy_username = username;
         entry.credentials.proxy_password = password;
         Ok(())
+    }
+
+    /// 库模式后台维护（main 每分钟调用一次）：
+    /// - 即将过期或缺 access token 的 OAuth 凭据刷新一次（不论是否在号池，proxy-rs 不再自己刷新）
+    /// - 从未查过额度的账号查一次，填充 account_usage 供 proxy-rs 展示
+    pub async fn maintain_credentials(&self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let due: Vec<u64> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|e| !e.disabled && !e.credentials.is_api_key_credential())
+                .filter(|e| {
+                    e.credentials.access_token.is_none()
+                        || is_token_expired(&e.credentials)
+                        || is_token_expiring_soon(&e.credentials)
+                })
+                .map(|e| e.id)
+                .collect()
+        };
+        for id in due {
+            if let Err(e) = self.ensure_fresh(id, None, false).await {
+                tracing::warn!("后台刷新凭据 #{} 失败: {}", id, e);
+                if e.downcast_ref::<RefreshTokenInvalidError>().is_none() {
+                    self.report_refresh_failure(id);
+                }
+            }
+        }
+        let never = match store.ids_without_usage() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("读取未查额度账号失败: {}", e);
+                return;
+            }
+        };
+        for id in never {
+            let enabled = self
+                .entries
+                .lock()
+                .iter()
+                .any(|e| e.id == id && !e.disabled);
+            if enabled {
+                if let Err(e) = self.get_usage_limits_for(id).await {
+                    tracing::warn!("后台查询凭据 #{} 额度失败: {}", id, e);
+                }
+            }
+        }
     }
 
     /// 立即写出防抖中的统计（进程退出前调用）
@@ -3976,5 +4051,24 @@ mod tests {
             m.import_credential(live_oauth("rt"), NewAccountMeta::default())
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn db_add_existing_credential_puts_it_into_pool() {
+        let (m, _, _) = db_manager();
+        let api = KiroCredentials {
+            auth_method: Some("api_key".into()),
+            kiro_api_key: Some("ksk_existing_key".into()),
+            ..Default::default()
+        };
+        let (id, _) = m
+            .import_credential(api.clone(), NewAccountMeta::default())
+            .unwrap();
+        assert!(!m.snapshot().entries[0].in_pool);
+        // Admin "添加凭据"遇到库中已有的同一凭据：不报错，改为入池并返回已有 ID
+        assert_eq!(m.add_credential(api).await.unwrap(), id);
+        assert!(m.snapshot().entries[0].in_pool);
+        m.purge_credential(id).unwrap();
+        assert!(m.snapshot().entries.is_empty());
     }
 }

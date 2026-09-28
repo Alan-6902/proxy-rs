@@ -9,16 +9,19 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, BalanceQuery, EnsureFreshRequest, ImportAccountRequest,
-        SetDisabledRequest, SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SetProxyRequest, SuccessResponse,
+        AddCredentialRequest, BalanceQuery, DeleteCredentialQuery, EnsureFreshRequest,
+        ImportAccountRequest, ListCredentialsQuery, SetDisabledRequest, SetInPoolRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest, SuccessResponse,
     },
 };
 
 /// GET /api/admin/credentials
 /// 获取所有凭据状态
-pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {
-    let response = state.service.get_all_credentials();
+pub async fn get_all_credentials(
+    State(state): State<AdminState>,
+    Query(query): Query<ListCredentialsQuery>,
+) -> impl IntoResponse {
+    let response = state.service.get_all_credentials(query.all);
     Json(response)
 }
 
@@ -101,8 +104,9 @@ pub async fn add_credential(
 pub async fn delete_credential(
     State(state): State<AdminState>,
     Path(id): Path<u64>,
+    Query(query): Query<DeleteCredentialQuery>,
 ) -> impl IntoResponse {
-    match state.service.delete_credential(id) {
+    match state.service.delete_credential(id, query.purge) {
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

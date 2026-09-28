@@ -66,8 +66,14 @@ impl AdminService {
     }
 
     /// 获取所有凭据状态
-    pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
-        let snapshot = self.token_manager.snapshot();
+    pub fn get_all_credentials(&self, all: bool) -> CredentialsStatusResponse {
+        let mut snapshot = self.token_manager.snapshot();
+        // 账号库模式：Admin 列表保持"反代号池"语义，未入池的账号只在 all=true 时列出
+        if self.token_manager.account_store().is_some() && !all {
+            snapshot.entries.retain(|e| e.in_pool);
+            snapshot.total = snapshot.entries.len();
+            snapshot.available = snapshot.entries.iter().filter(|e| !e.disabled).count();
+        }
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
 
         let mut credentials: Vec<CredentialStatusItem> = snapshot
@@ -357,6 +363,7 @@ impl AdminService {
                 .tags
                 .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "[]".into())),
             metadata_json: req.metadata.map(|v| v.to_string()),
+            legacy_usage_json: req.legacy_usage.map(|v| v.to_string()),
         };
         let (credential_id, created) = self
             .token_manager
@@ -384,10 +391,14 @@ impl AdminService {
         }
     }
 
-    pub fn delete_credential(&self, id: u64) -> Result<(), AdminServiceError> {
-        self.token_manager
-            .delete_credential(id)
-            .map_err(|e| self.classify_delete_error(e, id))?;
+    pub fn delete_credential(&self, id: u64, purge: bool) -> Result<(), AdminServiceError> {
+        let result = match (self.token_manager.account_store().is_some(), purge) {
+            // 账号库模式默认只移出号池：账号仍由 proxy-rs 管理
+            (true, false) => self.token_manager.set_in_pool(id, false),
+            (true, true) => self.token_manager.purge_credential(id),
+            (false, _) => self.token_manager.delete_credential(id),
+        };
+        result.map_err(|e| self.classify_delete_error(e, id))?;
 
         // 清理已删除凭据的余额缓存
         {

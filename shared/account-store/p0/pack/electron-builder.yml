@@ -1,0 +1,21 @@
+appId: p0.pack.probe
+productName: P0 Pack Probe
+electronVersion: 38.7.2
+# 与 proxy-rs 一致：不按 Electron ABI 重建原生模块（better-sqlite3 13 是 Node-API 预编译包）
+npmRebuild: false
+asar: true
+asarUnpack:
+  - node_modules/better-sqlite3/**
+mac:
+  identity: null
+  target: dir
+directories:
+  output: dist
+files:
+  - '**/*'
+  - '!pack.sh'
+  # 运行时只需要 lib/ 与 macOS 预编译二进制；SQLite 源码、C++ 源码、其他平台产物不进包
+  - '!node_modules/better-sqlite3/{deps,src}/**'
+  - '!node_modules/better-sqlite3/binding.gyp'
+  - '!node_modules/better-sqlite3/prebuilds/{win32,linux,linuxmusl}-*.node'
+  - '!node_modules/node-addon-api/**'

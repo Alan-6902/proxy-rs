@@ -1,0 +1,7 @@
+{
+  "name": "p0-pack-probe",
+  "version": "0.0.1",
+  "private": true,
+  "main": "main.js",
+  "dependencies": { "better-sqlite3": "13.0.3" }
+}

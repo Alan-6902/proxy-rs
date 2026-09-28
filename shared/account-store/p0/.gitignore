@@ -1,0 +1,7 @@
+rust/target/
+node/node_modules/
+node/package-lock.json
+pack/node_modules/
+pack/package-lock.json
+pack/dist/
+work/

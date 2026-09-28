@@ -123,6 +123,14 @@ export interface LocalAdminCredentialStats {
   usedCredits?: number
   /** 最后一次被调用的时间（毫秒时间戳） */
   lastUsedAt?: number
+  /**
+   * 凭据 token 的哈希。
+   *
+   * 回收器用它校验「反代凭据 id 有没有被复用」——反代删掉旧凭据后新建的凭据
+   * 可能拿到同一个 id，不校验就会把新凭据误当成已托管对象、永久停掉本地刷新。
+   */
+  apiKeyHash?: string
+  refreshTokenHash?: string
   usage?: LocalAdminCredentialUsage
   /** 该凭据命中的告警，空数组表示健康 */
   alerts: LocalAdminAlert[]

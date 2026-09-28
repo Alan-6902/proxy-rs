@@ -32,10 +32,13 @@ import {
   adminManagedEntry,
   isAdminManagedAccount,
   isAdminManagedRefreshToken,
+  reconcileManagedAccounts,
   reloadAdminManagedIds,
   setAdminManagedRefreshTokenResolver
 } from './adminManaged/gate'
 import { syncManagedAccountFromAdmin } from './adminManaged/accountSync'
+import { recordAdminManagedAccount } from './adminManaged/registryStore'
+import { matchRemoteCredentialToLocalAccount } from '../shared/adminManaged'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -96,6 +99,10 @@ import {
 import type { KskLivenessOptions, ProviderKskCredential } from '../shared/kskAutomation'
 import {
   deleteLocalAdminCredentialsById,
+  readRemoteCredentials,
+  remoteCredentialId,
+  requestJson,
+  resolveLocalAdminApiBase,
   sha256Hex,
   type KskAutomationFetch,
   type LocalAdminProbeOutcome
@@ -2761,6 +2768,25 @@ const localAdminStatsManager = new LocalAdminStatsManager({
   },
   fetchImpl: localAdminFetchImpl,
   cleanupExhausted: cleanupExhaustedLocalAdminCredentials,
+  /*
+   * 每轮用反代当前的凭据列表核对托管登记表：那边已经被删掉的凭据，对应账号要
+   * 恢复本地刷新，否则会永远停在「托管」状态、再也不会刷 token。
+   * 这条兜住的是绕过本进程的删除路径（Admin UI、curl、容器重建）。
+   */
+  onCredentialsObserved: async (credentials) => {
+    const { dropped } = await reconcileManagedAccounts(
+      credentials.map((credential) => ({
+        id: credential.id,
+        apiKeyHash: credential.apiKeyHash,
+        refreshTokenHash: credential.refreshTokenHash
+      }))
+    )
+    for (const item of dropped) {
+      console.log(
+        `[AdminManaged] 账号 ${item.accountId} 已不在反代（${item.reason}），恢复本地刷新`
+      )
+    }
+  },
   notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
   log: (message) => console.log(message)
 })
@@ -4855,6 +4881,83 @@ async function syncManagedAccountIntoBatch(
   }
 }
 
+const ADMIN_MANAGED_ADOPTION_KEY = 'adminManagedAdoptionDone'
+
+/**
+ * 升级时的一次性认领：把反代里已有的凭据认回本地账号并登记为托管。
+ *
+ * 不做的话，改造前推给反代的账号在登记表里没有条目，升级后会立刻恢复本地刷新、
+ * 重新开始双边抢刷——而烧号不可逆。
+ *
+ * 认领结果直接落盘、不要求用户先确认：漏认的代价是继续烧号，误认的代价只是该账号
+ * 暂时不本地刷新（UI 可一键取消）。两边代价不对称，所以宁枉勿纵。
+ */
+async function runAdminManagedAdoptionOnce(): Promise<void> {
+  if (!store) return
+  if (store.get(ADMIN_MANAGED_ADOPTION_KEY, false) === true) return
+
+  try {
+    const accountData = store.get('accountData') as
+      | {
+          accounts?: Record<
+            string,
+            { email?: string; credentials?: { refreshToken?: string; kiroApiKey?: string } }
+          >
+        }
+      | undefined
+    const accounts = Object.entries(accountData?.accounts ?? {}).map(([id, account]) => {
+      const refreshToken = account.credentials?.refreshToken?.trim()
+      const kiroApiKey = account.credentials?.kiroApiKey?.trim()
+      return {
+        id,
+        email: account.email,
+        refreshTokenHash: refreshToken ? sha256Hex(refreshToken) : undefined,
+        kiroApiKeyHash: kiroApiKey ? sha256Hex(kiroApiKey) : undefined
+      }
+    })
+    if (accounts.length === 0) return
+
+    const target = await resolveLocalAdminTarget()
+    const payload = await requestJson(
+      localAdminFetchImpl,
+      `${resolveLocalAdminApiBase(target.baseUrl)}/credentials`,
+      target.adminApiKey.trim(),
+      Math.max(3, target.timeoutSeconds) * 1000,
+      { method: 'GET' }
+    )
+
+    const { claimed, ambiguousEmail } = matchRemoteCredentialToLocalAccount({
+      accounts,
+      remote: readRemoteCredentials(payload)
+        .map((credential) => ({
+          id: remoteCredentialId(credential) ?? '',
+          email: credential.email,
+          authMethod: credential.authMethod,
+          apiKeyHash: credential.apiKeyHash,
+          refreshTokenHash: credential.refreshTokenHash
+        }))
+        .filter((credential) => credential.id.length > 0),
+      now: Date.now()
+    })
+
+    for (const entry of claimed) {
+      await recordAdminManagedAccount(entry)
+    }
+    await reloadAdminManagedIds()
+    store.set(ADMIN_MANAGED_ADOPTION_KEY, true)
+    console.log(
+      `[AdminManaged] 认领完成：${claimed.length} 个账号登记为反代托管` +
+        (ambiguousEmail.length > 0 ? `；${ambiguousEmail.length} 个因邮箱在本地重复未认领` : '')
+    )
+  } catch (error) {
+    // 反代未配置或不可达：不落 flag，下次启动重试
+    console.warn(
+      '[AdminManaged] 认领未完成（反代不可达或未配置），下次启动重试：',
+      error instanceof Error ? error.message : error
+    )
+  }
+}
+
   const backgroundBatchRefresh = async (
     accounts: BackgroundRefreshAccount[],
     concurrency: number = 10,
@@ -5346,6 +5449,8 @@ async function syncManagedAccountIntoBatch(
     return candidates[0]?.accountId
   })
   await reloadAdminManagedIds()
+  // 升级时把反代里已有的凭据认回来；必须先于刷新调度，否则存量号会被本地刷一次
+  await runAdminManagedAdoptionOnce()
 
   // 启动主进程池 token 刷新调度器（不依赖窗口可见/存活，挂托盘也照常刷新）
   startMainPoolTokenRefresh()

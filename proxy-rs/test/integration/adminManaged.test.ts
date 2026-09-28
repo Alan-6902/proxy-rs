@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  matchRemoteCredentialToLocalAccount,
   normalizeAdminManagedEntry,
   normalizeAdminManagedPayload,
   reconcileAdminManagedEntries,
   shouldSuppressKiroRefresh,
-  type AdminManagedAccountEntry
+  type AdminManagedAccountEntry,
+  type AdoptionLocalAccount,
+  type AdoptionRemoteCredential
 } from '../../src/shared/adminManaged'
 
 const entry = (over: Partial<AdminManagedAccountEntry> = {}): AdminManagedAccountEntry => ({
@@ -154,6 +157,98 @@ describe('admin managed registry helpers', () => {
         now
       )
       expect(dropped[0].reason).toBe('hash_changed')
+    })
+  })
+
+  describe('matchRemoteCredentialToLocalAccount', () => {
+    const now = 1_900_000_000_000
+    const local = (over: Partial<AdoptionLocalAccount> = {}): AdoptionLocalAccount => ({
+      id: 'acct-1',
+      email: 'a@example.test',
+      refreshTokenHash: 'rt-1',
+      ...over
+    })
+    const remote = (over: Partial<AdoptionRemoteCredential> = {}): AdoptionRemoteCredential => ({
+      id: '7',
+      email: 'a@example.test',
+      authMethod: 'social',
+      refreshTokenHash: 'rt-1',
+      ...over
+    })
+
+    it('强匹配命中：本地 token 哈希与反代一致', () => {
+      const { claimed } = matchRemoteCredentialToLocalAccount({
+        accounts: [local()],
+        remote: [remote()],
+        now
+      })
+      expect(claimed).toHaveLength(1)
+      expect(claimed[0]).toMatchObject({
+        accountId: 'acct-1',
+        credentialId: '7',
+        authMethod: 'social',
+        adoptedByEmail: undefined
+      })
+    })
+
+    /*
+     * 已被反代轮换过的号必然强匹配失败（本地那份 token 早已作废），这时只能靠
+     * email 兜底——漏认就意味着这个号继续被双边抢刷、直到烧掉。
+     */
+    it('强匹配失败但 email 唯一时按 email 兜底认领并打标记', () => {
+      const { claimed } = matchRemoteCredentialToLocalAccount({
+        accounts: [local({ refreshTokenHash: 'stale' })],
+        remote: [remote()],
+        now
+      })
+      expect(claimed).toHaveLength(1)
+      expect(claimed[0].adoptedByEmail).toBe(true)
+    })
+
+    it('email 在本地重复时不认领，记入 ambiguousEmail', () => {
+      const { claimed, ambiguousEmail } = matchRemoteCredentialToLocalAccount({
+        accounts: [
+          local({ id: 'acct-1', refreshTokenHash: 'stale-1' }),
+          local({ id: 'acct-2', refreshTokenHash: 'stale-2' })
+        ],
+        remote: [remote()],
+        now
+      })
+      expect(claimed).toEqual([])
+      expect(ambiguousEmail).toEqual(['a@example.test'])
+    })
+
+    it('无 email 且强匹配失败时跳过，不误认', () => {
+      const { claimed } = matchRemoteCredentialToLocalAccount({
+        accounts: [local({ refreshTokenHash: 'stale' })],
+        remote: [remote({ email: undefined })],
+        now
+      })
+      expect(claimed).toEqual([])
+    })
+
+    it('api_key 凭据按 apiKeyHash 强匹配并记下 api_key 类型', () => {
+      const { claimed } = matchRemoteCredentialToLocalAccount({
+        accounts: [local({ refreshTokenHash: undefined, kiroApiKeyHash: 'ksk-1' })],
+        remote: [remote({ refreshTokenHash: null, apiKeyHash: 'ksk-1', authMethod: 'api_key' })],
+        now
+      })
+      expect(claimed).toHaveLength(1)
+      expect(claimed[0].authMethod).toBe('api_key')
+      expect(claimed[0].remoteApiKeyHash).toBe('ksk-1')
+    })
+
+    it('每条远端凭据各认领一个本地账号，一一对应', () => {
+      const { claimed } = matchRemoteCredentialToLocalAccount({
+        accounts: [
+          local({ id: 'acct-1', email: 'a@example.test', refreshTokenHash: 'stale-1' }),
+          local({ id: 'acct-2', email: 'b@example.test', refreshTokenHash: 'stale-2' })
+        ],
+        remote: [remote({ email: 'a@example.test' }), remote({ id: '8', email: 'b@example.test' })],
+        now
+      })
+      expect(claimed.map((item) => item.accountId)).toEqual(['acct-1', 'acct-2'])
+      expect(new Set(claimed.map((item) => item.credentialId)).size).toBe(2)
     })
   })
 })

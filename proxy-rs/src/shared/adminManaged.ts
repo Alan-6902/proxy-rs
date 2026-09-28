@@ -177,3 +177,117 @@ export function reconcileAdminManagedEntries(
 
   return { kept, dropped }
 }
+
+/** 认领用的本地账号视图。哈希由调用方预先算好，shared 不依赖 node:crypto。 */
+export interface AdoptionLocalAccount {
+  id: string
+  email?: string
+  refreshTokenHash?: string
+  kiroApiKeyHash?: string
+}
+
+/** 认领用的远端凭据视图（与反代 `GET /credentials` 的字段兼容）。 */
+export interface AdoptionRemoteCredential {
+  id: string
+  email?: string | null
+  authMethod?: string | null
+  apiKeyHash?: string | null
+  refreshTokenHash?: string | null
+}
+
+export interface AdoptionResult {
+  claimed: AdminManagedAccountEntry[]
+  /** email 在本地不唯一、无法安全认领的远端凭据 */
+  ambiguousEmail: string[]
+}
+
+function toManagedAuthMethod(value: string | null | undefined): AdminManagedAuthMethod {
+  if (value === 'api_key') return 'api_key'
+  if (value === 'idc') return 'idc'
+  return 'social'
+}
+
+function buildAdoptionEntry(
+  account: AdoptionLocalAccount,
+  credential: AdoptionRemoteCredential,
+  now: number,
+  adoptedByEmail: boolean
+): AdminManagedAccountEntry {
+  return {
+    accountId: account.id,
+    credentialId: credential.id,
+    authMethod: toManagedAuthMethod(credential.authMethod),
+    remoteApiKeyHash: credential.apiKeyHash ?? undefined,
+    remoteRefreshTokenHash: credential.refreshTokenHash ?? undefined,
+    pushedAt: now,
+    lastSeenRemoteAt: now,
+    adoptedByEmail: adoptedByEmail ? true : undefined
+  }
+}
+
+/**
+ * 把反代里已有的凭据认领回本地账号，生成托管登记。
+ *
+ * 用于升级：改造前推给反代的账号在登记表里没有条目，升级后会立刻恢复本地刷新、
+ * 重新开始双边抢刷。必须先把它们认回来。
+ *
+ * 两级匹配：
+ * - 强匹配：本地 token 的 sha256 与反代返回的哈希相等，口径与推送判重一致。
+ *   注意**已被反代轮换过的号必然强匹配失败**——本地那份 token 早已作废。
+ * - 弱匹配（email 兜底）：仅在 email 于本地唯一时采用，条目打 adoptedByEmail
+ *   标记以便 UI 提示复核。
+ *
+ * 弱匹配失败时**不**默认「未托管」：那等于默认让这个号继续被双边抢刷，而烧号
+ * 不可逆。宁可多认领（用户可一键取消），也不要漏认。
+ */
+export function matchRemoteCredentialToLocalAccount(input: {
+  accounts: readonly AdoptionLocalAccount[]
+  remote: readonly AdoptionRemoteCredential[]
+  now: number
+}): AdoptionResult {
+  const byRefreshHash = new Map<string, AdoptionLocalAccount>()
+  const byApiKeyHash = new Map<string, AdoptionLocalAccount>()
+  const byEmail = new Map<string, AdoptionLocalAccount[]>()
+  const duplicateEmail = new Set<string>()
+
+  for (const account of input.accounts) {
+    if (account.refreshTokenHash) byRefreshHash.set(account.refreshTokenHash, account)
+    if (account.kiroApiKeyHash) byApiKeyHash.set(account.kiroApiKeyHash, account)
+    const email = account.email?.trim().toLowerCase()
+    if (!email) continue
+    if (byEmail.has(email)) duplicateEmail.add(email)
+    byEmail.set(email, [...(byEmail.get(email) ?? []), account])
+  }
+
+  const claimed: AdminManagedAccountEntry[] = []
+  const ambiguousEmail: string[] = []
+  const claimedAccountIds = new Set<string>()
+
+  for (const credential of input.remote) {
+    const strong =
+      (credential.refreshTokenHash && byRefreshHash.get(credential.refreshTokenHash)) ||
+      (credential.apiKeyHash && byApiKeyHash.get(credential.apiKeyHash)) ||
+      undefined
+    if (strong && !claimedAccountIds.has(strong.id)) {
+      claimedAccountIds.add(strong.id)
+      claimed.push(buildAdoptionEntry(strong, credential, input.now, false))
+      continue
+    }
+
+    const email = credential.email?.trim().toLowerCase()
+    if (!email) continue
+    const candidates = (byEmail.get(email) ?? []).filter(
+      (candidate) => !claimedAccountIds.has(candidate.id)
+    )
+    if (candidates.length === 0) continue
+    // email 在本地撞车时不敢认：认错了会让另一个号的刷新被误停
+    if (duplicateEmail.has(email) || candidates.length > 1) {
+      if (!ambiguousEmail.includes(email)) ambiguousEmail.push(email)
+      continue
+    }
+    claimedAccountIds.add(candidates[0].id)
+    claimed.push(buildAdoptionEntry(candidates[0], credential, input.now, true))
+  }
+
+  return { claimed, ambiguousEmail }
+}

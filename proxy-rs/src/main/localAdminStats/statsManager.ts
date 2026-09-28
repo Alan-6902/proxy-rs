@@ -74,6 +74,13 @@ export interface LocalAdminStatsManagerDeps {
   cleanupExhausted?: (
     credentials: readonly LocalAdminCredentialStats[]
   ) => Promise<LocalAdminExhaustedCleanupSummary>
+  /**
+   * 每轮拿到凭据列表后的回调，用于核对托管登记表（哪些账号已被反代删除）。
+   *
+   * 做成注入而不是在这里直接读写登记表：登记表归 adminManaged 模块管，拉进来会让
+   * 这个模块在测试里没法用假 fetch 跑完整流程——与 cleanupExhausted 同一取舍。
+   */
+  onCredentialsObserved?: (credentials: readonly LocalAdminCredentialStats[]) => Promise<void>
   notifySnapshot: (snapshot: LocalAdminStatsSnapshot) => void
   log?: (message: string) => void
 }
@@ -333,6 +340,16 @@ export class LocalAdminStatsManager {
           this.credentials = remaining
           this.pruneUsageCache(remaining)
         }
+      }
+
+      /*
+       * 用清理之后的列表核对托管登记表：反代那边已被删掉的凭据要让对应账号恢复
+       * 本地刷新，否则它会一直停在「托管」状态、永远不再刷 token。
+       */
+      try {
+        await this.deps.onCredentialsObserved?.(this.credentials)
+      } catch (error) {
+        this.log(`托管登记表核对失败: ${this.message(error)}`)
       }
     } catch (error) {
       this.status = {

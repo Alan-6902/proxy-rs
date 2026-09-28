@@ -102,6 +102,8 @@ export function toCredentialStats(
     inputTokens: readOptionalCount(credential.inputTokens),
     outputTokens: readOptionalCount(credential.outputTokens),
     lastUsedAt: readTimestamp(credential.lastUsedAt),
+    apiKeyHash: readOptionalString(credential.apiKeyHash),
+    refreshTokenHash: readOptionalString(credential.refreshTokenHash),
     usage,
     alerts: resolveLocalAdminAlerts({ disabled, failureCount, refreshFailureCount, usage })
   }

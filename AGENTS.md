@@ -16,6 +16,7 @@
 - 抢号报表的数据口径 → `proxy-rs/docs/抢号报表数据.md`
 - 跟下游对账收款的数据口径与 CSV 存档 → `proxy-rs/docs/下游对账数据.md`
 - 接入新的抢号渠道 → `proxy-rs/docs/接入新抢号渠道.md`
+- 账号库模式（共享 SQLite、kiro-rs 由 proxy 拉起）的点测、切换、回滚与旧文件清理 → `proxy-rs/docs/账号库切换与点测.md`
 
 ## 两个容易踩的点
 

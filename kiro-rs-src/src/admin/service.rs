@@ -645,4 +645,63 @@ mod tests {
             Err(AdminServiceError::NotFound { id: 999 })
         ));
     }
+
+    fn db_service() -> (AdminService, Arc<MultiTokenManager>) {
+        let (store, _) = crate::kiro::account_store::test_store();
+        let manager = Arc::new(
+            MultiTokenManager::new_with_store(Config::default(), Arc::new(store), None).unwrap(),
+        );
+        (
+            AdminService::new(manager.clone(), Vec::<String>::new()),
+            manager,
+        )
+    }
+
+    fn import(service: &AdminService, uuid: &str, key: &str, in_pool: bool) -> u64 {
+        let req: ImportAccountRequest = serde_json::from_value(serde_json::json!({
+            "accountUuid": uuid,
+            "inPool": in_pool,
+            "authMethod": "api_key",
+            "kiroApiKey": key
+        }))
+        .unwrap();
+        service.import_account(req).unwrap().credential_id
+    }
+
+    #[test]
+    fn a14_delete_defaults_to_leaving_pool_and_purge_removes_account() {
+        let (service, manager) = db_service();
+        let id = import(&service, "p-1", "ksk_delete_test", true);
+        assert_eq!(service.get_all_credentials(false).credentials.len(), 1);
+
+        // 默认 DELETE：只移出号池，账号保留，也不要求先禁用
+        service.delete_credential(id, false).unwrap();
+        assert!(service.get_all_credentials(false).credentials.is_empty());
+        let all = service.get_all_credentials(true).credentials;
+        assert_eq!(all.len(), 1);
+        assert!(!all[0].in_pool && !all[0].disabled);
+
+        // purge：从账号库删除，两个视图都看不到
+        service.delete_credential(id, true).unwrap();
+        assert!(service.get_all_credentials(true).credentials.is_empty());
+        assert!(manager.snapshot().entries.is_empty());
+    }
+
+    #[test]
+    fn a29_list_defaults_to_pool_members_only() {
+        let (service, _) = db_service();
+        import(&service, "p-in", "ksk_in_pool", true);
+        import(&service, "p-out", "ksk_out_pool", false);
+        let pool = service.get_all_credentials(false);
+        assert_eq!((pool.total, pool.credentials.len()), (1, 1));
+        assert_eq!(service.get_all_credentials(true).credentials.len(), 2);
+    }
+
+    #[test]
+    fn store_info_reports_database_identity() {
+        let (service, _) = db_service();
+        let info = service.store_info();
+        assert!(info.enabled);
+        assert!(info.database_id.is_some_and(|id| !id.is_empty()));
+    }
 }

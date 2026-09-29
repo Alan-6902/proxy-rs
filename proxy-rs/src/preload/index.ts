@@ -1,37 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { ProxyEntry } from '../shared/proxyPool'
-import type {
-  BatchOpResult as IdcBatchOpResult,
-  BatchOpTarget as IdcBatchTarget,
-  IdcCredentialConfig,
-  IdcIpcResult,
-  PlannedSeat as IdcPlannedSeat,
-  ProvisionSummary as IdcProvisionSummary,
-  SeatInventory as IdcSeatInventory,
-  SeatProgressEvent as IdcProgressEvent
-} from '../shared/idcSeats'
+import type { IpcResult } from '../shared/ipcResult'
 import type {
   KskAutomationStatusEvent,
   KskAutomationTaskInput,
   KskAutomationTaskView
 } from '../shared/kskAutomation'
-import type {
-  KskHunterConfig,
-  KskHunterLinkInput,
-  KskHunterSecretInput,
-  KskHunterSnapshot,
-  KskHunterStatusEvent
-} from '../shared/kskHunter'
-import type { HunterReport } from '../shared/hunterReport'
-import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
-import type { DownstreamReport } from '../shared/downstreamSettlement'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
-import type {
-  LocalAdminExhaustedCleanupSummary,
-  LocalAdminStatsSnapshot,
-  LocalAdminUsageRefreshSummary
-} from '../shared/localAdminStats'
 import {
   CURSOR_ACCOUNTS_CHANNEL,
   type CursorAccount,
@@ -560,20 +535,8 @@ const api = {
     return ipcRenderer.invoke('app-logs-count')
   },
 
-  notifyLocal: (
-    kind: 'registration-risk-paused' | 'registration-batch-completed',
-    input?: { batchId?: string }
-  ): Promise<void> => {
-    return ipcRenderer.invoke('local-notification', kind, input)
-  },
-
-  onLocalNotificationNavigate: (
-    callback: (page: 'accounts' | 'register' | 'hunter') => void
-  ): (() => void) => {
-    const handler = (
-      _e: Electron.IpcRendererEvent,
-      page: 'accounts' | 'register' | 'hunter'
-    ): void => callback(page)
+  onLocalNotificationNavigate: (callback: (page: 'accounts') => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, page: 'accounts'): void => callback(page)
     ipcRenderer.on('local-notification-navigate', handler)
     return () => ipcRenderer.off('local-notification-navigate', handler)
   },
@@ -811,125 +774,6 @@ const api = {
     ipcRenderer.send('close-confirm-response', action, rememberChoice)
   },
 
-  // ============ 注册功能 API ============
-
-  // 启动自动注册
-  registrationStartAuto: (config: {
-    proxy?: string
-    upstreamProxy?: string
-    strictProxy?: boolean
-    moEmailBaseURL?: string
-    moEmailAPIKey?: string
-    useOutlook?: boolean
-    outlookData?: string
-    useTempMailPlus?: boolean
-    tempMailPlusEmail?: string
-    tempMailPlusEpin?: string
-    tempMailPlusDomain?: string
-    useProton?: boolean
-    protonEmail?: string
-    useGptMail?: boolean
-    gptMailBaseURL?: string
-    gptMailInboxEmail?: string
-    gptMailDomain?: string
-    gptMailPrefix?: string
-    gptMailPrivatePassword?: string
-    password?: string
-    fullName?: string
-    taskId?: string
-  }): Promise<{ success: boolean; result?: unknown; error?: string }> => {
-    return ipcRenderer.invoke('registration-start-auto', config)
-  },
-
-  // 手动模式 Phase1: 初始化 OIDC + 设备授权
-  registrationManualPhase1: (config: {
-    proxy?: string
-    password?: string
-    fullName?: string
-  }): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('registration-manual-phase1', config)
-  },
-
-  // 手动模式 Phase2: 设置邮箱 -> 发送 OTP
-  registrationManualPhase2: (
-    email: string,
-    fullName?: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('registration-manual-phase2', email, fullName)
-  },
-
-  // 手动模式 Phase3: 验证码 -> 完成
-  registrationManualPhase3: (
-    otp: string
-  ): Promise<{ success: boolean; result?: unknown; error?: string }> => {
-    return ipcRenderer.invoke('registration-manual-phase3', otp)
-  },
-
-  // 取消注册
-  registrationCancel: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('registration-cancel')
-  },
-
-  // ============ 代理池 API ============
-  /**
-   * 验活单个代理：使用 undici ProxyAgent 通过指定代理 URL 请求测试 URL
-   * @returns latencyMs / externalIp（如果测试 URL 返回 IP）
-   */
-  proxyPoolValidate: (params: {
-    url: string
-    testUrl?: string
-    timeoutMs?: number
-    upstreamProxy?: string
-  }): Promise<{ success: boolean; latencyMs?: number; externalIp?: string; error?: string }> => {
-    return ipcRenderer.invoke('proxy-pool:validate', params)
-  },
-
-  /** 代理链分阶段诊断（用于定位"上游/目标/端到端"哪一层失败） */
-  proxyPoolDiagnoseChain: (params: {
-    targetUrl: string
-    upstreamProxy: string
-    testHost?: string
-    testPort?: number
-  }): Promise<{
-    success: boolean
-    error?: string
-    diagnose?: {
-      upstreamReachable: boolean
-      upstreamError?: string
-      upstreamRtMs?: number
-      targetReachable: boolean
-      targetError?: string
-      targetRtMs?: number
-      targetStatus?: number
-      targetStatusText?: string
-      targetBodySnippet?: string
-      endToEndOk?: boolean
-      endToEndError?: string
-      endToEndRtMs?: number
-    }
-  }> => {
-    return ipcRenderer.invoke('proxy-pool:diagnose-chain', params)
-  },
-
-  /**
-   * 重启主进程的代理池定时验活调度器。
-   * 改了 autoValidateIntervalMin 后必须调用，否则新间隔要等下次应用启动才生效。
-   */
-  proxyPoolRestartScheduler: (): Promise<{
-    success: boolean
-    running?: boolean
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('proxy-pool:restart-scheduler')
-  },
-
-  /** 订阅主进程定时验活的结果，用于刷新 UI */
-  onProxyPoolValidated: (callback: (payload: { entries: ProxyEntry[] }) => void): (() => void) => {
-    const listener = (_e: unknown, payload: { entries: ProxyEntry[] }): void => callback(payload)
-    ipcRenderer.on('proxy-pool-validated', listener)
-    return () => ipcRenderer.removeListener('proxy-pool-validated', listener)
-  },
-
   // ============ 诊断 API ============
   /** 测试一个 URL 的连通性（GET，5 秒超时，不带代理特殊处理由主进程默认逻辑） */
   diagnoseHttpProbe: (params: {
@@ -1010,265 +854,43 @@ const api = {
     return ipcRenderer.invoke('diagnose:account-liveness', params)
   },
 
-  // 获取注册状态
-  registrationStatus: (): Promise<{ inProgress: boolean }> => {
-    return ipcRenderer.invoke('registration-status')
-  },
-
-  // Proton 邮箱：打开登录窗口（首次需手动登录，之后 session 持久化复用）
-  protonOpenLogin: (
-    proxy?: string
-  ): Promise<{ success: boolean; loggedIn: boolean; error?: string }> => {
-    return ipcRenderer.invoke('proton-open-login', proxy)
-  },
-
-  // Proton 邮箱：查询登录态（不弹窗）
-  protonLoginStatus: (proxy?: string): Promise<{ loggedIn: boolean }> => {
-    return ipcRenderer.invoke('proton-login-status', proxy)
-  },
-
-  // Proton 邮箱：关闭窗口（保留登录态）
-  protonClose: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('proton-close')
-  },
-
-  // 监听注册日志
-  onRegistrationLog: (callback: (msg: string) => void): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      data: string | { message: string; taskId?: string }
-    ): void => {
-      const msg = typeof data === 'string' ? data : data.message
-      callback(msg)
-    }
-    ipcRenderer.on('registration-log', handler)
-    return () => {
-      ipcRenderer.removeListener('registration-log', handler)
-    }
-  },
-
-  /** 监听注册流程的实时 step 事件（用于批量任务的"当前步骤"可视化） */
-  onRegistrationStep: (
-    callback: (data: {
-      taskId?: string
-      event: {
-        name:
-          | 'init'
-          | 'proxy-chain-ready'
-          | 'tls-ready'
-          | 'exit-ip'
-          | 'oidc'
-          | 'device'
-          | 'email-created'
-          | 'portal'
-          | 'workflow-init'
-          | 'submit-email'
-          | 'signup'
-          | 'send-otp'
-          | 'waiting-otp'
-          | 'otp-received'
-          | 'create-identity'
-          | 'set-password'
-          | 'sso-workflow'
-          | 'sso-token'
-          | 'verify-alive'
-          | 'done'
-        ts: number
-        email?: string
-        exitIp?: string
-        extra?: Record<string, unknown>
-      }
-    }) => void
-  ): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      data: Parameters<typeof callback>[0]
-    ): void => {
-      callback(data)
-    }
-    ipcRenderer.on('registration-step', handler)
-    return () => {
-      ipcRenderer.removeListener('registration-step', handler)
-    }
-  },
-
-  // 监听注册完成
-  onRegistrationComplete: (
-    callback: (result: {
-      status: 'success' | 'failed'
-      email: string
-      password?: string
-      error?: string
-      clientId?: string
-      clientSecret?: string
-      refreshToken?: string
-      accessToken?: string
-      region?: string
-      provider?: string
-      verify?: Record<string, unknown>
-    }) => void
-  ): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      result: {
-        status: 'success' | 'failed'
-        email: string
-        password?: string
-        error?: string
-        clientId?: string
-        clientSecret?: string
-        refreshToken?: string
-        accessToken?: string
-        region?: string
-        provider?: string
-        verify?: Record<string, unknown>
-      }
-    ): void => {
-      callback(result)
-    }
-    ipcRenderer.on('registration-complete', handler)
-    return () => {
-      ipcRenderer.removeListener('registration-complete', handler)
-    }
-  },
-
-  // ===== AWS Identity Center 席位管理 =====
-
-  /** 查询凭据保存状态（不回传密钥本体，仅回传尾 4 位用于识别） */
-  idcCredentialStatus: (): Promise<
-    IdcIpcResult<{
-      encryptionAvailable: boolean
-      hasSaved: boolean
-      source?: 'manual' | 'profile'
-      region?: string
-      profile?: string
-      accessKeyIdTail?: string
-    }>
-  > => ipcRenderer.invoke('idc-credential-status'),
-
-  /** 保存凭据配置。系统加密不可用时会失败（拒绝明文落盘 AK/SK） */
-  idcSaveCredentials: (config: IdcCredentialConfig): Promise<IdcIpcResult<{ saved: boolean }>> =>
-    ipcRenderer.invoke('idc-save-credentials', config),
-
-  idcClearCredentials: (): Promise<IdcIpcResult<{ cleared: boolean }>> =>
-    ipcRenderer.invoke('idc-clear-credentials'),
-
-  /** 列出本机 ~/.aws 下可用 profile */
-  idcListProfiles: (): Promise<IdcIpcResult<string[]>> => ipcRenderer.invoke('idc-list-profiles'),
-
-  /** 连通性自检：验证签名可用、能读到 Identity Center 实例 */
-  idcTestConnection: (
-    config: IdcCredentialConfig
-  ): Promise<
-    IdcIpcResult<{
-      identityStoreId: string
-      region: string
-      seatCount: number
-      unsubscribedCount: number
-    }>
-  > => ipcRenderer.invoke('idc-test-connection', config),
-
-  /** 生成席位预览（不触碰 AWS 写操作） */
-  idcPlanSeats: (input: {
-    credentials: IdcCredentialConfig
-    quotas: { tier: string; count: number }[]
-    domains: string
-    avoidExisting?: boolean
-  }): Promise<IdcIpcResult<{ seats: IdcPlannedSeat[]; maxPerPlan: number }>> =>
-    ipcRenderer.invoke('idc-plan-seats', input),
-
-  /** 执行开通：建号 →（可选）发密码邮件 → 挂档位 */
-  idcProvision: (input: {
-    credentials: IdcCredentialConfig
-    seats: IdcPlannedSeat[]
-    sendPasswordEmail: boolean
-    concurrency?: number
-  }): Promise<IdcIpcResult<IdcProvisionSummary>> => ipcRenderer.invoke('idc-provision', input),
-
-  idcCancelProvision: (): Promise<IdcIpcResult<{ cancelled: boolean }>> =>
-    ipcRenderer.invoke('idc-cancel-provision'),
-
-  /** 拉取现有席位全景 */
-  idcInventory: (config: IdcCredentialConfig): Promise<IdcIpcResult<IdcSeatInventory>> =>
-    ipcRenderer.invoke('idc-inventory', config),
-
-  idcChangeTier: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    tier: string
-    concurrency?: number
-  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-change-tier', input),
-
-  idcUnsubscribe: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-unsubscribe', input),
-
-  /** 删除用户（不可逆）。会先尝试取消订阅再删号 */
-  idcDeleteSeats: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-delete-seats', input),
-
-  /** 重发密码设置邮件（链接 1 小时过期） */
-  idcResendPassword: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }): Promise<IdcIpcResult<IdcBatchOpResult[]>> => ipcRenderer.invoke('idc-resend-password', input),
-
-  /** 监听席位操作进度 */
-  onIdcProgress: (callback: (event: IdcProgressEvent) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: IdcProgressEvent): void => {
-      callback(data)
-    }
-    ipcRenderer.on('idc-progress', handler)
-    return () => {
-      ipcRenderer.removeListener('idc-progress', handler)
-    }
-  },
-
-  kskAutomationList: (): Promise<IdcIpcResult<KskAutomationTaskView[]>> =>
+  kskAutomationList: (): Promise<IpcResult<KskAutomationTaskView[]>> =>
     ipcRenderer.invoke('ksk-automation-list'),
 
   kskAutomationCreate: (
     input: KskAutomationTaskInput
-  ): Promise<IdcIpcResult<KskAutomationTaskView[]>> =>
+  ): Promise<IpcResult<KskAutomationTaskView[]>> =>
     ipcRenderer.invoke('ksk-automation-create', input),
 
   kskAutomationUpdate: (
     taskId: string,
     input: KskAutomationTaskInput
-  ): Promise<IdcIpcResult<KskAutomationTaskView[]>> =>
+  ): Promise<IpcResult<KskAutomationTaskView[]>> =>
     ipcRenderer.invoke('ksk-automation-update', taskId, input),
 
   kskAutomationSetEnabled: (
     taskId: string,
     enabled: boolean
-  ): Promise<IdcIpcResult<KskAutomationTaskView[]>> =>
+  ): Promise<IpcResult<KskAutomationTaskView[]>> =>
     ipcRenderer.invoke('ksk-automation-set-enabled', taskId, enabled),
 
-  kskAutomationDelete: (taskId: string): Promise<IdcIpcResult<KskAutomationTaskView[]>> =>
+  kskAutomationDelete: (taskId: string): Promise<IpcResult<KskAutomationTaskView[]>> =>
     ipcRenderer.invoke('ksk-automation-delete', taskId),
 
-  kskAutomationSyncNow: (taskId: string): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
+  kskAutomationSyncNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
     ipcRenderer.invoke('ksk-automation-sync-now', taskId),
 
-  kskAutomationSyncLocalAdminNow: (
-    taskId: string
-  ): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
+  kskAutomationSyncLocalAdminNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
     ipcRenderer.invoke('ksk-automation-sync-local-admin-now', taskId),
 
   /** 立刻对目标分组全量发消息验活，删掉判死的号（同时清掉反代上的对应凭据）。 */
-  kskAutomationCleanupNow: (taskId: string): Promise<IdcIpcResult<KskAutomationStatusEvent>> =>
+  kskAutomationCleanupNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
     ipcRenderer.invoke('ksk-automation-cleanup-now', taskId),
 
   /** 把单个账号的凭据推送到本机 Admin（复用任务里已保存的 Admin URL / API Key）。 */
   kskAutomationPushAccountToLocalAdmin: (
     candidate: LocalAdminPushCandidate
-  ): Promise<IdcIpcResult<LocalAdminPushResult>> =>
+  ): Promise<IpcResult<LocalAdminPushResult>> =>
     ipcRenderer.invoke('ksk-automation-push-account-to-local-admin', candidate),
 
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void): (() => void) => {
@@ -1285,125 +907,15 @@ const api = {
     return () => ipcRenderer.removeListener('ksk-automation-accounts-changed', handler)
   },
 
-  kskHunterSnapshot: (): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-snapshot'),
-
-  kskHunterUpdateConfig: (
-    config: Partial<KskHunterConfig>,
-    secrets?: KskHunterSecretInput
-  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-update-config', config, secrets),
-
-  kskHunterCreateLink: (input: KskHunterLinkInput): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-create-link', input),
-
-  kskHunterUpdateLink: (
-    linkId: string,
-    input: KskHunterLinkInput
-  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-update-link', linkId, input),
-
-  kskHunterSetLinkEnabled: (
-    linkId: string,
-    enabled: boolean
-  ): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-set-link-enabled', linkId, enabled),
-
-  kskHunterDeleteLink: (linkId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-delete-link', linkId),
-
-  kskHunterRunNow: (): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-run-now'),
-
-  kskHunterRetryDelivery: (deliveryId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-retry-delivery', deliveryId),
-
-  kskHunterDeleteDelivery: (deliveryId: string): Promise<IdcIpcResult<KskHunterSnapshot>> =>
-    ipcRenderer.invoke('ksk-hunter-delete-delivery', deliveryId),
-
-  kskHunterReport: (days?: number): Promise<IdcIpcResult<HunterReport>> =>
-    ipcRenderer.invoke('ksk-hunter-report', days),
-
-  kskHunterRevealReportFile: (): Promise<IdcIpcResult<string>> =>
-    ipcRenderer.invoke('ksk-hunter-reveal-report-file'),
-
-  kskHunterLedgerReport: (
-    days?: number,
-    sort?: KskLedgerSort
-  ): Promise<IdcIpcResult<KskLedgerReport>> =>
-    ipcRenderer.invoke('ksk-hunter-ledger-report', days, sort),
-
-  kskHunterClearLedger: (): Promise<IdcIpcResult<KskLedgerReport>> =>
-    ipcRenderer.invoke('ksk-hunter-clear-ledger'),
-
-  kskHunterRevealLedgerFile: (): Promise<IdcIpcResult<string>> =>
-    ipcRenderer.invoke('ksk-hunter-reveal-ledger-file'),
-
-  /* ---- 下游对账 ---- */
-
-  downstreamReport: (date?: string, days?: number): Promise<IdcIpcResult<DownstreamReport>> =>
-    ipcRenderer.invoke('downstream-settlement-report', date, days),
-
-  /** 导出某天的 CSV，返回文件路径。纯读，不推进结算锚点，可以随便点。 */
-  downstreamExportDay: (date: string): Promise<IdcIpcResult<string>> =>
-    ipcRenderer.invoke('downstream-settlement-export-day', date),
-
-  downstreamSettleNow: (): Promise<IdcIpcResult<DownstreamReport>> =>
-    ipcRenderer.invoke('downstream-settlement-settle-now'),
-
-  /** 选 CSV 导出目录；用户取消时 data 为 null。 */
-  downstreamPickCsvDir: (): Promise<IdcIpcResult<string | null>> =>
-    ipcRenderer.invoke('downstream-settlement-pick-csv-dir'),
-
-  downstreamOpenCsvDir: (): Promise<IdcIpcResult<string>> =>
-    ipcRenderer.invoke('downstream-settlement-open-csv-dir'),
-
-  onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: KskHunterStatusEvent): void => {
-      callback(data)
-    }
-    ipcRenderer.on('ksk-hunter-status-changed', handler)
-    return () => ipcRenderer.removeListener('ksk-hunter-status-changed', handler)
-  },
-
-  localAdminStatsSnapshot: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
-    ipcRenderer.invoke('local-admin-stats-snapshot'),
-
-  localAdminStatsRefreshNow: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
-    ipcRenderer.invoke('local-admin-stats-refresh-now'),
-
-  localAdminStatsRefreshUsage: (): Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>> =>
-    ipcRenderer.invoke('local-admin-stats-refresh-usage'),
-
-  /** 删掉本机 Admin 上额度已耗尽的凭据，并连带清掉本地账号库里的对应账号。 */
-  localAdminStatsCleanupExhausted: (): Promise<IdcIpcResult<LocalAdminExhaustedCleanupSummary>> =>
-    ipcRenderer.invoke('local-admin-stats-cleanup-exhausted'),
-
-  localAdminStatsClearSamples: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
-    ipcRenderer.invoke('local-admin-stats-clear-samples'),
-
-  localAdminStatsClearBuckets: (): Promise<IdcIpcResult<LocalAdminStatsSnapshot>> =>
-    ipcRenderer.invoke('local-admin-stats-clear-buckets'),
-
-  onLocalAdminStatsChanged: (
-    callback: (snapshot: LocalAdminStatsSnapshot) => void
-  ): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: LocalAdminStatsSnapshot): void => {
-      callback(data)
-    }
-    ipcRenderer.on('local-admin-stats-changed', handler)
-    return () => ipcRenderer.removeListener('local-admin-stats-changed', handler)
-  },
-
   // ============ Cursor 账号管理 ============
-  cursorAccountsList: (): Promise<IdcIpcResult<CursorAccount[]>> =>
+  cursorAccountsList: (): Promise<IpcResult<CursorAccount[]>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.list),
 
   /** 本机 Cursor 当前登录的号在账号库里的 id；没匹配上为 null。 */
-  cursorAccountsCurrentId: (): Promise<IdcIpcResult<string | null>> =>
+  cursorAccountsCurrentId: (): Promise<IpcResult<string | null>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.currentId),
 
-  cursorAccountsRemove: (ids: string[]): Promise<IdcIpcResult<void>> =>
+  cursorAccountsRemove: (ids: string[]): Promise<IpcResult<void>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.remove, ids),
 
   // 下面几个新增入口的 tags 是「本次添加要打的标签」，入库时一并写上，不用再单独改一次
@@ -1411,16 +923,16 @@ const api = {
   cursorAccountsImportJson: (
     json: string,
     tags: string[] = []
-  ): Promise<IdcIpcResult<CursorAccount[]>> =>
+  ): Promise<IpcResult<CursorAccount[]>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importJson, json, tags),
 
-  cursorAccountsImportLocal: (tags: string[] = []): Promise<IdcIpcResult<CursorAccount>> =>
+  cursorAccountsImportLocal: (tags: string[] = []): Promise<IpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal, tags),
 
   /** 从本机 cockpit-tools（~/.antigravity_cockpit）整批导入 Cursor 账号。 */
   cursorAccountsImportCockpit: (
     tags: string[] = []
-  ): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+  ): Promise<IpcResult<CursorCockpitImportSummary>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importCockpit, tags),
 
   /**
@@ -1430,51 +942,51 @@ const api = {
   cursorAccountsAddToken: (
     input: string,
     tags: string[] = []
-  ): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+  ): Promise<IpcResult<CursorCredentialImportSummary>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, input, tags),
 
-  cursorAccountsExport: (ids: string[]): Promise<IdcIpcResult<string>> =>
+  cursorAccountsExport: (ids: string[]): Promise<IpcResult<string>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.export, ids),
 
-  cursorAccountsRefresh: (id: string): Promise<IdcIpcResult<CursorAccount>> =>
+  cursorAccountsRefresh: (id: string): Promise<IpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refresh, id),
 
-  cursorAccountsRefreshAll: (): Promise<IdcIpcResult<CursorRefreshAllSummary>> =>
+  cursorAccountsRefreshAll: (): Promise<IpcResult<CursorRefreshAllSummary>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refreshAll),
 
-  cursorAccountsUpdateTags: (id: string, tags: string[]): Promise<IdcIpcResult<CursorAccount>> =>
+  cursorAccountsUpdateTags: (id: string, tags: string[]): Promise<IpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.updateTags, id, tags),
 
   /** 切号：把账号写进本机 Cursor 的登录态。Cursor 在运行时先返回 needsClose 等用户确认。 */
   cursorAccountsInject: (
     id: string,
     options?: CursorInjectOptions
-  ): Promise<IdcIpcResult<CursorInjectResult>> =>
+  ): Promise<IpcResult<CursorInjectResult>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.inject, id, options),
 
-  cursorAccountsOAuthStart: (): Promise<IdcIpcResult<CursorOAuthStartResult>> =>
+  cursorAccountsOAuthStart: (): Promise<IpcResult<CursorOAuthStartResult>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthStart),
 
   /** 阻塞到用户在浏览器完成登录（最长 5 分钟），成功即返回入库后的账号。 */
   cursorAccountsOAuthComplete: (
     loginId: string,
     tags: string[] = []
-  ): Promise<IdcIpcResult<CursorAccount>> =>
+  ): Promise<IpcResult<CursorAccount>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, loginId, tags),
 
-  cursorAccountsOAuthCancel: (loginId?: string): Promise<IdcIpcResult<null>> =>
+  cursorAccountsOAuthCancel: (loginId?: string): Promise<IpcResult<null>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthCancel, loginId),
 
-  cursorAccountsRevealStore: (): Promise<IdcIpcResult<string>> =>
+  cursorAccountsRevealStore: (): Promise<IpcResult<string>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.storePath),
 
-  cursorAccountsGetSettings: (): Promise<IdcIpcResult<CursorAutoRefreshSettings>> =>
+  cursorAccountsGetSettings: (): Promise<IpcResult<CursorAutoRefreshSettings>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsGet),
 
   /** 改后台自动刷新的开关/间隔，主进程调度器随即按新设置重排。 */
   cursorAccountsUpdateSettings: (
     patch: Partial<CursorAutoRefreshSettings>
-  ): Promise<IdcIpcResult<CursorAutoRefreshSettings>> =>
+  ): Promise<IpcResult<CursorAutoRefreshSettings>> =>
     ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsUpdate, patch),
 
   onCursorAccountsChanged: (callback: () => void): (() => void) => {
@@ -1484,37 +996,37 @@ const api = {
   },
 
   // ============ Grok Bot 账号管理（切号 + 同步 relay） ============
-  grokAccountsList: (): Promise<IdcIpcResult<GrokAccountView[]>> =>
+  grokAccountsList: (): Promise<IpcResult<GrokAccountView[]>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.list),
 
   /** 本机 Grok Bot 当前激活账号的 scope；未登录为 null。 */
-  grokAccountsCurrentScope: (): Promise<IdcIpcResult<string | null>> =>
+  grokAccountsCurrentScope: (): Promise<IpcResult<string | null>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.currentScope),
 
   /** 切号：（不在 Grok 里就先从 Cursor 账号库写入）改 active + 重启 Grok + 同步 relay。Grok 在运行时先返回 needsClose 等确认。 */
   grokAccountsSwitch: (
     scope: string,
     options?: { closeGrok?: boolean }
-  ): Promise<IdcIpcResult<GrokSwitchResult>> =>
+  ): Promise<IpcResult<GrokSwitchResult>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.switch, scope, options),
 
   /** 从 Grok 客户端移除一个号（Cursor 账号库不动）。Grok 在运行时先返回 needsClose 等确认。 */
   grokAccountsRemove: (
     scope: string,
     options?: { closeGrok?: boolean }
-  ): Promise<IdcIpcResult<GrokRemoveResult>> =>
+  ): Promise<IpcResult<GrokRemoveResult>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.remove, scope, options),
 
   /** 只把反代 relay 配置重新指向某个号的 box 并探活，不重启客户端。 */
-  grokAccountsSyncRelay: (scope: string): Promise<IdcIpcResult<GrokRelayStatus>> =>
+  grokAccountsSyncRelay: (scope: string): Promise<IpcResult<GrokRelayStatus>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.syncRelay, scope),
 
   /** 探活：本机反代当前能否通过 relay 打到 box。 */
-  grokAccountsRelayStatus: (): Promise<IdcIpcResult<GrokRelayStatus>> =>
+  grokAccountsRelayStatus: (): Promise<IpcResult<GrokRelayStatus>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.relayStatus),
 
   /** 确保某个号的 Box 上有 relay 路由：没装就让它的 Bot 去装并等到探针通过。可能跑几分钟，进度走下面的事件。 */
-  grokAccountsEnsureRelayRoute: (scope: string): Promise<IdcIpcResult<GrokRelayInstallResult>> =>
+  grokAccountsEnsureRelayRoute: (scope: string): Promise<IpcResult<GrokRelayInstallResult>> =>
     ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.ensureRelayRoute, scope),
 
   onGrokRelayInstallProgress: (

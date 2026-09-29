@@ -11,8 +11,6 @@ export const KSK_AUTOMATION_TASK_TYPE = 'ksk_pull' as const
  *
  * 全量验活每个号要烧几个 token，间隔太短纯属浪费；但号池挂号（封禁、订阅到期）
  * 只能靠它抓出来，间隔太长反代就会长时间拿着废号打上游。30 分钟是个折中。
- *
- * 额度耗尽这种最常见的失效不依赖它——那条走 balance，由反代统计每 60 秒免费采一次。
  */
 export const KSK_CLEANUP_INTERVAL_MINUTES = 30
 
@@ -52,13 +50,6 @@ export interface KskAutomationConfig {
   cleanupPeriodicEnabled: boolean
   /** 周期性全量验活的间隔（分钟）。 */
   cleanupIntervalMinutes: number
-  /**
-   * 反代统计每轮采到用量后，自动删掉额度已耗尽的凭据（含本地账号库里的对应账号）。
-   *
-   * 与全量验活互补：这条免费（balance 是只读计量）、60 秒就能发现，但只认额度耗尽；
-   * 封禁与认证失效仍要靠发消息验活。
-   */
-  autoDeleteExhausted: boolean
   /** 验活模型 ID；留空表示自动挑最便宜的可用模型。 */
   livenessModel: string
   /** 验活测试消息；留空表示用 KSK_LIVENESS_PROBE_MESSAGE。 */
@@ -195,7 +186,6 @@ export const DEFAULT_KSK_AUTOMATION_CONFIG: KskAutomationConfig = {
   cleanupInvalidOnAdd: true,
   cleanupPeriodicEnabled: true,
   cleanupIntervalMinutes: KSK_CLEANUP_INTERVAL_MINUTES,
-  autoDeleteExhausted: true,
   livenessModel: '',
   livenessMessage: '',
   emailEnabled: false,

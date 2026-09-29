@@ -12,8 +12,8 @@
 import {
   resolveSubscriptionTypeFromTitle,
   type SubscriptionType
-} from '../../shared/localAdminStats'
-import { fetchLocalAdminUsage } from '../localAdminStats/statsClient'
+} from '../../shared/subscriptionType'
+import { fetchLocalAdminUsage } from './adminBalanceClient'
 import { requestJson, resolveLocalAdminApiBase } from '../kskAutomation/localAdminClient'
 
 type LocalAdminStatsTarget = Parameters<typeof fetchLocalAdminUsage>[0]
@@ -72,7 +72,7 @@ export async function syncManagedAccountFromAdmin(
   now: number = Date.now(),
   fresh: boolean = false
 ): Promise<ManagedAccountSyncResult> {
-  const { usage, errors } = await fetchLocalAdminUsage(target, [credentialId], undefined, fresh)
+  const { usage, errors } = await fetchLocalAdminUsage(target, [credentialId], fresh)
   const parsed = usage.get(credentialId)
   if (!parsed) {
     return {

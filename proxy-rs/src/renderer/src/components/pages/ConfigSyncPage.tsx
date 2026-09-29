@@ -6,29 +6,17 @@ import {
   FileJson,
   ShieldAlert,
   CheckCircle2,
-  Trash2,
-  RefreshCw,
   AlertTriangle
 } from 'lucide-react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  Button,
-  Label,
-  Switch,
-  PageHeader,
-  askConfirm
-} from '../ui'
+import { Card, CardContent, CardHeader, CardTitle, Button, Label, Switch, PageHeader } from '../ui'
 import { APP_NAME, APP_PACKAGE_NAME, APP_PORTABLE_CONFIG_ID } from '../../../../shared/appIdentity'
 
 /**
  * 配置同步页面
  *
- * 把"非敏感的应用配置"（代理池、注册模板、限速/定时/配额、过滤偏好等）
+ * 把"非敏感的应用配置"（主题、语言、自动刷新等 App 设置）
  * 导出为单一 JSON 文件，方便在多台电脑之间同步。
  *
  * 敏感数据（账号凭据、refreshToken 等）不会被导出，
@@ -39,17 +27,8 @@ interface PortableConfig {
   version: 1 | 2
   exportedAt: string
   app: string
-  /** 代理池条目（脱敏：密码字段会被打码） */
-  proxyPool?: Array<Record<string, unknown>>
-  proxyPoolConfig?: Record<string, unknown>
   /** v1 遗留字段：读取时忽略，避免恢复外部通知端点。 */
   webhooks?: Array<Record<string, unknown>>
-  /** RegisterPage 配置（kiro-register-config） */
-  registerConfig?: Record<string, unknown>
-  /** 注册模板（kiro-register-templates） */
-  registerTemplates?: Array<Record<string, unknown>>
-  /** 其它注册相关 localStorage 设置 */
-  registerLocalStorage?: Record<string, string>
   /** App 设置（部分非敏感字段） */
   appSettings?: {
     theme?: string
@@ -67,16 +46,6 @@ interface PortableConfig {
   }
 }
 
-const REGISTER_LS_KEYS = [
-  'kiro-register-ratelimit-enabled',
-  'kiro-register-ratelimit-max',
-  'kiro-register-autobackoff',
-  'kiro-register-dailyquota-limit',
-  'kiro-register-schedule-enabled',
-  'kiro-register-schedule-time',
-  'kiro-register-mixed-sources'
-]
-
 export function ConfigSyncPage(): React.ReactNode {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -84,13 +53,7 @@ export function ConfigSyncPage(): React.ReactNode {
 
   // 导出选项（默认全开）
   const [opts, setOpts] = useState({
-    proxyPool: true,
-    registerConfig: true,
-    registerTemplates: true,
-    registerSettings: true,
     appSettings: true,
-    /** 包含代理密码？关闭时只导出 host:port，更安全用于分享 */
-    includeProxyCredentials: false,
     /** 启用密码加密：使用用户密码 + Web Crypto AES-GCM */
     encrypt: false
   })
@@ -109,46 +72,6 @@ export function ConfigSyncPage(): React.ReactNode {
       version: 2,
       exportedAt: new Date().toISOString(),
       app: APP_PORTABLE_CONFIG_ID
-    }
-
-    if (opts.proxyPool && store.proxyPool.size > 0) {
-      payload.proxyPool = Array.from(store.proxyPool.values()).map((p) => {
-        const out: Record<string, unknown> = { ...p }
-        if (!opts.includeProxyCredentials) {
-          // 脱敏：密码 + url 中的密码部分
-          delete out.password
-          out.url = p.url.replace(/:([^:@/]+)@/, ':***@')
-        }
-        return out
-      })
-      payload.proxyPoolConfig = { ...store.proxyPoolConfig }
-    }
-
-    if (opts.registerConfig) {
-      try {
-        const raw = localStorage.getItem('kiro-register-config')
-        if (raw) payload.registerConfig = JSON.parse(raw)
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (opts.registerTemplates) {
-      try {
-        const raw = localStorage.getItem('kiro-register-templates')
-        if (raw) payload.registerTemplates = JSON.parse(raw)
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (opts.registerSettings) {
-      const reg: Record<string, string> = {}
-      for (const k of REGISTER_LS_KEYS) {
-        const v = localStorage.getItem(k)
-        if (v != null) reg[k] = v
-      }
-      payload.registerLocalStorage = reg
     }
 
     if (opts.appSettings) {
@@ -229,78 +152,9 @@ export function ConfigSyncPage(): React.ReactNode {
         const counts: Record<string, number> = {}
         let ignoredLegacyWebhooks = 0
 
-        // 代理池
-        if (data.proxyPool && data.proxyPool.length > 0) {
-          let added = 0
-          for (const p of data.proxyPool) {
-            // 跳过脱敏过的密码
-            if (
-              typeof (p as { url?: string }).url === 'string' &&
-              !(p as { url: string }).url.includes('***')
-            ) {
-              const id = store.addProxy((p as { url: string }).url, {
-                label: (p as { label?: string }).label,
-                source: 'import-config',
-                tags: (p as { tags?: string[] }).tags
-              })
-              if (id) added++
-            } else if ((p as { host?: string }).host && (p as { port?: number }).port) {
-              // 脱敏的代理：只有 host:port 时按 http 默认导入
-              const proto = (p as { protocol?: string }).protocol || 'http'
-              const url = `${proto}://${(p as { host: string }).host}:${(p as { port: number }).port}`
-              const id = store.addProxy(url, {
-                label: (p as { label?: string }).label,
-                source: 'import-config-masked',
-                tags: (p as { tags?: string[] }).tags
-              })
-              if (id) added++
-            }
-          }
-          counts['代理池'] = added
-        }
-        if (data.proxyPoolConfig) {
-          store.setProxyPoolConfig(data.proxyPoolConfig as Partial<typeof store.proxyPoolConfig>)
-        }
-
         // v1 Webhook 配置已退役；不读取、不恢复任何端点或凭据。
         if (data.webhooks && data.webhooks.length > 0) {
           ignoredLegacyWebhooks = data.webhooks.length
-        }
-
-        // 注册配置
-        if (data.registerConfig) {
-          try {
-            localStorage.setItem('kiro-register-config', JSON.stringify(data.registerConfig))
-            counts['注册配置'] = 1
-          } catch {
-            /* ignore */
-          }
-        }
-
-        // 注册模板
-        if (data.registerTemplates) {
-          try {
-            localStorage.setItem('kiro-register-templates', JSON.stringify(data.registerTemplates))
-            counts['注册模板'] = data.registerTemplates.length
-          } catch {
-            /* ignore */
-          }
-        }
-
-        // 注册相关 localStorage
-        if (data.registerLocalStorage) {
-          let n = 0
-          for (const [k, v] of Object.entries(data.registerLocalStorage)) {
-            if (REGISTER_LS_KEYS.includes(k)) {
-              try {
-                localStorage.setItem(k, v)
-                n++
-              } catch {
-                /* ignore */
-              }
-            }
-          }
-          counts['注册偏好'] = n
         }
 
         // App 设置
@@ -341,8 +195,8 @@ export function ConfigSyncPage(): React.ReactNode {
         title={isEn ? 'Config Sync' : '配置同步'}
         description={
           isEn
-            ? 'Export & import non-sensitive app config (proxy pool, register templates, app preferences) for multi-device sync.'
-            : '导出/导入非敏感配置（代理池、注册模板、应用偏好），用于多设备同步'
+            ? 'Export & import non-sensitive app preferences for multi-device sync.'
+            : '导出/导入非敏感的应用偏好，用于多设备同步'
         }
       />
 
@@ -359,11 +213,6 @@ export function ConfigSyncPage(): React.ReactNode {
                 ? 'This export does NOT include account credentials, refresh tokens, or other sensitive secrets — use "Account Export" (under Accounts page) for those.'
                 : '本页导出"不包含"账号凭据、Refresh Token 等敏感数据。账号导出请走"账户管理 → 导出"专用通道。'}
             </p>
-            <p className="text-muted-foreground">
-              {isEn
-                ? 'Tip: keep "Include proxy credentials" OFF when sharing the file with others.'
-                : '提示：分享给他人时，建议关闭"包含代理密码"选项，密码会被打码。'}
-            </p>
           </div>
         </CardContent>
       </Card>
@@ -379,26 +228,6 @@ export function ConfigSyncPage(): React.ReactNode {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-2 text-sm">
             <ExportToggle
-              label={`${isEn ? 'Proxy Pool' : '代理池'} (${store.proxyPool.size})`}
-              checked={opts.proxyPool}
-              onChange={(v) => setOpts((p) => ({ ...p, proxyPool: v }))}
-            />
-            <ExportToggle
-              label={isEn ? 'Register Config' : '注册配置'}
-              checked={opts.registerConfig}
-              onChange={(v) => setOpts((p) => ({ ...p, registerConfig: v }))}
-            />
-            <ExportToggle
-              label={isEn ? 'Register Templates' : '注册模板'}
-              checked={opts.registerTemplates}
-              onChange={(v) => setOpts((p) => ({ ...p, registerTemplates: v }))}
-            />
-            <ExportToggle
-              label={isEn ? 'Register Preferences' : '注册偏好（限速/定时/配额等）'}
-              checked={opts.registerSettings}
-              onChange={(v) => setOpts((p) => ({ ...p, registerSettings: v }))}
-            />
-            <ExportToggle
               label={
                 isEn ? 'App Settings (theme/lang/auto-refresh)' : 'App 设置（主题/语言/自动刷新）'
               }
@@ -408,22 +237,6 @@ export function ConfigSyncPage(): React.ReactNode {
           </div>
 
           <div className="border-t pt-3 flex items-center gap-3 flex-wrap">
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={opts.includeProxyCredentials}
-                onCheckedChange={(v) => setOpts((p) => ({ ...p, includeProxyCredentials: v }))}
-              />
-              <Label className="text-xs cursor-pointer flex items-center gap-1.5">
-                {opts.includeProxyCredentials ? (
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-                ) : (
-                  <ShieldAlert className="h-3.5 w-3.5 text-muted-foreground" />
-                )}
-                {isEn
-                  ? 'Include proxy credentials (NOT recommended for sharing)'
-                  : '包含代理密码（分享时不建议）'}
-              </Label>
-            </div>
             {/* C4: 加密导出 */}
             <div className="flex items-center gap-2">
               <Switch
@@ -540,44 +353,6 @@ export function ConfigSyncPage(): React.ReactNode {
               )}
             </div>
           )}
-        </CardContent>
-      </Card>
-
-      {/* 危险操作 */}
-      <Card className="border-red-200 dark:border-red-800">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm flex items-center gap-2 text-red-600">
-            <Trash2 className="h-4 w-4" />
-            {isEn ? 'Danger Zone' : '危险操作'}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-red-600 border-red-200 hover:bg-red-50 dark:hover:bg-red-950/20"
-            onClick={async () => {
-              if (
-                !(await askConfirm({
-                  title: isEn ? 'Reset register page preferences?' : '重置注册页所有偏好？',
-                  description: isEn
-                    ? 'Rate limit, schedule, quota, mixed sources, blacklist and templates return to defaults. Account data is not affected.'
-                    : '限速、定时、配额、混合源、黑名单与模板将恢复默认值。不影响账号数据。',
-                  confirmText: isEn ? 'Reset' : '重置',
-                  cancelText: isEn ? 'Cancel' : '取消',
-                  tone: 'warning'
-                }))
-              )
-                return
-              for (const k of REGISTER_LS_KEYS) localStorage.removeItem(k)
-              localStorage.removeItem('kiro-register-templates')
-              localStorage.removeItem('kiro-register-email-blacklist')
-              alert(isEn ? 'Done. Please reload the page.' : '已重置，请刷新页面')
-            }}
-          >
-            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
-            {isEn ? 'Reset Register Preferences' : '重置注册页偏好'}
-          </Button>
         </CardContent>
       </Card>
     </div>

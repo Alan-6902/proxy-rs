@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import type { AdminManagedAccountEntry } from '../../shared/adminManaged'
 import { reloadAdminManagedIds, setAdminManagedSource } from '../adminManaged/gate'
 import { AccountDb, type AccountDbRow } from './db'
-import { AccountDataBridge, type BridgeDeps, type RawStore } from './bridge'
+import { AccountDataBridge, type RawStore } from './bridge'
 import { toAccount } from './projection'
 import { BACKUP_INTERVAL_MS, backupAccountDb } from './backup'
 import { ensureFresh, type KiroRsAdminTarget } from './adminApi'
@@ -126,12 +126,10 @@ export function accountDbBridge(): AccountDataBridge | null {
 export function activateAccountDb(input: {
   config: AccountDbConfig
   rawStore: RawStore
-  proxyUrlFor?: BridgeDeps['proxyUrlFor']
 }): AccountDataBridge {
   const connection = readKiroRsConnection(input.config.kiroRs.configPath, input.config.kiroRs.port)
   const db = new AccountDb(input.config.dbPath)
   const bridge = new AccountDataBridge(db, input.rawStore, {
-    proxyUrlFor: input.proxyUrlFor,
     onPending: () => schedulePendingSync()
   })
   runtime = {
@@ -171,7 +169,7 @@ function schedulePendingSync(): void {
   }, 1000)
 }
 
-/** 把待导入账号交给 kiro-rs、同步代理绑定。kiro-rs 未就绪时跳过，就绪后会再调一次。 */
+/** 把待导入账号交给 kiro-rs。kiro-rs 未就绪时跳过，就绪后会再调一次。 */
 export async function syncAccountDbPending(): Promise<void> {
   const target = accountDbAdminTarget()
   if (!runtime || !target) return
@@ -181,12 +179,6 @@ export async function syncAccountDbPending(): Promise<void> {
   }
   for (const failure of result.failed) {
     console.warn(`[AccountDb] 账号 ${failure.id} 暂未导入 kiro-rs：${failure.reason}`)
-  }
-  try {
-    const updated = await runtime.bridge.syncProxyBindings(target)
-    if (updated > 0) console.log(`[AccountDb] 已同步 ${updated} 个账号的代理绑定到 kiro-rs`)
-  } catch (error) {
-    console.warn('[AccountDb] 同步代理绑定失败：', error instanceof Error ? error.message : error)
   }
 }
 

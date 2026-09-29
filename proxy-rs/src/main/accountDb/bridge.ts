@@ -12,13 +12,7 @@
 
 import type { AccountDb, AccountDbRow } from './db'
 import { toAccount, toImportRequest, toUiFields, type AccountLike } from './projection'
-import {
-  importAccount,
-  purgeAccount,
-  setProxy,
-  type AdminFetch,
-  type KiroRsAdminTarget
-} from './adminApi'
+import { importAccount, purgeAccount, type AdminFetch, type KiroRsAdminTarget } from './adminApi'
 
 export const ACCOUNT_DATA_KEY = 'accountData'
 
@@ -32,32 +26,12 @@ export interface RawStore {
 export interface BridgeDeps {
   /** 待导入账号出现时通知（由调用方安排一次 syncPending） */
   onPending?: () => void
-  /** 账号绑定的代理 URL（从 accountData 的代理池绑定解析） */
-  proxyUrlFor?: (accountId: string, data: AccountData) => string | undefined
   fetchImpl?: AdminFetch
 }
 
 export interface PendingSyncResult {
   imported: string[]
   failed: Array<{ id: string; reason: string }>
-}
-
-function parseMetadata(value: string | null | undefined): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value ?? '{}')
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function parseTags(value: string | null | undefined): string[] {
-  try {
-    const parsed = JSON.parse(value ?? '[]')
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
-  } catch {
-    return []
-  }
 }
 
 export class AccountDataBridge {
@@ -145,7 +119,7 @@ export class AccountDataBridge {
     const result: PendingSyncResult = { imported: [], failed: [] }
     const base = this.readBase()
     for (const [id, account] of Object.entries(base.accounts ?? {})) {
-      const request = toImportRequest({ ...account, id }, this.deps.proxyUrlFor?.(id, base))
+      const request = toImportRequest({ ...account, id })
       if (!request.ok) {
         result.failed.push({ id, reason: request.reason })
         continue
@@ -186,50 +160,6 @@ export class AccountDataBridge {
     }
     this.removePending(ids.filter((id) => pendingIds.has(id)))
     return failed
-  }
-
-  /**
-   * 账号绑定的代理同步给 kiro-rs（它负责刷新与反代请求，必须走同一出口）。
-   *
-   * 解绑时只清除"proxy 自己设过"的代理：迁移自 credentials.json 的账号可能本来就配了
-   * 代理，proxy 侧代理池里没有对应条目，不能因此把它抹掉。标记存在 account_ui 的
-   * metadata 里（proxySyncedByProxyRs）。
-   */
-  async syncProxyBindings(target: KiroRsAdminTarget): Promise<number> {
-    if (!this.deps.proxyUrlFor) return 0
-    const base = this.readBase()
-    let updated = 0
-    for (const row of this.db.listRows()) {
-      const desired = this.deps.proxyUrlFor(row.accountUuid, base)
-      const metadata = parseMetadata(row.metadataJson)
-      const managed = metadata.proxySyncedByProxyRs === true
-      if (desired && desired !== row.proxyUrl) {
-        await setProxy(target, row.id, desired, this.deps.fetchImpl)
-        this.writeMetadataFlag(row, metadata, true)
-        updated++
-      } else if (!desired && row.proxyUrl && managed) {
-        await setProxy(target, row.id, null, this.deps.fetchImpl)
-        this.writeMetadataFlag(row, metadata, false)
-        updated++
-      }
-    }
-    return updated
-  }
-
-  private writeMetadataFlag(
-    row: AccountDbRow,
-    metadata: Record<string, unknown>,
-    synced: boolean
-  ): void {
-    const next = { ...metadata }
-    if (synced) next.proxySyncedByProxyRs = true
-    else delete next.proxySyncedByProxyRs
-    this.db.writeUi(row.id, {
-      nickname: row.nickname,
-      groupId: row.groupId,
-      tags: parseTags(row.tagsJson),
-      metadata: next
-    })
   }
 }
 

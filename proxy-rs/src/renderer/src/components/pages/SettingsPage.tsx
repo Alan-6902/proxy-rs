@@ -1150,25 +1150,12 @@ export function SettingsPage() {
 }
 
 /**
- * 配置同步卡片：把所有"非敏感"配置（代理池、模板、限速、定时、各种 localStorage）打包导出/导入。
+ * 配置同步卡片：把所有"非敏感"的界面偏好（localStorage）打包导出/导入。
  * 不包含：账号 token / 私密凭据。
  */
 function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
-  const proxyPool = useAccountsStore((s) => s.proxyPool)
-  const proxyPoolConfig = useAccountsStore((s) => s.proxyPoolConfig)
-
   // 收集所有可同步的 localStorage key
   const COLLECTED_LS_KEYS = [
-    'kiro-register-config',
-    'kiro-register-history', // 可选：用户可决定要不要
-    'kiro-register-templates',
-    'kiro-register-ratelimit-enabled',
-    'kiro-register-ratelimit-max',
-    'kiro-register-autobackoff',
-    'kiro-register-dailyquota-limit',
-    'kiro-register-schedule-enabled',
-    'kiro-register-schedule-time',
-    'kiro-register-mixed-sources',
     'accounts_viewMode',
     'accounts_activeGroupTab',
     'systemLogs_displayLimit',
@@ -1187,9 +1174,6 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
       version: 2,
       type: APP_ACCOUNT_EXPORT_TYPE,
       exportedAt: Date.now(),
-      // 代理池条目（不含敏感账号）
-      proxyPool: Object.fromEntries(proxyPool),
-      proxyPoolConfig,
       // 各种 localStorage
       localStorage: localData
     }
@@ -1218,8 +1202,8 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
         !(await askConfirm({
           title: isEn ? 'Overwrite existing configuration?' : '确定覆盖现有配置？',
           description: isEn
-            ? 'Proxy pool, register templates and app preferences will be replaced by the imported file.'
-            : '代理池、注册模板与应用偏好将被导入文件中的内容替换。',
+            ? 'App preferences will be replaced by the imported file.'
+            : '应用偏好将被导入文件中的内容替换。',
           confirmText: isEn ? 'Overwrite' : '覆盖',
           cancelText: isEn ? 'Cancel' : '取消',
           tone: 'warning'
@@ -1239,25 +1223,6 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
             }
           }
         }
-      }
-
-      // 恢复代理池（通过 store 接口）
-      if (payload.proxyPool && typeof payload.proxyPool === 'object') {
-        const store = useAccountsStore.getState()
-        store.clearProxyPool()
-        // 直接通过 set 重建 Map（绕过 addProxy 的解析步骤，保留原 ID）
-        useAccountsStore.setState({
-          proxyPool: new Map(
-            Object.entries(payload.proxyPool as Record<string, never>)
-          ) as Parameters<typeof useAccountsStore.setState>[0] extends infer T
-            ? T extends { proxyPool: infer P }
-              ? P
-              : never
-            : never
-        } as Parameters<typeof useAccountsStore.setState>[0])
-      }
-      if (payload.proxyPoolConfig) {
-        useAccountsStore.getState().setProxyPoolConfig(payload.proxyPoolConfig)
       }
 
       alert(
@@ -1285,8 +1250,8 @@ function ConfigSyncCard({ isEn }: { isEn: boolean }): React.ReactNode {
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">
           {isEn
-            ? 'Export all non-sensitive settings (proxy pool, templates, rate limits, UI preferences) to a file, for backup or multi-device sync. Does NOT include account tokens or credentials.'
-            : '导出所有"非敏感"配置（代理池、注册模板、限速、UI 偏好等）到文件，便于备份或多设备同步。不含账号 Token 与凭据。'}
+            ? 'Export non-sensitive UI preferences to a file, for backup or multi-device sync. Does NOT include account tokens or credentials.'
+            : '导出"非敏感"的界面偏好到文件，便于备份或多设备同步。不含账号 Token 与凭据。'}
         </p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={handleExport}>

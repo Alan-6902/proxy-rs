@@ -191,7 +191,7 @@ export type ImportRequestResult =
   | { ok: false; reason: string }
 
 /** 尚未入库的账号 → kiro-rs 导入请求（默认不入池） */
-export function toImportRequest(account: AccountLike, proxyUrl?: string): ImportRequestResult {
+export function toImportRequest(account: AccountLike): ImportRequestResult {
   const credentials = (account.credentials ?? {}) as Record<string, unknown>
   const str = (value: unknown): string | undefined =>
     typeof value === 'string' && value.trim() ? value.trim() : undefined
@@ -230,7 +230,6 @@ export function toImportRequest(account: AccountLike, proxyUrl?: string): Import
       apiRegion: str(credentials.apiRegion) ?? payload.apiRegion,
       // 卡片 email 可能是展示名（如 KSK 占位串），只传真邮箱
       email: payload.email ?? str(account.email),
-      proxyUrl,
       provider: str(credentials.provider),
       startUrl: str(credentials.startUrl),
       extra,

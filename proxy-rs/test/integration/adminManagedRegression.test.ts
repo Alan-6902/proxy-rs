@@ -4,7 +4,6 @@ import {
   normalizeAdminManagedEntry
 } from '../../src/shared/adminManaged'
 import { pushAccountToLocalAdmin } from '../../src/main/kskAutomation/localAdminClient'
-import { toCredentialStats } from '../../src/main/localAdminStats/statsClient'
 
 const managed = {
   accountId: 'local-account',
@@ -17,11 +16,11 @@ const managed = {
 
 describe('托管身份不依赖可轮换 token', () => {
   it('正常轮换以及首次推送后的轮换均保持托管', () => {
-    const remote = toCredentialStats({
-      id: 7,
+    const remote = {
+      id: '7',
       credentialIdentity: 'identity-original',
       refreshTokenHash: 'after-rotation'
-    })!
+    }
     const result = reconcileAdminManagedEntries([managed], [remote], 2)
     expect(result.dropped).toEqual([])
     expect(result.kept).toEqual([{ ...managed, lastSeenRemoteAt: 2 }])

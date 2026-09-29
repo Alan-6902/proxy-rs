@@ -6,7 +6,7 @@
  * 基础额度 + ACTIVE 试用 + ACTIVE 奖励累加。
  */
 
-import { resolveSubscriptionTypeFromTitle, type SubscriptionType } from './localAdminStats'
+import { resolveSubscriptionTypeFromTitle, type SubscriptionType } from './subscriptionType'
 
 const MS_PER_DAY = 86_400_000
 

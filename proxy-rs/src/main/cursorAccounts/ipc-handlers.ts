@@ -11,7 +11,7 @@ import {
   type CursorOAuthStartResult,
   type CursorRefreshAllSummary
 } from '../../shared/cursorAccounts'
-import type { IdcIpcResult } from '../../shared/idcSeats'
+import type { IpcResult } from '../../shared/ipcResult'
 import {
   addCursorAccountsFromCredentials,
   exportCursorAccounts,
@@ -48,7 +48,7 @@ export function sendCursorAccountsChanged(getMainWindow: () => BrowserWindow | n
   }
 }
 
-function toError(error: unknown): IdcIpcResult<never> {
+function toError(error: unknown): IpcResult<never> {
   return { success: false, error: error instanceof Error ? error.message : String(error) }
 }
 
@@ -65,7 +65,7 @@ function readTagsArg(tags: unknown): string[] {
 function mutating<T>(
   deps: CursorAccountsIpcDeps,
   run: () => Promise<T>
-): () => Promise<IdcIpcResult<T>> {
+): () => Promise<IpcResult<T>> {
   return async () => {
     try {
       const data = await run()
@@ -78,7 +78,7 @@ function mutating<T>(
 }
 
 export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): void {
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.list, async (): Promise<IdcIpcResult<CursorAccount[]>> => {
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.list, async (): Promise<IpcResult<CursorAccount[]>> => {
     try {
       return { success: true, data: await loadCursorAccounts() }
     } catch (error) {
@@ -86,16 +86,13 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     }
   })
 
-  ipcMain.handle(
-    CURSOR_ACCOUNTS_CHANNEL.currentId,
-    async (): Promise<IdcIpcResult<string | null>> => {
-      try {
-        return { success: true, data: await resolveCurrentCursorAccountId() }
-      } catch (error) {
-        return toError(error)
-      }
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.currentId, async (): Promise<IpcResult<string | null>> => {
+    try {
+      return { success: true, data: await resolveCurrentCursorAccountId() }
+    } catch (error) {
+      return toError(error)
     }
-  )
+  })
 
   ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.remove, (_event, ids: string[]) =>
     mutating(deps, () => removeCursorAccounts(Array.isArray(ids) ? ids : []))()
@@ -111,13 +108,13 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.importCockpit,
-    (_event, tags?: unknown): Promise<IdcIpcResult<CursorCockpitImportSummary>> =>
+    (_event, tags?: unknown): Promise<IpcResult<CursorCockpitImportSummary>> =>
       mutating(deps, () => importCursorAccountsFromCockpitTools(readTagsArg(tags)))()
   )
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.addToken,
-    (_event, input: string, tags?: unknown): Promise<IdcIpcResult<CursorCredentialImportSummary>> =>
+    (_event, input: string, tags?: unknown): Promise<IpcResult<CursorCredentialImportSummary>> =>
       mutating(deps, () =>
         addCursorAccountsFromCredentials(String(input ?? ''), readTagsArg(tags))
       )()
@@ -125,7 +122,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.export,
-    async (_event, ids: string[]): Promise<IdcIpcResult<string>> => {
+    async (_event, ids: string[]): Promise<IpcResult<string>> => {
       try {
         return { success: true, data: await exportCursorAccounts(Array.isArray(ids) ? ids : []) }
       } catch (error) {
@@ -140,7 +137,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.refreshAll,
-    (): Promise<IdcIpcResult<CursorRefreshAllSummary>> =>
+    (): Promise<IpcResult<CursorRefreshAllSummary>> =>
       mutating(deps, () => refreshAllCursorAccounts())()
   )
 
@@ -150,15 +147,11 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.inject,
-    (
-      _event,
-      id: string,
-      options?: CursorInjectOptions
-    ): Promise<IdcIpcResult<CursorInjectResult>> =>
+    (_event, id: string, options?: CursorInjectOptions): Promise<IpcResult<CursorInjectResult>> =>
       mutating(deps, () => injectCursorAccount(String(id), options ?? {}))()
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.oauthStart, (): IdcIpcResult<CursorOAuthStartResult> => {
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.oauthStart, (): IpcResult<CursorOAuthStartResult> => {
     try {
       return { success: true, data: startCursorOAuthLogin() }
     } catch (error) {
@@ -172,7 +165,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.oauthCancel,
-    (_event, loginId?: string): IdcIpcResult<null> => {
+    (_event, loginId?: string): IpcResult<null> => {
       cancelCursorOAuthLogin(typeof loginId === 'string' ? loginId : undefined)
       return { success: true, data: null }
     }
@@ -180,7 +173,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
 
   ipcMain.handle(
     CURSOR_ACCOUNTS_CHANNEL.settingsGet,
-    async (): Promise<IdcIpcResult<CursorAutoRefreshSettings>> => {
+    async (): Promise<IpcResult<CursorAutoRefreshSettings>> => {
       try {
         return { success: true, data: await loadCursorAutoRefreshSettings() }
       } catch (error) {
@@ -194,7 +187,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     async (
       _event,
       patch: Partial<CursorAutoRefreshSettings>
-    ): Promise<IdcIpcResult<CursorAutoRefreshSettings>> => {
+    ): Promise<IpcResult<CursorAutoRefreshSettings>> => {
       try {
         const before = await loadCursorAutoRefreshSettings()
         const settings = await updateCursorAutoRefreshSettings(
@@ -208,7 +201,7 @@ export function registerCursorAccountsIpcHandlers(deps: CursorAccountsIpcDeps): 
     }
   )
 
-  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.storePath, async (): Promise<IdcIpcResult<string>> => {
+  ipcMain.handle(CURSOR_ACCOUNTS_CHANNEL.storePath, async (): Promise<IpcResult<string>> => {
     try {
       const path = cursorAccountsStorePath()
       await fs.access(path)

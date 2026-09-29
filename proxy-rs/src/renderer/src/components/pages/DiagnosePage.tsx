@@ -7,8 +7,6 @@ import {
   Play,
   AlertTriangle,
   Globe,
-  Network,
-  Mail,
   Activity,
   Download,
   MessageSquare,
@@ -37,11 +35,6 @@ import {
   type AccountLivenessResult as LivenessResult
 } from '@/types/account'
 
-/** 脱敏代理 URL（隐藏密码） */
-function maskProxyUrl(url: string): string {
-  return url.replace(/:([^:@/]+)@/, ':***@')
-}
-
 /** 双语文本 */
 interface BiText {
   en: string
@@ -52,7 +45,7 @@ interface DiagnoseTarget {
   id: string
   label: BiText
   url: string
-  category: 'network' | 'kiro' | 'email' | 'proxy' | 'custom'
+  category: 'network' | 'kiro' | 'custom'
   description: BiText
   expectStatus?: number[]
 }
@@ -100,31 +93,6 @@ const DEFAULT_TARGETS: DiagnoseTarget[] = [
       zh: 'Kiro 主 API 端点（q.amazonaws.com）'
     },
     expectStatus: [200, 400, 403, 405]
-  },
-  {
-    id: 'aws-signin',
-    label: { en: 'AWS SignIn', zh: 'AWS SignIn' },
-    url: 'https://us-east-1.signin.aws/',
-    category: 'kiro',
-    description: { en: 'Required endpoint for the signup flow', zh: '注册流程必经端点' },
-    expectStatus: [200, 400, 403]
-  },
-  // Email Services
-  {
-    id: 'tempmail-plus',
-    label: { en: 'TempMail.Plus API', zh: 'TempMail.Plus API' },
-    url: 'https://tempmail.plus/api/mails?email=test@mailto.plus',
-    category: 'email',
-    description: { en: 'TempMail.Plus mailbox service', zh: 'TempMail.Plus 邮箱服务' },
-    expectStatus: [200, 400, 401, 403]
-  },
-  {
-    id: 'outlook-login',
-    label: { en: 'Outlook Login', zh: 'Outlook Login' },
-    url: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
-    category: 'email',
-    description: { en: 'Outlook token refresh endpoint', zh: 'Outlook Token 刷新端点' },
-    expectStatus: [200, 400, 405]
   }
 ]
 
@@ -136,8 +104,6 @@ const CATEGORIES = [
     icon: Activity,
     color: 'text-purple-500'
   },
-  { id: 'email', label: { en: 'Email', zh: '邮箱服务' }, icon: Mail, color: 'text-amber-500' },
-  { id: 'proxy', label: { en: 'Proxy', zh: '代理' }, icon: Network, color: 'text-cyan-500' },
   { id: 'custom', label: { en: 'Custom', zh: '自定义' }, icon: Activity, color: 'text-emerald-500' }
 ] as const
 
@@ -153,8 +119,7 @@ export function DiagnosePage(): React.ReactNode {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const pick = (x: BiText): string => (isEn ? x.en : x.zh)
-  const { proxyPool, proxyPoolConfig, accounts, getAccountProxyUrl, updateAccount } =
-    useAccountsStore()
+  const { accounts, updateAccount } = useAccountsStore()
 
   // ============ 账号测活状态（单账号；批量测活已移到账号管理页，结果就地显示在账号行上） ============
   const accountList = useMemo(() => Array.from(accounts.values()), [accounts])
@@ -190,7 +155,7 @@ export function DiagnosePage(): React.ReactNode {
     async (account: (typeof accountList)[number]): Promise<LivenessResult> => {
       try {
         const result = await window.api.diagnoseAccountLiveness({
-          account: buildAccountLivenessRequestAccount(account, getAccountProxyUrl(account.id)),
+          account: buildAccountLivenessRequestAccount(account),
           model: livenessModel.trim(),
           message: livenessMessage.trim() || undefined
         })
@@ -214,7 +179,7 @@ export function DiagnosePage(): React.ReactNode {
         }
       }
     },
-    [livenessModel, livenessMessage, getAccountProxyUrl, updateAccount]
+    [livenessModel, livenessMessage, updateAccount]
   )
 
   const runLiveness = useCallback(async (): Promise<void> => {
@@ -250,15 +215,9 @@ export function DiagnosePage(): React.ReactNode {
       return ''
     }
   })
-  const [useProxy, setUseProxy] = useState<boolean>(false)
-  const [selectedProxyId, setSelectedProxyId] = useState<string>('')
   const [isRunning, setIsRunning] = useState(false)
   const [results, setResults] = useState<Record<string, DiagnoseResult>>({})
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
-
-  const availableProxies = Array.from(proxyPool.values()).filter(
-    (p) => p.enabled && p.status !== 'dead'
-  )
 
   const buildTargets = useCallback((): DiagnoseTarget[] => {
     const list = [...DEFAULT_TARGETS]
@@ -288,8 +247,6 @@ export function DiagnosePage(): React.ReactNode {
     setResults({})
     setProgress({ done: 0, total: targets.length })
 
-    const proxyUrl = useProxy && selectedProxyId ? proxyPool.get(selectedProxyId)?.url : undefined
-
     try {
       // 分批跑，每次 4 个，让结果逐步出现
       const BATCH = 4
@@ -297,7 +254,6 @@ export function DiagnosePage(): React.ReactNode {
       for (let i = 0; i < targets.length; i += BATCH) {
         const slice = targets.slice(i, i + BATCH)
         const resp = await window.api.diagnoseRun({
-          proxyUrl,
           targets: slice.map((tg) => ({
             id: tg.id,
             label: pick(tg.label),
@@ -320,14 +276,13 @@ export function DiagnosePage(): React.ReactNode {
         /* ignore */
       }
     }
-  }, [buildTargets, useProxy, selectedProxyId, proxyPool, customProbeUrl])
+  }, [buildTargets, customProbeUrl])
 
   const exportReport = useCallback(() => {
     const targets = buildTargets()
     const lines = [
       isEn ? `${APP_NAME} - Diagnostic Report` : `${APP_NAME} - 诊断报告`,
       `${isEn ? 'Generated' : '生成时间'}: ${new Date().toLocaleString()}`,
-      `${isEn ? 'Proxy' : '代理'}: ${useProxy && selectedProxyId ? proxyPool.get(selectedProxyId)?.url : isEn ? 'Direct' : '直连'}`,
       `------------------------------------`
     ]
     for (const tg of targets) {
@@ -348,7 +303,7 @@ export function DiagnosePage(): React.ReactNode {
     }
     void navigator.clipboard.writeText(lines.join('\n'))
     alert(isEn ? 'Report copied to clipboard' : '诊断报告已复制到剪贴板')
-  }, [buildTargets, results, useProxy, selectedProxyId, proxyPool, isEn])
+  }, [buildTargets, results, isEn])
 
   const stats = (() => {
     const all = Object.values(results)
@@ -401,47 +356,6 @@ export function DiagnosePage(): React.ReactNode {
             </p>
           </div>
 
-          {/* 代理选项 */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={useProxy}
-                onChange={(e) => setUseProxy(e.target.checked)}
-                disabled={isRunning}
-              />
-              <span>{isEn ? 'Test through proxy' : '通过代理测试'}</span>
-            </label>
-            {useProxy &&
-              (availableProxies.length > 0 ? (
-                <select
-                  value={selectedProxyId}
-                  onChange={(e) => setSelectedProxyId(e.target.value)}
-                  disabled={isRunning}
-                  className="h-8 px-2 rounded-md border bg-background text-xs flex-1 max-w-md"
-                >
-                  <option value="">-- {isEn ? 'Select a proxy' : '选择一个代理'} --</option>
-                  {availableProxies.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.protocol}://{p.host}:{p.port}
-                      {p.label ? ` (${p.label})` : ''}
-                      {p.status === 'alive' && p.latencyMs ? ` - ${p.latencyMs}ms` : ''}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="text-xs text-muted-foreground italic">
-                  {proxyPoolConfig.enabled
-                    ? isEn
-                      ? 'No available proxy in pool'
-                      : '代理池无可用代理'
-                    : isEn
-                      ? 'Proxy pool disabled, configure it in "Proxy Pool" first'
-                      : '代理池未启用，请先在「代理池」配置'}
-                </span>
-              ))}
-          </div>
-
           <div className="flex items-center gap-2 pt-2">
             <Button onClick={runDiagnose} disabled={isRunning}>
               {isRunning ? (
@@ -488,8 +402,8 @@ export function DiagnosePage(): React.ReactNode {
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">
             {isEn
-              ? 'Send a real chat message to the selected model (account-bound proxy applies). Verifies the account can actually get a response. For batch testing, use the Accounts page — results show inline on each account.'
-              : '给指定模型发一条真实消息（自动应用账号绑定的代理），验证账号能否正常返回。批量测活请到「账号管理」页面，结果会直接显示在账号行上。'}
+              ? 'Send a real chat message to the selected model Verifies the account can actually get a response. For batch testing, use the Accounts page — results show inline on each account.'
+              : '给指定模型发一条真实消息，验证账号能否正常返回。批量测活请到「账号管理」页面，结果会直接显示在账号行上。'}
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -502,25 +416,13 @@ export function DiagnosePage(): React.ReactNode {
                 className="h-9 w-full px-2 rounded-md border bg-background text-xs"
               >
                 <option value="">-- {isEn ? 'Select an account' : '选择账号'} --</option>
-                {accountList.map((a) => {
-                  const bound = getAccountProxyUrl(a.id)
-                  return (
-                    <option key={a.id} value={a.id}>
-                      {a.email}
-                      {a.subscription?.type ? ` [${a.subscription.type}]` : ''}
-                      {bound ? ' 🔗' : ''}
-                    </option>
-                  )
-                })}
+                {accountList.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.email}
+                    {a.subscription?.type ? ` [${a.subscription.type}]` : ''}
+                  </option>
+                ))}
               </select>
-              {livenessAccountId && getAccountProxyUrl(livenessAccountId) && (
-                <p className="text-2xs text-muted-foreground">
-                  {isEn ? 'Bound proxy: ' : '绑定代理: '}
-                  <code className="font-mono">
-                    {maskProxyUrl(getAccountProxyUrl(livenessAccountId)!)}
-                  </code>
-                </p>
-              )}
             </div>
 
             {/* 模型选择 */}

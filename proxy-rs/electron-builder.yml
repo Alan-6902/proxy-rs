@@ -10,24 +10,14 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
-  # 下游接口参考实现只在开发/联调时用，不进安装包
-  - '!downstream-example/**'
-  # KiroApp 渠道的 mock 上游同理，只在联调时用
-  - '!kiroapp-mock/**'
   # better-sqlite3 运行时只需 lib/ 与 macOS 预编译包
   - '!node_modules/better-sqlite3/{deps,src}/**'
   - '!node_modules/better-sqlite3/binding.gyp'
   - '!node_modules/better-sqlite3/prebuilds/{win32,linux,linuxmusl}-*.node'
 asarUnpack:
   - resources/**
-  - node_modules/koffi/**
-  - node_modules/tlsclientwrapper/**
-  - node_modules/piscina/**
   # 共享账号库驱动（Node-API 预编译包，Electron 直接加载，见改造方案 §0.8）
   - node_modules/better-sqlite3/**
-extraResources:
-  - from: 'resources/tls-client-xgo-1.14.0-windows-amd64.dll'
-    to: 'tls-client-xgo-1.14.0-windows-amd64.dll'
 protocols:
   name: Proxy RS Auth
   schemes:

@@ -8,7 +8,7 @@ import {
   type GrokRemoveResult,
   type GrokSwitchResult
 } from '../../shared/grokAccounts'
-import type { IdcIpcResult } from '../../shared/idcSeats'
+import type { IpcResult } from '../../shared/ipcResult'
 import {
   listGrokAccounts,
   removeGrokAccountFromClient,
@@ -30,7 +30,7 @@ export function sendGrokAccountsChanged(getMainWindow: () => BrowserWindow | nul
   }
 }
 
-function toError(error: unknown): IdcIpcResult<never> {
+function toError(error: unknown): IpcResult<never> {
   return { success: false, error: error instanceof Error ? error.message : String(error) }
 }
 
@@ -46,7 +46,7 @@ function sendRelayInstallProgress(
 }
 
 export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void {
-  ipcMain.handle(GROK_ACCOUNTS_CHANNEL.list, async (): Promise<IdcIpcResult<GrokAccountView[]>> => {
+  ipcMain.handle(GROK_ACCOUNTS_CHANNEL.list, async (): Promise<IpcResult<GrokAccountView[]>> => {
     try {
       return { success: true, data: await listGrokAccounts() }
     } catch (error) {
@@ -54,7 +54,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
     }
   })
 
-  ipcMain.handle(GROK_ACCOUNTS_CHANNEL.currentScope, (): IdcIpcResult<string | null> => {
+  ipcMain.handle(GROK_ACCOUNTS_CHANNEL.currentScope, (): IpcResult<string | null> => {
     try {
       return { success: true, data: resolveCurrentGrokScope() }
     } catch (error) {
@@ -68,7 +68,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
       _event,
       scope: string,
       options?: { closeGrok?: boolean }
-    ): Promise<IdcIpcResult<GrokSwitchResult>> => {
+    ): Promise<IpcResult<GrokSwitchResult>> => {
       try {
         const result = await switchGrokAccount(String(scope), options ?? {})
         sendGrokAccountsChanged(deps.getMainWindow)
@@ -81,7 +81,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
 
   ipcMain.handle(
     GROK_ACCOUNTS_CHANNEL.syncRelay,
-    async (_event, scope: string): Promise<IdcIpcResult<GrokRelayStatus>> => {
+    async (_event, scope: string): Promise<IpcResult<GrokRelayStatus>> => {
       try {
         await syncRelayToAccount(String(scope))
         const status = await probeRelay()
@@ -95,7 +95,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
 
   ipcMain.handle(
     GROK_ACCOUNTS_CHANNEL.relayStatus,
-    async (): Promise<IdcIpcResult<GrokRelayStatus>> => {
+    async (): Promise<IpcResult<GrokRelayStatus>> => {
       try {
         return { success: true, data: await probeRelay() }
       } catch (error) {
@@ -106,7 +106,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
 
   ipcMain.handle(
     GROK_ACCOUNTS_CHANNEL.ensureRelayRoute,
-    async (_event, scope: string): Promise<IdcIpcResult<GrokRelayInstallResult>> => {
+    async (_event, scope: string): Promise<IpcResult<GrokRelayInstallResult>> => {
       try {
         const result = await ensureBoxRelayRoute(String(scope), (progress) =>
           sendRelayInstallProgress(deps.getMainWindow, progress)
@@ -125,7 +125,7 @@ export function registerGrokAccountsIpcHandlers(deps: GrokAccountsIpcDeps): void
       _event,
       scope: string,
       options?: { closeGrok?: boolean }
-    ): Promise<IdcIpcResult<GrokRemoveResult>> => {
+    ): Promise<IpcResult<GrokRemoveResult>> => {
       try {
         const result = await removeGrokAccountFromClient(String(scope), options ?? {})
         sendGrokAccountsChanged(deps.getMainWindow)

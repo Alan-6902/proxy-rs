@@ -106,20 +106,6 @@ export async function setInPool(
   )
 }
 
-export async function setProxy(
-  target: KiroRsAdminTarget,
-  credentialId: number,
-  proxyUrl: string | null,
-  fetchImpl?: AdminFetch
-): Promise<void> {
-  await adminRequest(
-    target,
-    `/credentials/${credentialId}/proxy`,
-    { method: 'POST', body: { proxyUrl } },
-    fetchImpl
-  )
-}
-
 export function ensureFresh(
   target: KiroRsAdminTarget,
   credentialId: number,

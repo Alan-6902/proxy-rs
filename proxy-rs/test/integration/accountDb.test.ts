@@ -363,45 +363,6 @@ describe('AccountDataBridge', () => {
     expect((await bridge.deleteAccounts(['db-1'], null))[0].reason).toMatch(/未运行/)
   })
 
-  it('代理绑定：下发新绑定；解绑只清 proxy 自己设过的，迁移账号自带的代理保留', async () => {
-    const managed = seed(path, { uuid: 'db-1', refreshToken: 'rt' })
-    const migrated = seed(path, { uuid: 'db-2', refreshToken: 'rt2' })
-    // db-2 模拟迁移自 credentials.json、本来就配了代理的账号
-    const conn = new Database(path)
-    conn
-      .prepare('UPDATE account_credentials SET proxy_url = ? WHERE account_id = ?')
-      .run('http://from-credentials-json:1', migrated)
-    conn.close()
-    const calls: Array<[string, unknown]> = []
-    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push([url, JSON.parse(String(init?.body))])
-      return jsonResponse(200, { success: true })
-    }) as unknown as typeof fetch
-    let bound: string | undefined = 'socks5://p:1'
-    const bridge = new AccountDataBridge(db, raw, {
-      fetchImpl,
-      proxyUrlFor: (accountId) => (accountId === 'db-1' ? bound : undefined)
-    })
-
-    expect(await bridge.syncProxyBindings(TARGET)).toBe(1)
-    expect(calls).toEqual([
-      [`${TARGET.baseUrl}/credentials/${managed}/proxy`, { proxyUrl: 'socks5://p:1' }]
-    ])
-    // 库里还没写回 proxy_url（kiro-rs 负责写），再同步一次不应重复下发
-    const write = new Database(path)
-    write
-      .prepare('UPDATE account_credentials SET proxy_url = ? WHERE account_id = ?')
-      .run('socks5://p:1', managed)
-    write.close()
-    calls.length = 0
-    expect(await bridge.syncProxyBindings(TARGET)).toBe(0)
-
-    // 解绑：proxy 设过的被清除，迁移账号自带的不动
-    bound = undefined
-    expect(await bridge.syncProxyBindings(TARGET)).toBe(1)
-    expect(calls).toEqual([[`${TARGET.baseUrl}/credentials/${managed}/proxy`, { proxyUrl: null }]])
-  })
-
   it('wrapStoreWithBridge 只拦截 accountData，其余透传（含对象形式 set）', () => {
     seed(path, { uuid: 'db-1', refreshToken: 'rt' })
     const bridge = new AccountDataBridge(db, raw)

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Account pools, automatic token refresh, registration, subscriptions, groups and tags
+  Account pools, automatic token refresh, subscriptions, groups and tags
 </p>
 
 <p align="center">
@@ -54,29 +54,11 @@
 - Dark/Light mode toggle
 - Privacy mode to hide sensitive information
 
-### 📝 Account Registration
-
-- Built-in Kiro Builder ID registration
-- Four modes: Manual, Outlook IMAP, Custom Domain (TempMail.Plus), Mixed (weighted round-robin)
-- Concurrent batch registration + rate limit + backoff + risk control auto-pause
-- Failure retry queue (bucketed by error category)
-- Pause/Resume + progress persistence
-- Scheduled launch + daily quota + weekday mask
-- Strategy templates (save/load/import/export)
-- Analytics report (donut chart, 24h curves, 7-day trend, failure breakdown, CSV export)
-- Email used blacklist + empirical pre-validation
-- Full i18n support
-
-### 🌐 Proxy Support
-
-- Built-in proxy pool (http/https/socks5/socks4) with 4 dispatch strategies + auto-validate + scheduled refresh
-- Bind an account to a proxy and ALL its requests (token refresh, batch operations, etc.) route through it
-
 ### 🔔 Notifications & Ops
 
-- Local system notifications for critical account and registration events
+- Local system notifications for critical account events
 - Unified task center (global progress panel)
-- One-click diagnostics panel (Network/Kiro/AWS/Email/Proxy connectivity)
+- One-click diagnostics panel (Network/Kiro/AWS connectivity)
 - Config import/export (with optional AES-GCM encryption)
 
 ---

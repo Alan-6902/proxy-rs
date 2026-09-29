@@ -122,7 +122,6 @@ export function normalizeKskAutomationConfig(
       KSK_CLEANUP_INTERVAL_MIN_MINUTES,
       KSK_CLEANUP_INTERVAL_MAX_MINUTES
     ),
-    autoDeleteExhausted: source.autoDeleteExhausted !== false,
     livenessModel: normalizeString(source.livenessModel),
     livenessMessage: normalizeString(source.livenessMessage),
     emailEnabled: source.emailEnabled === true,

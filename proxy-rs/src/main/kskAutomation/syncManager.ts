@@ -184,14 +184,6 @@ class KskAutomationRunner {
     return this.snapshot()
   }
 
-  /** 外部（额度耗尽清理）判死的 key：拉黑，避免下一轮 Provider 又把它拉回来。 */
-  blacklistKeys(keys: readonly string[]): void {
-    for (const key of keys) {
-      this.invalidKeys.add(key)
-      this.pendingEmail.delete(key)
-    }
-  }
-
   async runNow(): Promise<KskAutomationStatus> {
     const task = await this.deps.readTask()
     if (!task?.enabled) throw new Error('任务已暂停，请先恢复任务')
@@ -772,16 +764,5 @@ export class KskAutomationManager {
 
   queueLocalAdminSync(): void {
     for (const runner of this.runners.values()) runner.queueLocalAdminSync()
-  }
-
-  /**
-   * 把外部判死的 key 拉黑到所有 runner。
-   *
-   * 额度耗尽清理走的是反代统计那条链路，它不知道这些号属于哪个任务；而只要有任何一个
-   * 任务的 Provider 还会返回它，下一轮就会被重新拉回来。所以一律全量拉黑。
-   */
-  blacklistKeys(keys: readonly string[]): void {
-    if (keys.length === 0) return
-    for (const runner of this.runners.values()) runner.blacklistKeys(keys)
   }
 }

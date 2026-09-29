@@ -1,36 +1,11 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
-import type { ProxyEntry } from '../shared/proxyPool'
-import type {
-  BatchOpResult as IdcBatchOpResult,
-  BatchOpTarget as IdcBatchTarget,
-  IdcCredentialConfig,
-  IdcIpcResult,
-  PlannedSeat as IdcPlannedSeat,
-  ProvisionSummary as IdcProvisionSummary,
-  SeatInventory as IdcSeatInventory,
-  SeatProgressEvent as IdcProgressEvent
-} from '../shared/idcSeats'
+import type { IpcResult } from '../shared/ipcResult'
 import type {
   KskAutomationStatusEvent,
   KskAutomationTaskInput,
   KskAutomationTaskView
 } from '../shared/kskAutomation'
-import type {
-  KskHunterConfig,
-  KskHunterLinkInput,
-  KskHunterSecretInput,
-  KskHunterSnapshot,
-  KskHunterStatusEvent
-} from '../shared/kskHunter'
-import type { HunterReport } from '../shared/hunterReport'
-import type { KskLedgerReport, KskLedgerSort } from '../shared/kskLedger'
-import type { DownstreamReport } from '../shared/downstreamSettlement'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
-import type {
-  LocalAdminExhaustedCleanupSummary,
-  LocalAdminStatsSnapshot,
-  LocalAdminUsageRefreshSummary
-} from '../shared/localAdminStats'
 import type {
   CursorAccount,
   CursorAutoRefreshSettings,
@@ -70,13 +45,6 @@ interface AccountData {
   theme?: string
   darkMode?: boolean
   language?: 'auto' | 'en' | 'zh'
-  // 代理池
-  proxyPool?: Record<string, unknown>
-  proxyPoolConfig?: unknown
-  /** 轮询光标：上次选中的代理 id（旧版本为数字下标，加载时会丢弃） */
-  proxyPoolCursor?: string
-  /** 账号-代理绑定映射 */
-  accountProxyBindings?: Record<string, string>
 }
 
 interface RefreshResult {
@@ -514,13 +482,7 @@ interface KiroApi {
   // 获取应用运行日志数量
   appLogsCount: () => Promise<number>
 
-  notifyLocal: (
-    kind: 'registration-risk-paused' | 'registration-batch-completed',
-    input?: { batchId?: string }
-  ) => Promise<void>
-  onLocalNotificationNavigate: (
-    callback: (page: 'accounts' | 'register' | 'hunter') => void
-  ) => () => void
+  onLocalNotificationNavigate: (callback: (page: 'accounts') => void) => () => void
 
   // 获取账户可用模型列表
   accountGetModels: (
@@ -671,98 +633,6 @@ interface KiroApi {
     rememberChoice: boolean
   ) => void
 
-  // ============ 注册功能 API ============
-
-  registrationStartAuto: (config: {
-    proxy?: string
-    upstreamProxy?: string
-    strictProxy?: boolean
-    moEmailBaseURL?: string
-    moEmailAPIKey?: string
-    useOutlook?: boolean
-    outlookData?: string
-    useTempMailPlus?: boolean
-    tempMailPlusEmail?: string
-    tempMailPlusEpin?: string
-    tempMailPlusDomain?: string
-    useProton?: boolean
-    protonEmail?: string
-    useGptMail?: boolean
-    gptMailBaseURL?: string
-    gptMailInboxEmail?: string
-    gptMailDomain?: string
-    gptMailPrefix?: string
-    gptMailPrivatePassword?: string
-    password?: string
-    fullName?: string
-    taskId?: string
-  }) => Promise<{ success: boolean; result?: unknown; error?: string }>
-
-  registrationManualPhase1: (config: {
-    proxy?: string
-    password?: string
-    fullName?: string
-  }) => Promise<{ success: boolean; error?: string }>
-
-  registrationManualPhase2: (
-    email: string,
-    fullName?: string
-  ) => Promise<{ success: boolean; error?: string }>
-
-  registrationManualPhase3: (
-    otp: string
-  ) => Promise<{ success: boolean; result?: unknown; error?: string }>
-
-  registrationCancel: () => Promise<{ success: boolean }>
-
-  registrationStatus: () => Promise<{ inProgress: boolean }>
-
-  protonOpenLogin: (
-    proxy?: string
-  ) => Promise<{ success: boolean; loggedIn: boolean; error?: string }>
-
-  protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
-
-  protonClose: () => Promise<{ success: boolean }>
-
-  // 代理池验活
-  proxyPoolValidate: (params: {
-    url: string
-    testUrl?: string
-    timeoutMs?: number
-    upstreamProxy?: string
-  }) => Promise<{ success: boolean; latencyMs?: number; externalIp?: string; error?: string }>
-
-  proxyPoolDiagnoseChain: (params: {
-    targetUrl: string
-    upstreamProxy: string
-    testHost?: string
-    testPort?: number
-  }) => Promise<{
-    success: boolean
-    error?: string
-    diagnose?: {
-      upstreamReachable: boolean
-      upstreamError?: string
-      upstreamRtMs?: number
-      targetReachable: boolean
-      targetError?: string
-      targetRtMs?: number
-      targetStatus?: number
-      targetStatusText?: string
-      targetBodySnippet?: string
-      endToEndOk?: boolean
-      endToEndError?: string
-      endToEndRtMs?: number
-    }
-  }>
-
-  /** 重启主进程代理池定时验活调度器（改了 autoValidateIntervalMin 后需调用） */
-  proxyPoolRestartScheduler: () => Promise<{ success: boolean; running?: boolean; error?: string }>
-
-  /** 订阅主进程定时验活结果，返回取消订阅函数 */
-  onProxyPoolValidated: (callback: (payload: { entries: ProxyEntry[] }) => void) => () => void
-
   // 诊断：通用 HTTP 探测
   diagnoseHttpProbe: (params: {
     url: string
@@ -834,250 +704,70 @@ interface KiroApi {
     error?: string
   }>
 
-  onRegistrationLog: (callback: (msg: string) => void) => () => void
-
-  onRegistrationStep: (
-    callback: (data: {
-      taskId?: string
-      event: {
-        name:
-          | 'init'
-          | 'proxy-chain-ready'
-          | 'tls-ready'
-          | 'exit-ip'
-          | 'oidc'
-          | 'device'
-          | 'email-created'
-          | 'portal'
-          | 'workflow-init'
-          | 'submit-email'
-          | 'signup'
-          | 'send-otp'
-          | 'waiting-otp'
-          | 'otp-received'
-          | 'create-identity'
-          | 'set-password'
-          | 'sso-workflow'
-          | 'sso-token'
-          | 'verify-alive'
-          | 'done'
-        ts: number
-        email?: string
-        exitIp?: string
-        extra?: Record<string, unknown>
-      }
-    }) => void
-  ) => () => void
-
-  onRegistrationComplete: (
-    callback: (result: {
-      status: 'success' | 'failed'
-      email: string
-      password?: string
-      error?: string
-      clientId?: string
-      clientSecret?: string
-      refreshToken?: string
-      accessToken?: string
-      region?: string
-      provider?: string
-      verify?: Record<string, unknown>
-    }) => void
-  ) => () => void
-
-  // ===== AWS Identity Center 席位管理 =====
-
-  /** 查询凭据保存状态（不回传密钥本体，仅回传尾 4 位用于识别） */
-  idcCredentialStatus: () => Promise<
-    IdcIpcResult<{
-      encryptionAvailable: boolean
-      hasSaved: boolean
-      source?: 'manual' | 'profile'
-      region?: string
-      profile?: string
-      accessKeyIdTail?: string
-    }>
-  >
-
-  /** 保存凭据配置。系统加密不可用时会失败（拒绝明文落盘 AK/SK） */
-  idcSaveCredentials: (config: IdcCredentialConfig) => Promise<IdcIpcResult<{ saved: boolean }>>
-
-  idcClearCredentials: () => Promise<IdcIpcResult<{ cleared: boolean }>>
-
-  /** 列出本机 ~/.aws 下可用 profile */
-  idcListProfiles: () => Promise<IdcIpcResult<string[]>>
-
-  /** 连通性自检：验证签名可用、能读到 Identity Center 实例 */
-  idcTestConnection: (config: IdcCredentialConfig) => Promise<
-    IdcIpcResult<{
-      identityStoreId: string
-      region: string
-      seatCount: number
-      unsubscribedCount: number
-    }>
-  >
-
-  /** 生成席位预览（不触碰 AWS 写操作） */
-  idcPlanSeats: (input: {
-    credentials: IdcCredentialConfig
-    quotas: { tier: string; count: number }[]
-    domains: string
-    avoidExisting?: boolean
-  }) => Promise<IdcIpcResult<{ seats: IdcPlannedSeat[]; maxPerPlan: number }>>
-
-  /** 执行开通：建号 →（可选）发密码邮件 → 挂档位 */
-  idcProvision: (input: {
-    credentials: IdcCredentialConfig
-    seats: IdcPlannedSeat[]
-    sendPasswordEmail: boolean
-    concurrency?: number
-  }) => Promise<IdcIpcResult<IdcProvisionSummary>>
-
-  idcCancelProvision: () => Promise<IdcIpcResult<{ cancelled: boolean }>>
-
-  /** 拉取现有席位全景 */
-  idcInventory: (config: IdcCredentialConfig) => Promise<IdcIpcResult<IdcSeatInventory>>
-
-  idcChangeTier: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    tier: string
-    concurrency?: number
-  }) => Promise<IdcIpcResult<IdcBatchOpResult[]>>
-
-  idcUnsubscribe: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }) => Promise<IdcIpcResult<IdcBatchOpResult[]>>
-
-  /** 删除用户（不可逆）。会先尝试取消订阅再删号 */
-  idcDeleteSeats: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }) => Promise<IdcIpcResult<IdcBatchOpResult[]>>
-
-  /** 重发密码设置邮件（链接 1 小时过期） */
-  idcResendPassword: (input: {
-    credentials: IdcCredentialConfig
-    targets: IdcBatchTarget[]
-    concurrency?: number
-  }) => Promise<IdcIpcResult<IdcBatchOpResult[]>>
-
-  /** 监听席位操作进度 */
-  onIdcProgress: (callback: (event: IdcProgressEvent) => void) => () => void
-
-  kskAutomationList: () => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  kskAutomationList: () => Promise<IpcResult<KskAutomationTaskView[]>>
   kskAutomationCreate: (
     input: KskAutomationTaskInput
-  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  ) => Promise<IpcResult<KskAutomationTaskView[]>>
   kskAutomationUpdate: (
     taskId: string,
     input: KskAutomationTaskInput
-  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
+  ) => Promise<IpcResult<KskAutomationTaskView[]>>
   kskAutomationSetEnabled: (
     taskId: string,
     enabled: boolean
-  ) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
-  kskAutomationDelete: (taskId: string) => Promise<IdcIpcResult<KskAutomationTaskView[]>>
-  kskAutomationSyncNow: (taskId: string) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
-  kskAutomationSyncLocalAdminNow: (
-    taskId: string
-  ) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
-  kskAutomationCleanupNow: (taskId: string) => Promise<IdcIpcResult<KskAutomationStatusEvent>>
+  ) => Promise<IpcResult<KskAutomationTaskView[]>>
+  kskAutomationDelete: (taskId: string) => Promise<IpcResult<KskAutomationTaskView[]>>
+  kskAutomationSyncNow: (taskId: string) => Promise<IpcResult<KskAutomationStatusEvent>>
+  kskAutomationSyncLocalAdminNow: (taskId: string) => Promise<IpcResult<KskAutomationStatusEvent>>
+  kskAutomationCleanupNow: (taskId: string) => Promise<IpcResult<KskAutomationStatusEvent>>
   kskAutomationPushAccountToLocalAdmin: (
     candidate: LocalAdminPushCandidate
-  ) => Promise<IdcIpcResult<LocalAdminPushResult>>
+  ) => Promise<IpcResult<LocalAdminPushResult>>
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void) => () => void
   onKskAutomationAccountsChanged: (callback: () => void) => () => void
-  kskHunterSnapshot: () => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterUpdateConfig: (
-    config: Partial<KskHunterConfig>,
-    secrets?: KskHunterSecretInput
-  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterCreateLink: (input: KskHunterLinkInput) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterUpdateLink: (
-    linkId: string,
-    input: KskHunterLinkInput
-  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterSetLinkEnabled: (
-    linkId: string,
-    enabled: boolean
-  ) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterDeleteLink: (linkId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterRunNow: () => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterRetryDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterDeleteDelivery: (deliveryId: string) => Promise<IdcIpcResult<KskHunterSnapshot>>
-  kskHunterReport: (days?: number) => Promise<IdcIpcResult<HunterReport>>
-  kskHunterRevealReportFile: () => Promise<IdcIpcResult<string>>
-  kskHunterLedgerReport: (
-    days?: number,
-    sort?: KskLedgerSort
-  ) => Promise<IdcIpcResult<KskLedgerReport>>
-  kskHunterClearLedger: () => Promise<IdcIpcResult<KskLedgerReport>>
-  kskHunterRevealLedgerFile: () => Promise<IdcIpcResult<string>>
-  downstreamReport: (date?: string, days?: number) => Promise<IdcIpcResult<DownstreamReport>>
-  downstreamExportDay: (date: string) => Promise<IdcIpcResult<string>>
-  downstreamSettleNow: () => Promise<IdcIpcResult<DownstreamReport>>
-  downstreamPickCsvDir: () => Promise<IdcIpcResult<string | null>>
-  downstreamOpenCsvDir: () => Promise<IdcIpcResult<string>>
-  onKskHunterStatus: (callback: (event: KskHunterStatusEvent) => void) => () => void
-  localAdminStatsSnapshot: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
-  localAdminStatsRefreshNow: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
-  localAdminStatsRefreshUsage: () => Promise<IdcIpcResult<LocalAdminUsageRefreshSummary>>
-  localAdminStatsCleanupExhausted: () => Promise<IdcIpcResult<LocalAdminExhaustedCleanupSummary>>
-  localAdminStatsClearSamples: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
-  localAdminStatsClearBuckets: () => Promise<IdcIpcResult<LocalAdminStatsSnapshot>>
-  onLocalAdminStatsChanged: (callback: (snapshot: LocalAdminStatsSnapshot) => void) => () => void
-  cursorAccountsList: () => Promise<IdcIpcResult<CursorAccount[]>>
-  cursorAccountsCurrentId: () => Promise<IdcIpcResult<string | null>>
-  cursorAccountsRemove: (ids: string[]) => Promise<IdcIpcResult<void>>
-  cursorAccountsImportJson: (
-    json: string,
-    tags?: string[]
-  ) => Promise<IdcIpcResult<CursorAccount[]>>
-  cursorAccountsImportLocal: (tags?: string[]) => Promise<IdcIpcResult<CursorAccount>>
-  cursorAccountsImportCockpit: (
-    tags?: string[]
-  ) => Promise<IdcIpcResult<CursorCockpitImportSummary>>
+  cursorAccountsList: () => Promise<IpcResult<CursorAccount[]>>
+  cursorAccountsCurrentId: () => Promise<IpcResult<string | null>>
+  cursorAccountsRemove: (ids: string[]) => Promise<IpcResult<void>>
+  cursorAccountsImportJson: (json: string, tags?: string[]) => Promise<IpcResult<CursorAccount[]>>
+  cursorAccountsImportLocal: (tags?: string[]) => Promise<IpcResult<CursorAccount>>
+  cursorAccountsImportCockpit: (tags?: string[]) => Promise<IpcResult<CursorCockpitImportSummary>>
   cursorAccountsAddToken: (
     input: string,
     tags?: string[]
-  ) => Promise<IdcIpcResult<CursorCredentialImportSummary>>
-  cursorAccountsExport: (ids: string[]) => Promise<IdcIpcResult<string>>
-  cursorAccountsRefresh: (id: string) => Promise<IdcIpcResult<CursorAccount>>
-  cursorAccountsRefreshAll: () => Promise<IdcIpcResult<CursorRefreshAllSummary>>
-  cursorAccountsUpdateTags: (id: string, tags: string[]) => Promise<IdcIpcResult<CursorAccount>>
+  ) => Promise<IpcResult<CursorCredentialImportSummary>>
+  cursorAccountsExport: (ids: string[]) => Promise<IpcResult<string>>
+  cursorAccountsRefresh: (id: string) => Promise<IpcResult<CursorAccount>>
+  cursorAccountsRefreshAll: () => Promise<IpcResult<CursorRefreshAllSummary>>
+  cursorAccountsUpdateTags: (id: string, tags: string[]) => Promise<IpcResult<CursorAccount>>
   cursorAccountsInject: (
     id: string,
     options?: CursorInjectOptions
-  ) => Promise<IdcIpcResult<CursorInjectResult>>
-  cursorAccountsOAuthStart: () => Promise<IdcIpcResult<CursorOAuthStartResult>>
+  ) => Promise<IpcResult<CursorInjectResult>>
+  cursorAccountsOAuthStart: () => Promise<IpcResult<CursorOAuthStartResult>>
   cursorAccountsOAuthComplete: (
     loginId: string,
     tags?: string[]
-  ) => Promise<IdcIpcResult<CursorAccount>>
-  cursorAccountsOAuthCancel: (loginId?: string) => Promise<IdcIpcResult<null>>
-  cursorAccountsRevealStore: () => Promise<IdcIpcResult<string>>
-  cursorAccountsGetSettings: () => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
+  ) => Promise<IpcResult<CursorAccount>>
+  cursorAccountsOAuthCancel: (loginId?: string) => Promise<IpcResult<null>>
+  cursorAccountsRevealStore: () => Promise<IpcResult<string>>
+  cursorAccountsGetSettings: () => Promise<IpcResult<CursorAutoRefreshSettings>>
   cursorAccountsUpdateSettings: (
     patch: Partial<CursorAutoRefreshSettings>
-  ) => Promise<IdcIpcResult<CursorAutoRefreshSettings>>
+  ) => Promise<IpcResult<CursorAutoRefreshSettings>>
   onCursorAccountsChanged: (callback: () => void) => () => void
-  grokAccountsList: () => Promise<IdcIpcResult<GrokAccountView[]>>
-  grokAccountsCurrentScope: () => Promise<IdcIpcResult<string | null>>
+  grokAccountsList: () => Promise<IpcResult<GrokAccountView[]>>
+  grokAccountsCurrentScope: () => Promise<IpcResult<string | null>>
   grokAccountsSwitch: (
     scope: string,
     options?: { closeGrok?: boolean }
-  ) => Promise<IdcIpcResult<GrokSwitchResult>>
+  ) => Promise<IpcResult<GrokSwitchResult>>
   grokAccountsRemove: (
     scope: string,
     options?: { closeGrok?: boolean }
-  ) => Promise<IdcIpcResult<GrokRemoveResult>>
-  grokAccountsSyncRelay: (scope: string) => Promise<IdcIpcResult<GrokRelayStatus>>
-  grokAccountsRelayStatus: () => Promise<IdcIpcResult<GrokRelayStatus>>
-  grokAccountsEnsureRelayRoute: (scope: string) => Promise<IdcIpcResult<GrokRelayInstallResult>>
+  ) => Promise<IpcResult<GrokRemoveResult>>
+  grokAccountsSyncRelay: (scope: string) => Promise<IpcResult<GrokRelayStatus>>
+  grokAccountsRelayStatus: () => Promise<IpcResult<GrokRelayStatus>>
+  grokAccountsEnsureRelayRoute: (scope: string) => Promise<IpcResult<GrokRelayInstallResult>>
   onGrokRelayInstallProgress: (callback: (progress: GrokRelayInstallProgress) => void) => () => void
   onGrokAccountsChanged: (callback: () => void) => () => void
 }

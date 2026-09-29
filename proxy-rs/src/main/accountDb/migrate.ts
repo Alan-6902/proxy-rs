@@ -76,7 +76,6 @@ export interface MigrationInput {
   registry: AdminManagedAccountEntry[]
   kiroRsBinary: string
   credentialsPath: string
-  proxyUrlFor?: (accountId: string, data: Record<string, unknown>) => string | undefined
   log?: (line: string) => void
 }
 
@@ -98,7 +97,7 @@ function proxyAccounts(rawStore: RawStore): {
 
 export function planMigration(input: MigrationInput): MigrationPlan {
   const creds = readKiroRsCredentials(input.credentialsPath)
-  const { data, accounts } = proxyAccounts(input.rawStore)
+  const { accounts } = proxyAccounts(input.rawStore)
   const credById = new Map(creds.filter((c) => c.id !== undefined).map((c) => [c.id!, c]))
   const credBySecret = new Map<string, number>()
   for (const c of creds) {
@@ -150,10 +149,7 @@ export function planMigration(input: MigrationInput): MigrationPlan {
         continue
       }
     }
-    const request = toImportRequest(
-      { ...account, id: accountId },
-      input.proxyUrlFor?.(accountId, data)
-    )
+    const request = toImportRequest({ ...account, id: accountId })
     if (request.ok) plan.toImport.push(accountId)
     else plan.notImportable.push({ accountId, reason: request.reason })
   }

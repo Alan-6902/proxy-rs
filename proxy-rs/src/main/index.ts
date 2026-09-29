@@ -35,7 +35,6 @@ import {
   adminManagedIdsSnapshot,
   isAdminManagedAccount,
   isAdminManagedRefreshToken,
-  reconcileManagedAccounts,
   reloadAdminManagedIds,
   setAdminManagedChangeListener,
   setAdminManagedRefreshTokenResolver
@@ -80,8 +79,6 @@ import {
   type ElectronProxyCredentials
 } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
-import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
-import { registerProxyPoolIpcHandlers, validateProxyEntry } from './ipc/proxyPool'
 import { KskAutomationManager } from './kskAutomation/syncManager'
 import {
   KSK_CLEANUP_FALLBACK_MODEL,
@@ -106,7 +103,6 @@ import {
 } from './kskAutomation/ipc-handlers'
 import type { KskLivenessOptions, ProviderKskCredential } from '../shared/kskAutomation'
 import {
-  deleteLocalAdminCredentialsById,
   readRemoteCredentials,
   remoteCredentialId,
   requestJson,
@@ -116,46 +112,14 @@ import {
   type LocalAdminProbeOutcome
 } from './kskAutomation/localAdminClient'
 import { LOCAL_ADMIN_PROBE_VERDICT, type LocalAdminPushCandidate } from '../shared/localAdminPush'
-import {
-  EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
-  resolveSubscriptionTypeFromTitle,
-  selectExhaustedLocalAdminCredentials,
-  type LocalAdminCredentialStats,
-  type LocalAdminExhaustedCleanupSummary
-} from '../shared/localAdminStats'
-import { LocalAdminStatsManager } from './localAdminStats/statsManager'
-import { fetchLocalAdminUsage } from './localAdminStats/statsClient'
-import {
-  registerLocalAdminStatsIpcHandlers,
-  sendLocalAdminStatsSnapshot
-} from './localAdminStats/ipc-handlers'
-import { KskHunterManager } from './kskHunter/hunterRunner'
-import {
-  hunterLocalDateKey,
-  isHunterOAuthCredential,
-  KSK_HUNTER_CHANNEL_LABEL,
-  type HunterOAuthCredential,
-  type KskHunterRuntimeNotification
-} from '../shared/kskHunter'
-import { loadKskHunterStore } from './kskHunter/configStore'
-import { registerKskHunterIpcHandlers, sendKskHunterStatus } from './kskHunter/ipc-handlers'
-import { KSK_LEDGER_RETIRE_REASON, resolveLedgerState } from '../shared/kskLedger'
-import {
-  loadKskLedger,
-  markKskLedgerRetired,
-  updateKskLedgerFromAccounts
-} from './kskHunter/ledgerStore'
-import { updateKskHunterConfig } from './kskHunter/configStore'
-import { DownstreamSettlementManager } from './downstreamSettlement/settlementManager'
-import { registerDownstreamSettlementIpcHandlers } from './downstreamSettlement/ipc-handlers'
+import { resolveSubscriptionTypeFromTitle } from '../shared/subscriptionType'
+import { fetchLocalAdminUsage } from './adminManaged/adminBalanceClient'
 import {
   registerCursorAccountsIpcHandlers,
   sendCursorAccountsChanged
 } from './cursorAccounts/ipc-handlers'
 import { registerGrokAccountsIpcHandlers } from './grokAccounts/ipc-handlers'
 import { CursorAutoRefreshScheduler } from './cursorAccounts/refreshScheduler'
-import type { DownstreamLedgerUsage } from '../shared/downstreamSettlement'
-import { ProxyPoolScheduler, type ProxyPoolStoreSlice } from './proxy/proxyPoolScheduler'
 import {
   LocalNotificationService,
   LocalNoticeKind,
@@ -1390,25 +1354,18 @@ async function readCanonicalKiroRefreshTransportCandidates(
     if (!store) return []
     const accountData = store.get('accountData', EMPTY_ACCOUNT_DATA) as {
       accounts?: Record<string, { credentials?: CanonicalKiroCredentials }>
-      accountProxyBindings?: Record<string, string>
-      proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
     }
-    const bindings = accountData.accountProxyBindings ?? {}
-    const proxyPool = accountData.proxyPool ?? {}
     return Object.entries(accountData.accounts ?? {})
       .flatMap(([accountId, account]) => {
         const credentials = account.credentials
         if (credentials?.refreshToken !== refreshToken) return []
-        const proxyId = bindings[accountId]
-        const proxy = proxyId ? proxyPool[proxyId] : undefined
         return [
           {
             accountId,
             clientId: credentials.clientId || '',
             clientSecret: credentials.clientSecret || '',
             region: credentials.region || 'us-east-1',
-            authMethod: credentials.authMethod,
-            proxyUrl: proxy?.enabled && proxy.status !== 'dead' ? proxy.url : undefined
+            authMethod: credentials.authMethod
           }
         ]
       })
@@ -1416,28 +1373,6 @@ async function readCanonicalKiroRefreshTransportCandidates(
         left.accountId < right.accountId ? -1 : left.accountId > right.accountId ? 1 : 0
       )
   })
-}
-
-/**
- * 读取账号绑定的出口代理 URL（代理池的「N 账号一个 IP」特性）。
- * 代理被停用或判死时回退到全局出口（undefined）。
- */
-function readAccountBoundProxyUrl(accountId: string): string | undefined {
-  if (!accountId || !store) return undefined
-  try {
-    const accountData = store.get('accountData', EMPTY_ACCOUNT_DATA) as {
-      accountProxyBindings?: Record<string, string>
-      proxyPool?: Record<string, { url?: string; enabled?: boolean; status?: string }>
-    }
-    const proxyId = accountData.accountProxyBindings?.[accountId]
-    if (!proxyId) return undefined
-    const proxy = accountData.proxyPool?.[proxyId]
-    if (!proxy?.enabled || proxy.status === 'dead') return undefined
-    return proxy.url
-  } catch (err) {
-    console.warn('[Store] Failed to read account bound proxy:', err)
-    return undefined
-  }
 }
 
 function canonicalCredentialResult(
@@ -1834,8 +1769,7 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
     clientId: credentials.clientId,
     clientSecret: credentials.clientSecret,
     region,
-    authMethod: isSocial ? 'social' : credentials.authMethod,
-    proxyUrl: readAccountBoundProxyUrl(accountId)
+    authMethod: isSocial ? 'social' : credentials.authMethod
   })
   if (!refreshed.success || !refreshed.accessToken || !refreshed.refreshToken) {
     throw new Error(`切号前刷新失败：${refreshed.error || '未知错误'}`)
@@ -1907,8 +1841,7 @@ async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise
     expectedRefreshToken: token.refresh_token,
     expectedCredentialRevision: canonical?.credentialRevision,
     region: token.region || candidate.region,
-    authMethod: 'social',
-    proxyUrl: candidate.proxyUrl
+    authMethod: 'social'
   })
   if (!result.success || !result.accessToken) {
     console.warn('[KiroCLI] 社交凭据续期失败，一分钟后重试:', result.error)
@@ -1968,33 +1901,6 @@ async function initStore(): Promise<void> {
   }
   return initStorePromise
 }
-
-/**
- * 代理池定时验活调度器（主进程常驻）。
- *
- * 写盘统一走 accountStoreCoordinator 的同一把锁，与渲染进程的 save-accounts 串行化：
- * 两侧都是 read-modify-write，不加锁会互相覆盖（渲染进程整份写回会抹掉调度器刚写的验活结果）。
- */
-const proxyPoolScheduler = new ProxyPoolScheduler({
-  readStore: async () => {
-    await initStore()
-    return (store!.get('accountData', EMPTY_ACCOUNT_DATA) as ProxyPoolStoreSlice | null) ?? null
-  },
-  mutateStore: async (mutator) =>
-    accountStoreCoordinator.runExclusive(async () => {
-      await initStore()
-      const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as ProxyPoolStoreSlice
-      const next = mutator(current)
-      if (!next) return
-      store!.set('accountData', next)
-      lastSavedData = next
-    }),
-  validate: (params) => validateProxyEntry(params),
-  notifyRenderer: (payload) => {
-    mainWindow?.webContents.send('proxy-pool-validated', payload)
-  },
-  log: (message) => console.log(message)
-})
 
 interface KskAutomationAccountData {
   accounts?: Record<string, KskAutomationStoredAccount>
@@ -2081,38 +1987,6 @@ function hasStoredKskAccount(data: KskAutomationAccountData, key: string): boole
   )
 }
 
-function findStoredOAuthAccount(
-  data: KskAutomationAccountData,
-  input: HunterOAuthCredential
-): KskAutomationStoredAccount | undefined {
-  return Object.values(data.accounts ?? {}).find(
-    (account) =>
-      account.credentials?.credentialKind === 'oauth' &&
-      (account.credentials.refreshToken === input.refreshToken ||
-        (Boolean(input.profileArn) && account.credentials.profileArn === input.profileArn))
-  )
-}
-
-function hasSameStoredOAuthCredential(
-  account: KskAutomationStoredAccount | undefined,
-  input: HunterOAuthCredential
-): account is KskAutomationStoredAccount & {
-  credentials: KskAutomationStoredOAuthCredentials
-} {
-  if (account?.credentials.credentialKind !== 'oauth') return false
-  return (
-    account.credentials.accessToken === input.accessToken &&
-    account.credentials.refreshToken === input.refreshToken &&
-    (input.clientId === undefined || account.credentials.clientId === input.clientId) &&
-    (input.clientSecret === undefined || account.credentials.clientSecret === input.clientSecret) &&
-    (input.authRegion === undefined || account.credentials.region === input.authRegion) &&
-    (input.apiRegion === undefined ||
-      (account.credentials.apiRegion || account.credentials.region) === input.apiRegion) &&
-    (input.profileArn === undefined || account.credentials.profileArn === input.profileArn) &&
-    (input.expiresAt === undefined || account.credentials.expiresAt === input.expiresAt)
-  )
-}
-
 /**
  * 验活并入库一个 KSK。
  *
@@ -2127,15 +2001,6 @@ async function importProviderKskCredential(
   ProviderKskCredential & {
     added: boolean
     rejected?: boolean
-    /**
-     * 新建的账号 id 与入库时的额度快照，供抢号台账建档。
-     *
-     * 只在真的新建了账号时才有：added=false（重复号）与 rejected（验活判死）
-     * 两种情况都没有新账号可记。
-     */
-    accountId?: string
-    usageCurrent?: number
-    usageLimit?: number
   }
 > {
   const duplicate = await accountStoreCoordinator.runExclusive(async () => {
@@ -2257,237 +2122,7 @@ async function importProviderKskCredential(
     store!.set('accountData', next)
     lastSavedData = next
     await createBackup(next)
-    // 带回 id 与额度快照：抢号台账要用它们建档并记下买入基线
-    return {
-      ...input,
-      added: true,
-      accountId: account.id,
-      usageCurrent: totalCurrent,
-      usageLimit: totalLimit
-    }
-  })
-}
-
-async function importProviderOAuthCredential(
-  input: HunterOAuthCredential & { groupId?: string }
-): Promise<{
-  added: boolean
-  changed?: boolean
-  accountId?: string
-  usageCurrent?: number
-  usageLimit?: number
-}> {
-  const duplicate = await accountStoreCoordinator.runExclusive(async () => {
-    await initStore()
-    const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
-    return findStoredOAuthAccount(data, input)
-  })
-  if (hasSameStoredOAuthCredential(duplicate, input)) {
-    return {
-      added: false,
-      accountId: duplicate.id,
-      usageCurrent: duplicate.usage.current,
-      usageLimit: duplicate.usage.limit
-    }
-  }
-
-  let usage: UnifiedUsageResponse | undefined
-  try {
-    usage = await getUsageAndLimits(
-      input.accessToken,
-      'BuilderId',
-      input.profileArn,
-      input.apiRegion || input.region
-    )
-  } catch {
-    /*
-     * quick-board 已经付费，验活失败不能丢弃凭证；但未确认可用的 token 也不能进入账号池。
-     * 先加密入库为 error，后续用户可在账号页重试检查。
-     */
-  }
-
-  const creditUsage = usage?.usageBreakdownList?.find(
-    (item) => item.resourceType === 'CREDIT' || item.displayName === 'Credits'
-  )
-  const baseLimit = creditUsage?.usageLimitWithPrecision ?? creditUsage?.usageLimit ?? 0
-  const baseCurrent = creditUsage?.currentUsageWithPrecision ?? creditUsage?.currentUsage ?? 0
-  const freeTrialActive = creditUsage?.freeTrialInfo?.freeTrialStatus === 'ACTIVE'
-  const freeTrialLimit = freeTrialActive
-    ? (creditUsage?.freeTrialInfo?.usageLimitWithPrecision ??
-      creditUsage?.freeTrialInfo?.usageLimit ??
-      0)
-    : 0
-  const freeTrialCurrent = freeTrialActive
-    ? (creditUsage?.freeTrialInfo?.currentUsageWithPrecision ??
-      creditUsage?.freeTrialInfo?.currentUsage ??
-      0)
-    : 0
-  const bonuses = (creditUsage?.bonuses ?? [])
-    .filter((bonus) => bonus.status === 'ACTIVE')
-    .map((bonus) => ({
-      code: bonus.bonusCode || '',
-      name: bonus.displayName || '',
-      current: bonus.currentUsageWithPrecision ?? bonus.currentUsage ?? 0,
-      limit: bonus.usageLimitWithPrecision ?? bonus.usageLimit ?? 0,
-      expiresAt: bonus.expiresAt
-    }))
-  const totalLimit =
-    baseLimit + freeTrialLimit + bonuses.reduce((sum, bonus) => sum + bonus.limit, 0)
-  const totalCurrent =
-    baseCurrent + freeTrialCurrent + bonuses.reduce((sum, bonus) => sum + bonus.current, 0)
-  const subscriptionTitle = usage?.subscriptionInfo?.subscriptionTitle || 'Free'
-  const subscriptionExpiresAt = usage?.nextDateReset
-    ? new Date(usage.nextDateReset).getTime()
-    : undefined
-  const now = Date.now()
-  const displayName = usage?.userInfo?.email || `Kiro OAuth · ${input.region}`
-  const refreshCapable = Boolean(input.clientId && input.clientSecret)
-  const lastError = !usage
-    ? 'OAuth 验活未完成，凭证已保留但不会进入可用账号池'
-    : !refreshCapable
-      ? 'OAuth 凭证缺少 clientId/clientSecret，到期后无法自动刷新'
-      : undefined
-  const status: KskAutomationStoredAccount['status'] = usage ? 'active' : 'error'
-  const credentials: KskAutomationStoredOAuthCredentials = {
-    credentialKind: 'oauth',
-    accessToken: input.accessToken,
-    refreshToken: input.refreshToken,
-    clientId: input.clientId,
-    clientSecret: input.clientSecret,
-    region: input.authRegion || input.region,
-    apiRegion: input.apiRegion || input.region,
-    authMethod: 'IdC',
-    provider: 'BuilderId',
-    profileArn: input.profileArn,
-    expiresAt: input.expiresAt
-  }
-  const subscription: KskAutomationStoredAccount['subscription'] = {
-    type: resolveKskSubscriptionType(subscriptionTitle),
-    title: subscriptionTitle,
-    rawType: usage?.subscriptionInfo?.type,
-    expiresAt: subscriptionExpiresAt,
-    daysRemaining: subscriptionExpiresAt
-      ? Math.max(0, Math.ceil((subscriptionExpiresAt - now) / (1000 * 60 * 60 * 24)))
-      : undefined,
-    managementTarget: usage?.subscriptionInfo?.subscriptionManagementTarget,
-    upgradeCapability: usage?.subscriptionInfo?.upgradeCapability,
-    overageCapability: usage?.subscriptionInfo?.overageCapability
-  }
-  const usageSnapshot: KskAutomationStoredAccount['usage'] = {
-    current: totalCurrent,
-    limit: totalLimit,
-    percentUsed: totalLimit > 0 ? (totalCurrent / totalLimit) * 100 : 0,
-    lastUpdated: now,
-    baseLimit,
-    baseCurrent,
-    freeTrialLimit,
-    freeTrialCurrent,
-    freeTrialExpiry: creditUsage?.freeTrialInfo?.freeTrialExpiry,
-    bonuses,
-    nextResetDate: usage?.nextDateReset
-  }
-
-  return accountStoreCoordinator.runExclusive(async () => {
-    await initStore()
-    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
-    if (input.groupId && !current.groups?.[input.groupId]) {
-      throw new Error('自动拉取目标分组已不存在，请重新选择分组')
-    }
-
-    const existing = findStoredOAuthAccount(current, input)
-    if (hasSameStoredOAuthCredential(existing, input)) {
-      return {
-        added: false,
-        accountId: existing.id,
-        usageCurrent: existing.usage.current,
-        usageLimit: existing.usage.limit
-      }
-    }
-
-    if (existing?.credentials.credentialKind === 'oauth') {
-      const updatedRefreshCapable = Boolean(
-        (input.clientId ?? existing.credentials.clientId) &&
-        (input.clientSecret ?? existing.credentials.clientSecret)
-      )
-      const updatedLastError = !usage
-        ? 'OAuth 验活未完成，凭证已保留但不会进入可用账号池'
-        : !updatedRefreshCapable
-          ? 'OAuth 凭证缺少 clientId/clientSecret，到期后无法自动刷新'
-          : undefined
-      const updated: KskAutomationStoredAccount = {
-        ...existing,
-        email: usage?.userInfo?.email || existing.email,
-        userId: usage?.userInfo?.userId || existing.userId,
-        nickname: usage?.userInfo?.email || existing.nickname,
-        profileArn: input.profileArn ?? existing.profileArn,
-        groupId: input.groupId ?? existing.groupId,
-        credentials: {
-          ...existing.credentials,
-          ...credentials,
-          clientId: input.clientId ?? existing.credentials.clientId,
-          clientSecret: input.clientSecret ?? existing.credentials.clientSecret,
-          region: input.authRegion ?? existing.credentials.region,
-          apiRegion:
-            input.apiRegion ?? existing.credentials.apiRegion ?? existing.credentials.region,
-          profileArn: input.profileArn ?? existing.credentials.profileArn,
-          expiresAt: input.expiresAt ?? existing.credentials.expiresAt
-        },
-        subscription: usage ? subscription : existing.subscription,
-        usage: usage ? usageSnapshot : existing.usage,
-        status,
-        lastError: updatedLastError,
-        isActive: status === 'active' ? existing.isActive : false,
-        lastCheckedAt: now
-      }
-      const next = {
-        ...current,
-        accounts: { ...(current.accounts ?? {}), [updated.id]: updated }
-      }
-      store!.set('accountData', next)
-      lastSavedData = next
-      await createBackup(next)
-      return {
-        added: false,
-        changed: true,
-        accountId: updated.id,
-        usageCurrent: updated.usage.current,
-        usageLimit: updated.usage.limit
-      }
-    }
-
-    const account: KskAutomationStoredAccount = {
-      id: randomUUID(),
-      email: displayName,
-      userId: usage?.userInfo?.userId || undefined,
-      nickname: displayName,
-      idp: 'BuilderId',
-      profileArn: input.profileArn,
-      groupId: input.groupId,
-      tags: [],
-      credentials,
-      subscription,
-      usage: usageSnapshot,
-      status,
-      lastError,
-      isActive: false,
-      createdAt: now,
-      lastUsedAt: now,
-      lastCheckedAt: now
-    }
-    const next = {
-      ...current,
-      accounts: { ...(current.accounts ?? {}), [account.id]: account }
-    }
-    store!.set('accountData', next)
-    lastSavedData = next
-    await createBackup(next)
-    return {
-      added: true,
-      changed: true,
-      accountId: account.id,
-      usageCurrent: totalCurrent,
-      usageLimit: totalLimit
-    }
+    return { ...input, added: true }
   })
 }
 
@@ -2647,8 +2282,7 @@ async function cleanupInvalidStoredKskAccounts(
     credentialKind: 'kiro_api_key',
     kiroApiKey: account.credentials.kiroApiKey,
     region: account.credentials.region,
-    provider: 'BuilderId',
-    proxyUrl: readAccountBoundProxyUrl(account.id)
+    provider: 'BuilderId'
   })
 
   // 模型列表与账号无关（同一批 KSK 走同一上游），拉一次复用，别每个账号都问一遍
@@ -2682,20 +2316,6 @@ async function cleanupInvalidStoredKskAccounts(
     return removedIds
   })
 
-  // 台账标「验活判死」：与额度耗尽区分开，前者是号废了，后者是号用完了
-  const retiredAt = Date.now()
-  await Promise.all(
-    removedIds.map((accountId) =>
-      markKskLedgerRetired({
-        accountId,
-        at: retiredAt,
-        reason: KSK_LEDGER_RETIRE_REASON.INVALID
-      }).catch((error) => {
-        console.warn('[KskLedger] Failed to mark retired:', error)
-      })
-    )
-  )
-
   result.removed = removedIds.length
   result.removedKeys = removedIds
     .map((accountId) => permanentlyInvalid.get(accountId)?.key)
@@ -2703,13 +2323,6 @@ async function cleanupInvalidStoredKskAccounts(
   return result
 }
 
-/**
- * 从本地账号库里删掉一批 apiKeyHash 对应的 KSK 账号，返回被删账号的明文 key。
- *
- * Admin 只回哈希，所以匹配方向是「本地逐个账号算 sha256，看在不在目标哈希集合里」。
- * 明文要回给调用方拉黑：只删不拉黑的话，下一轮 Provider 返回同一个号就会重新入库、
- * 再被同步回 Admin，变成删了又回来的死循环。
- */
 /** 账号库模式：store.set 不会删库里的账号（快照可能是旧的），删除必须显式走 kiro-rs */
 async function deleteFromAccountDb(ids: readonly string[]): Promise<void> {
   const bridge = accountDbBridge()
@@ -2722,149 +2335,6 @@ async function deleteFromAccountDb(ids: readonly string[]): Promise<void> {
   }
   const failed = await bridge.deleteAccounts(ids, accountDbAdminTarget())
   for (const item of failed) console.warn(`[AccountDb] 删除账号 ${item.id} 失败：${item.reason}`)
-}
-
-async function removeStoredKskAccountsByHash(
-  hashes: ReadonlySet<string>
-): Promise<{ removedIds: string[]; removedKeys: string[] }> {
-  if (hashes.size === 0) return { removedIds: [], removedKeys: [] }
-  return await accountStoreCoordinator.runExclusive(async () => {
-    await initStore()
-    const current = store!.get('accountData', EMPTY_ACCOUNT_DATA) as KskAutomationAccountData
-    const doomed = new Map<string, { key: string; groupId?: string }>()
-    for (const account of Object.values(current.accounts ?? {})) {
-      if (!isKskAutomationStoredAccount(account)) continue
-      const key = account.credentials.kiroApiKey
-      if (!key) continue
-      if (!hashes.has(sha256Hex(key))) continue
-      doomed.set(account.id, { key, groupId: account.groupId })
-    }
-    if (doomed.size === 0) return { removedIds: [], removedKeys: [] }
-
-    const { data: next, removedIds } = removeMatchingInvalidKskAccounts(current, doomed)
-    if (removedIds.length === 0) return { removedIds: [], removedKeys: [] }
-    await deleteFromAccountDb(removedIds)
-    store!.set('accountData', next)
-    lastSavedData = next
-    await createBackup(next)
-    return {
-      removedIds,
-      removedKeys: removedIds
-        .map((accountId) => doomed.get(accountId)?.key)
-        .filter((key): key is string => Boolean(key))
-    }
-  })
-}
-
-/**
- * 删掉本机 Admin 上额度已耗尽的凭据，并同步清掉本地账号库里的对应账号。
- *
- * 为什么两边都要删：syncKskAccountsToLocalAdmin 会把「本地有、Admin 没有」的号重新
- * POST 回 Admin。只删 Admin 的话，下一次同步就把它推回去了。
- *
- * 判定口径是 balance 拉回来的 remaining <= 0（见 selectExhaustedLocalAdminCredentials），
- * 不掺失败计数：那个会被上游 5xx 污染。封禁与认证失效不在这条链路，靠周期性发消息验活。
- */
-async function cleanupExhaustedLocalAdminCredentials(
-  credentials: readonly LocalAdminCredentialStats[]
-): Promise<LocalAdminExhaustedCleanupSummary> {
-  const exhausted = selectExhaustedLocalAdminCredentials(credentials)
-  const summary: LocalAdminExhaustedCleanupSummary = {
-    ...EMPTY_LOCAL_ADMIN_EXHAUSTED_CLEANUP,
-    checked: credentials.filter((credential) => credential.usage).length,
-    exhausted: exhausted.length,
-    removedMaskedKeys: [],
-    errors: []
-  }
-  if (exhausted.length === 0) return summary
-
-  const target = await resolveLocalAdminTarget()
-  const removal = await deleteLocalAdminCredentialsById({
-    credentials: exhausted.map((credential) => ({
-      credentialId: credential.id,
-      disabled: credential.disabled
-    })),
-    baseUrl: target.baseUrl,
-    adminApiKey: target.adminApiKey,
-    timeoutSeconds: target.timeoutSeconds,
-    fetchImpl: localAdminFetchImpl
-  })
-  summary.removed = removal.deleted.length
-  summary.errors.push(...removal.errors)
-  summary.removedMaskedKeys = removal.deleted.map(
-    (item) => item.maskedApiKey || `#${item.credentialId}`
-  )
-
-  const hashes = new Set(
-    removal.deleted.map((item) => item.apiKeyHash).filter((hash): hash is string => Boolean(hash))
-  )
-
-  try {
-    const local = await removeStoredKskAccountsByHash(hashes)
-    summary.removedLocalAccounts = local.removedIds.length
-    /*
-     * 台账标寿终：额度耗尽是号的正常终点，必须与「被手动删掉」区分开，
-     * 否则报表里分不清「烧干了」和「不知道为什么没了」。
-     *
-     * 必须放在这里而不是提前：台账按账号 id 关联，而账号 id 只有本地清理
-     * （removeStoredKskAccountsByHash）才知道——Admin 那边只有哈希。
-     * 只标不阻塞：台账是观测数据，写失败不该让清理主流程失败。
-     */
-    const retiredAt = Date.now()
-    await Promise.all(
-      local.removedIds.map((accountId) =>
-        markKskLedgerRetired({
-          accountId,
-          at: retiredAt,
-          reason: KSK_LEDGER_RETIRE_REASON.EXHAUSTED
-        }).catch((error) => {
-          console.warn('[KskLedger] Failed to mark retired:', error)
-        })
-      )
-    )
-    // 拉黑明文，否则下一轮 Provider 拉取会把同一个号重新入库并推回 Admin
-    kskAutomationManager.blacklistKeys(local.removedKeys)
-    if (local.removedIds.length > 0) sendKskAutomationAccountsChanged(() => mainWindow)
-  } catch (error) {
-    /*
-     * 本地删失败要显式报出来：Admin 上已经删掉了，本地还留着的话下次同步会把它推回去。
-     * 用户看到这条错误才知道得手动处理，否则表现为「删了又出现」。
-     */
-    summary.errors.push(
-      `已从 Admin 删除，但清理本地账号失败：${error instanceof Error ? error.message : String(error)}`
-    )
-  }
-  return summary
-}
-
-/**
- * 把当前账号库的用量快照并进抢号台账。
- *
- * 挂在 save-accounts 之后：那是所有账号变更的汇合点，账号页默认 5 分钟一轮的
- * 自动刷新（autoRefreshInterval，带 syncInfo）拉完 usage 也会落到那里，
- * 所以台账不需要自己再开一条轮询。
- *
- * 只读账号库、不打网络：usage 是别人已经拉好的，这里只做差分记账。
- * 台账为空（还没抢到过号）时 updateKskLedgerFromAccounts 会直接跳过写盘。
- */
-async function syncKskLedgerFromAccounts(): Promise<void> {
-  try {
-    const observations = await accountStoreCoordinator.runExclusive(async () => {
-      await initStore()
-      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
-        accounts?: Record<string, { usage?: { current?: number; limit?: number } }>
-      }
-      return Object.entries(data.accounts ?? {}).map(([accountId, account]) => ({
-        accountId,
-        currentUsage: account.usage?.current,
-        usageLimit: account.usage?.limit
-      }))
-    })
-    await updateKskLedgerFromAccounts({ observations, at: Date.now() })
-  } catch (error) {
-    // 台账是观测数据，更新失败不该影响账号保存这条主流程
-    console.warn('[KskLedger] Failed to sync from accounts:', error)
-  }
 }
 
 async function readKskAccountsForLocalAdmin(
@@ -2915,196 +2385,12 @@ const kskAutomationManager = new KskAutomationManager({
   log: (message) => console.log(message)
 })
 
-/**
- * 反代统计：周期性从本机 Admin 抓成功/失败计数并攒趋势。
- *
- * 连接信息复用 ksk 任务里的「同步到本机 Admin」配置，不另开一处配置项；
- * 没配置时 manager 自己降级为 unconfigured，不发请求。
- */
-const localAdminStatsManager = new LocalAdminStatsManager({
-  readTarget: async () => {
-    try {
-      return await resolveLocalAdminTarget()
-    } catch {
-      // 没有可用配置属于正常状态，交给 manager 标 unconfigured
-      return undefined
-    }
-  },
-  fetchImpl: localAdminFetchImpl,
-  cleanupExhausted: cleanupExhaustedLocalAdminCredentials,
-  /*
-   * 每轮用反代当前的凭据列表核对托管登记表：那边已经被删掉的凭据，对应账号要
-   * 恢复本地刷新，否则会永远停在「托管」状态、再也不会刷 token。
-   * 这条兜住的是绕过本进程的删除路径（Admin UI、curl、容器重建）。
-   */
-  onCredentialsObserved: async (credentials) => {
-    const { dropped } = await reconcileManagedAccounts(
-      credentials.map((credential) => ({
-        id: credential.id,
-        credentialIdentity: credential.credentialIdentity,
-        apiKeyHash: credential.apiKeyHash,
-        refreshTokenHash: credential.refreshTokenHash
-      }))
-    )
-    for (const item of dropped) {
-      console.log(
-        `[AdminManaged] 账号 ${item.accountId} 已不在反代（${item.reason}），恢复本地刷新`
-      )
-    }
-  },
-  notifySnapshot: (snapshot) => sendLocalAdminStatsSnapshot(() => mainWindow, snapshot),
-  log: (message) => console.log(message)
-})
-
-/**
- * 抢号器：3 秒一轮盯商品聚合站点。
- *
- * 复用 importProviderKskCredential 做验活兼入库（它会先发一条测试消息验活，
- * 通过才落库），避免再写一份 KSK 落库逻辑。抢号器不带自己的验活参数，
- * 走默认口径：自动挑最便宜的模型 + 内置测试消息。
- */
-let kskHunterSnapshotQueue: Promise<void> = Promise.resolve()
-
-// manager 的通知钩子是同步触发的；串行化异步 IPC，避免 start/final 乱序，失败后继续接下一条。
-function queueKskHunterSnapshot(runtime: KskHunterRuntimeNotification): void {
-  const send = (): Promise<void> => sendKskHunterStatus(() => mainWindow, kskHunterManager, runtime)
-  const next = kskHunterSnapshotQueue.then(send, send)
-  kskHunterSnapshotQueue = next.catch((error) => {
-    const message = error instanceof Error ? error.message : String(error)
-    console.log(`[KskHunter] 快照推送失败：${message}`)
-  })
-}
-
-const kskHunterManager = new KskHunterManager({
-  readStore: loadKskHunterStore,
-  fetchImpl: (url, init) =>
-    fetchWithAppProxy(url, {
-      method: init.method,
-      headers: init.headers,
-      body: init.body,
-      signal: init.signal
-    }),
-  // 下游是 loopback，必须绕开系统代理；与本机 Admin 复用同一个直连 agent
-  downstreamFetchImpl: localAdminFetchImpl,
-  importCredential: async (input) => {
-    if (isHunterOAuthCredential(input)) {
-      return importProviderOAuthCredential(input)
-    }
-    const result = await importProviderKskCredential(input)
-    // 验活判死的号必须抛错：抢号器据此把记录标 dead_key 并拒绝推给下游
-    if (result.rejected) throw new Error('发消息验活未通过，该号已不可用')
-    // accountId 与额度快照透传给台账：前者是关联主键，后者是买入基线
-    return {
-      added: result.added,
-      accountId: result.accountId,
-      usageCurrent: result.usageCurrent,
-      usageLimit: result.usageLimit
-    }
-  },
-  notifyInStock: ({ linkName, title, region }) => {
-    localNotifications.notify(LocalNoticeKind.KskHunterInStock, {
-      hunterKey: `${linkName}:${title}:${region}`,
-      bodyOverride: `${linkName} · ${title}${region ? `（${region}）` : ''} 已开货，尽快下单。`
-    })
-  },
-  notifyOrdered: ({ linkName, maskedKey, region }) => {
-    localNotifications.notify(LocalNoticeKind.KskHunterOrdered, {
-      hunterKey: `${linkName}:${maskedKey}`,
-      bodyOverride: `${linkName} 已抢到 ${maskedKey}（${region}），正在验活并入库。`
-    })
-  },
-  // 台账报表要显示分组名；台账只存 id，分组可改名，所以每次现查
-  readGroupNames: async () =>
-    accountStoreCoordinator.runExclusive(async () => {
-      await initStore()
-      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
-        groups?: Record<string, { name?: string }>
-      }
-      return Object.fromEntries(
-        Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
-      )
-    }),
-  notifyAccountsChanged: () => sendKskAutomationAccountsChanged(() => mainWindow),
-  notifyBudgetExhausted: ({ scope, channelLabel, spentCny, limitCny }) => {
-    // 去重键带本地日期，跨天会再提醒一次。全局是人民币，渠道是原币，所以不硬写 ¥
-    const unit = scope === 'global' ? '¥' : ''
-    localNotifications.notify(LocalNoticeKind.KskHunterBudgetExhausted, {
-      hunterKey: `${hunterLocalDateKey()}:${scope}:${channelLabel ?? 'all'}`,
-      bodyOverride:
-        `${scope === 'global' ? '全局' : channelLabel} 当日花费 ${unit}${spentCny} 已达上限 ${unit}${limitCny}，` +
-        '已暂停自动下单；开货仍会提醒。'
-    })
-  },
-  notifyLowBalance: ({ channel, balanceUnit, thresholdUnit, unitLabel }) => {
-    localNotifications.notify(LocalNoticeKind.KskHunterLowBalance, {
-      hunterKey: `${hunterLocalDateKey()}:${channel}`,
-      bodyOverride: `${KSK_HUNTER_CHANNEL_LABEL[channel]} 余额仅剩 ${balanceUnit} ${unitLabel}（阈值 ${thresholdUnit}），请及时充值。`
-    })
-  },
-  notifySnapshot: (runtime) => {
-    queueKskHunterSnapshot(runtime)
-  },
-  log: (message) => console.log(message)
-})
-
-/**
- * 下游对账：把交付账本 + 台账消耗结算成每日 CSV 与可查报表。
- *
- * 积分口径来自抢号台账（它已经处理过按月重置的结转），这里只做区间差分，
- * 不自己再拉一遍 usage——账号页 5 分钟一轮的刷新已经在更新台账了。
- */
-const downstreamSettlementManager = new DownstreamSettlementManager({
-  readCsvDir: async () => (await loadKskHunterStore()).config.csvExportDir,
-  userDataDir: () => app.getPath('userData'),
-  readLedgerUsage: async () => {
-    const entries = await loadKskLedger()
-    return Object.fromEntries(
-      entries.map((entry): [string, DownstreamLedgerUsage] => [
-        entry.accountId,
-        {
-          accountId: entry.accountId,
-          usedCredits: entry.usedCredits,
-          usageLimit: entry.usageLimit,
-          state: resolveLedgerState(entry)
-        }
-      ])
-    )
-  },
-  // 分组名要现查：交付账本只存 id，分组随时可能改名或被删
-  readGroupNames: async () =>
-    accountStoreCoordinator.runExclusive(async () => {
-      await initStore()
-      const data = store!.get('accountData', EMPTY_ACCOUNT_DATA) as {
-        groups?: Record<string, { name?: string }>
-      }
-      return Object.fromEntries(
-        Object.entries(data.groups ?? {}).map(([id, group]) => [id, group.name || id])
-      )
-    }),
-  log: (message) => console.log(message)
-})
-
 /** 未经账号库包装的 electron-store（迁移 / 回滚用） */
 let rawAccountStore: (RawStore & { path: string }) | null = null
 /** 账号库模式启用但打不开时的原因，启动后弹窗提示 */
 let accountDbStartupError: string | null = null
 /** 账号库模式下 CLI 当前账号的续期兜底定时器 */
 let accountDbCliTimer: NodeJS.Timeout | null = null
-
-/** 账号绑定的出口代理（与 readAccountBoundProxyUrl 同一判据），供账号库同步给 kiro-rs */
-function resolveBoundProxyUrl(
-  accountId: string,
-  data: Record<string, unknown>
-): string | undefined {
-  const bindings = data.accountProxyBindings as Record<string, string> | undefined
-  const pool = data.proxyPool as
-    | Record<string, { url?: string; enabled?: boolean; status?: string }>
-    | undefined
-  const proxyId = bindings?.[accountId]
-  const proxy = proxyId ? pool?.[proxyId] : undefined
-  if (!proxy?.enabled || proxy.status === 'dead') return undefined
-  return proxy.url
-}
 
 function resolveKiroRsBinary(config: AccountDbConfig): string {
   if (config.kiroRs.binary) return config.kiroRs.binary
@@ -3132,8 +2418,7 @@ async function initStoreInternal(): Promise<void> {
     try {
       const bridge = activateAccountDb({
         config: accountDbConfig,
-        rawStore: storeInstance as unknown as RawStore,
-        proxyUrlFor: resolveBoundProxyUrl
+        rawStore: storeInstance as unknown as RawStore
       })
       store = wrapStoreWithBridge(storeInstance, bridge) as unknown as typeof store
       console.log(`[AccountDb] 账号库模式已启用：${accountDbConfig.dbPath}`)
@@ -3478,10 +2763,6 @@ function stopMainPoolTokenRefresh(): void {
 let traySettings: TraySettings = { ...defaultTraySettings }
 let isQuitting = false // 标记是否真正退出应用
 let resolvedNotificationLanguage: LocalNoticeLanguage = 'zh'
-const RENDERER_NOTICE_KINDS = new Set<LocalNoticeKind>([
-  LocalNoticeKind.RegistrationRiskPaused,
-  LocalNoticeKind.RegistrationBatchCompleted
-])
 const localNotifications = new LocalNotificationService(
   () => traySettings,
   () => resolvedNotificationLanguage,
@@ -3831,14 +3112,6 @@ app.whenReady().then(async () => {
     closePrivateBrowserWindow()
   })
 
-  // ============ 注册功能 IPC ============
-  registerRegistrationHandlers(() => mainWindow)
-
-  // 代理池定时验活：读盘自启，不依赖渲染进程是否打开过代理池页面
-  void proxyPoolScheduler.start().catch((err) => {
-    console.warn('[ProxyPoolScheduler] Failed to start:', err)
-  })
-
   // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
   registerKskAutomationIpcHandlers({
     getManager: () => kskAutomationManager,
@@ -3848,36 +3121,6 @@ app.whenReady().then(async () => {
   })
   void kskAutomationManager.start().catch((err) => {
     console.warn('[KskAutomation] Failed to start:', err)
-  })
-
-  // ============ 反代统计（本机 Admin 成功/失败/用量）IPC ============
-  registerLocalAdminStatsIpcHandlers({
-    getManager: () => localAdminStatsManager,
-    getMainWindow: () => mainWindow
-  })
-  void localAdminStatsManager.start().catch((err) => {
-    console.warn('[LocalAdminStats] Failed to start:', err)
-  })
-
-  // ============ KSK 抢号（商品聚合站点监控）IPC ============
-  registerKskHunterIpcHandlers({
-    getManager: () => kskHunterManager,
-    getMainWindow: () => mainWindow
-  })
-  void kskHunterManager.start().catch((err) => {
-    console.warn('[KskHunter] Failed to start:', err)
-  })
-
-  // ============ 下游对账（交付账本、每日 CSV 存档）IPC ============
-  registerDownstreamSettlementIpcHandlers({
-    getManager: () => downstreamSettlementManager,
-    getMainWindow: () => mainWindow,
-    saveCsvDir: async (dir) => {
-      await updateKskHunterConfig({ csvExportDir: dir }, undefined)
-    }
-  })
-  void downstreamSettlementManager.start().catch((err) => {
-    console.warn('[DownstreamSettlement] Failed to start:', err)
   })
 
   // ============ Cursor 账号管理（多账号、切号、用量）IPC ============
@@ -3903,17 +3146,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-tray-settings', () => {
     return traySettings
   })
-
-  // 渲染进程只能请求固定类型的本机通知，文案由主进程统一生成。
-  ipcMain.handle(
-    'local-notification',
-    (_event, kind: LocalNoticeKind, input?: { batchId?: string }) => {
-      if (!RENDERER_NOTICE_KINDS.has(kind)) return
-      localNotifications.notify(kind, {
-        batchId: typeof input?.batchId === 'string' ? input.batchId : undefined
-      })
-    }
-  )
 
   // ============ 自定义 titlebar IPC ============
   ipcMain.on('window-minimize', () => mainWindow?.minimize())
@@ -4099,25 +3331,6 @@ app.whenReady().then(async () => {
     }
   )
 
-  // ============ 代理池验活 ============
-  // 手动验活 + 代理链诊断的 IPC handler 已拆分到独立模块，便于后续维护
-  registerProxyPoolIpcHandlers()
-
-  // ============ 代理池定时验活 ============
-  /**
-   * 定时验活由主进程常驻调度器负责（原先挂在渲染进程 ProxyPoolPage 的 useEffect 上，
-   * 页面切走或进程重启就失效）。渲染进程改了 autoValidateIntervalMin 后调用此接口重启调度。
-   */
-  ipcMain.handle('proxy-pool:restart-scheduler', async () => {
-    try {
-      await proxyPoolScheduler.start()
-      return { success: true, running: proxyPoolScheduler.isRunning }
-    } catch (err) {
-      console.error('[proxy-pool:restart-scheduler] error:', err)
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
-    }
-  })
-
   // ============ 通用 HTTP 诊断探测 ============
   /**
    * 使用应用代理设置发起一次 GET/HEAD 请求，返回延迟、状态码、错误信息。
@@ -4221,7 +3434,6 @@ app.whenReady().then(async () => {
               const { usage, errors } = await fetchLocalAdminUsage(
                 { ...target, fetchImpl: localAdminFetchImpl },
                 [managedEntry.credentialId],
-                undefined,
                 true
               )
               if (usage.size > 0) {
@@ -4440,8 +3652,6 @@ app.whenReady().then(async () => {
     })
     // 所有账号入口最终都会落到 save-accounts；在锁外合并触发，避免网络请求占住账号存储锁。
     kskAutomationManager.queueLocalAdminSync()
-    // 同理在锁外更新台账：账号页 5 分钟一轮的用量刷新最终也落到这里
-    void syncKskLedgerFromAccounts()
   })
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
@@ -4489,14 +3699,9 @@ app.whenReady().then(async () => {
             }
           }
 
-          // 查找账号绑定的代理 URL（账号池中已有 proxyUrl 字段）
-          const boundProxyUrl = readAccountBoundProxyUrl(account.id || '')
+          console.log(`[IPC] Refreshing token (authMethod: ${authMethod || 'IdC'})...`)
 
-          console.log(
-            `[IPC] Refreshing token (authMethod: ${authMethod || 'IdC'})...${boundProxyUrl ? ' [via bound proxy]' : ''}`
-          )
-
-          // 根据 authMethod 选择刷新方式（透传账号绑定代理）
+          // 根据 authMethod 选择刷新方式
           const refreshResult = await refreshStoredKiroCredentials({
             accountId: account.id || '',
             expectedRefreshToken: refreshToken,
@@ -4504,8 +3709,7 @@ app.whenReady().then(async () => {
             clientId,
             clientSecret,
             region,
-            authMethod,
-            proxyUrl: boundProxyUrl
+            authMethod
           })
 
           if (!refreshResult.success || !refreshResult.accessToken) {
@@ -5085,8 +4289,8 @@ app.whenReady().then(async () => {
       }
       const upstreamAuth = getUpstreamKiroAuth(dbContext?.credential ?? upstreamCredential)
 
-      // 查询账号绑定的代理（账号池）
-      const boundProxyUrl = dbContext?.proxyUrl ?? readAccountBoundProxyUrl(account.id || '')
+      // 账号库模式下凭据自带的出口代理（kiro-rs 侧配置）
+      const boundProxyUrl = dbContext?.proxyUrl
 
       // 确定正确的 idp：优先使用 credentials.provider，否则回退到 account.idp
       // 社交登录使用实际的 provider (Github/Google)，IdC 使用 BuilderId
@@ -5424,9 +4628,6 @@ app.whenReady().then(async () => {
               provider
             } = account.credentials
 
-            // 查询账号绑定的代理
-            const boundProxyUrl = readAccountBoundProxyUrl(account.id)
-
             // 确定正确的 idp
             let idp = 'BuilderId'
             if (authMethod === 'social') {
@@ -5462,8 +4663,7 @@ app.whenReady().then(async () => {
                 clientId,
                 clientSecret,
                 region,
-                authMethod,
-                proxyUrl: boundProxyUrl
+                authMethod
               })
 
               if (!refreshResult.success) {
@@ -7413,7 +6613,6 @@ app.whenReady().then(async () => {
           typeof credentialInput === 'string'
             ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
             : resolveUpstreamKiroCredential(credentialInput)
-        const boundProxyUrl = accountId ? readAccountBoundProxyUrl(accountId) : undefined
         // 账号库模式：凭据不经渲染层，先请 kiro-rs 确保新鲜再从库里取
         const context = await accountDbUpstreamContext(accountId)
         if (context && 'error' in context)
@@ -7428,7 +6627,7 @@ app.whenReady().then(async () => {
               profileArn: fresh?.profileArn ?? profileArn,
               provider: fresh?.provider ?? provider,
               authMethod: (fresh?.authMethod ?? authMethod) as ProxyAccount['authMethod'],
-              proxyUrl: fresh?.proxyUrl ?? boundProxyUrl
+              proxyUrl: fresh?.proxyUrl
             } as ProxyAccount),
           context
         )
@@ -7687,8 +6886,7 @@ async function runAccountDbCommand(argv: readonly string[]): Promise<void> {
           rawStore: rawAccountStore,
           registry: await loadAdminManagedEntries(),
           kiroRsBinary: resolveKiroRsBinary(config),
-          credentialsPath,
-          proxyUrlFor: resolveBoundProxyUrl
+          credentialsPath
         },
         { dryRun: !argv.includes('--migrate-account-db=apply') }
       )
@@ -7793,14 +6991,8 @@ app.on('will-quit', async (event) => {
 
   // 停止主进程池 token 刷新调度器
   stopMainPoolTokenRefresh()
-  // 停止代理池定时验活调度器
-  proxyPoolScheduler.stop()
   // 停止 KSK Provider 轮询与后续调度
   kskAutomationManager.stop()
-  // 停止 KSK 抢号轮询与推送重试
-  kskHunterManager.stop()
-  // 停止反代统计采样
-  localAdminStatsManager.stop()
   void localAdminDirectAgent.close()
   stopAccountDbWatcher()
   if (accountDbCliTimer) {
@@ -7833,13 +7025,6 @@ app.on('will-quit', async (event) => {
           await proxyLogStore.flushSaveNow()
         } catch (err) {
           console.error('[Exit] Failed to flush proxy logs:', err)
-        }
-        // 释放共享的 TLS ModuleClient（worker pool + DLL）
-        try {
-          const { shutdownTlsClientPool } = await import('./registration/tlsClientPool')
-          await shutdownTlsClientPool()
-        } catch (err) {
-          console.error('[Exit] Failed to shutdown TLS client pool:', err)
         }
       })
       console.log('[Exit] Data saved successfully')

@@ -4,7 +4,7 @@
 
 | 目录 | 是什么 | 技术栈 |
 |---|---|---|
-| `proxy-rs/` | 桌面端：账号管理、抢号、统计、KSK 台账、下游对账 | Electron + React + TypeScript |
+| `proxy-rs/` | 桌面端：账号管理、KSK 任务、Cursor / Grok 账号 | Electron + React + TypeScript |
 | `kiro-rs-src/` | 反代：凭据池、Admin API、Admin 页面 | Rust (axum) + React |
 
 `proxy-rs` 通过 `src/main/kskAutomation/localAdminClient.ts` 调 `kiro-rs-src` 的
@@ -13,9 +13,6 @@
 ## 常用文档
 
 - 反代改完怎么打镜像、怎么部署到本机 → `kiro-rs-src/docs/构建与部署.md`
-- 抢号报表的数据口径 → `proxy-rs/docs/抢号报表数据.md`
-- 跟下游对账收款的数据口径与 CSV 存档 → `proxy-rs/docs/下游对账数据.md`
-- 接入新的抢号渠道 → `proxy-rs/docs/接入新抢号渠道.md`
 - 账号库模式（共享 SQLite、kiro-rs 由 proxy 拉起）的点测、切换、回滚与旧文件清理 → `proxy-rs/docs/账号库切换与点测.md`
 
 ## 两个容易踩的点

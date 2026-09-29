@@ -186,18 +186,8 @@ export const AccountCard = memo(function AccountCard({
     maskEmail,
     maskNickname,
     usagePrecision,
-    updateAccountStatus,
-    accountProxyBindings,
-    proxyPool,
-    unbindAccountFromProxy
+    updateAccountStatus
   } = useAccountsStore()
-
-  // 该账号绑定的代理（如有）
-  const boundProxy = useMemo(() => {
-    const proxyId = accountProxyBindings[account.id]
-    if (!proxyId) return null
-    return proxyPool.get(proxyId) || null
-  }, [accountProxyBindings, account.id, proxyPool])
 
   // 解除封禁标记中（loading 状态）
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)
@@ -696,42 +686,6 @@ export const AccountCard = memo(function AccountCard({
           >
             {account.idp}
           </Badge>
-          {/* 代理绑定徽章：可点击解绑 */}
-          {boundProxy && (
-            <Badge
-              variant="outline"
-              className={cn(
-                'text-2xs h-5 px-1.5 font-normal cursor-pointer transition-colors group',
-                boundProxy.enabled && boundProxy.status !== 'dead'
-                  ? 'border-cyan-500/40 text-cyan-700 dark:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20'
-                  : 'border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-500/10'
-              )}
-              title={`${isEn ? 'Bound proxy:' : '绑定代理：'} ${boundProxy.host}:${boundProxy.port}${boundProxy.label ? ` (${boundProxy.label})` : ''}\n${isEn ? 'Click to unbind' : '点击解绑'}`}
-              onClick={async (e) => {
-                e.stopPropagation()
-                const confirmed = await askConfirm({
-                  title: isEn
-                    ? `Unbind ${account.email} from ${boundProxy.host}:${boundProxy.port}?`
-                    : `解绑 ${account.email} 与 ${boundProxy.host}:${boundProxy.port}？`,
-                  description: isEn
-                    ? 'Requests for this account will stop using the bound outbound proxy.'
-                    : '该账号的请求将不再经由此出口代理。',
-                  confirmText: isEn ? 'Unbind' : '解绑',
-                  cancelText: isEn ? 'Cancel' : '取消',
-                  tone: 'warning'
-                })
-                if (confirmed) {
-                  unbindAccountFromProxy(account.id)
-                }
-              }}
-            >
-              <span className="opacity-70 group-hover:hidden">⇄</span>
-              <span className="hidden group-hover:inline">✕</span>
-              <span className="ml-0.5">
-                {boundProxy.host.length > 15 ? boundProxy.host.slice(0, 12) + '…' : boundProxy.host}
-              </span>
-            </Badge>
-          )}
           {/* 切换 Kiro CLI：底部操作栏已满，放在徽章行右侧 */}
           <button
             type="button"

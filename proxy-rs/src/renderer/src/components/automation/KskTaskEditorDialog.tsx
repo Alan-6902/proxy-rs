@@ -237,17 +237,10 @@ export function KskTaskEditorDialog({
                   />
                 </div>
                 <p className="self-end pb-2 text-xs text-muted-foreground">
-                  每轮每个号都会发一条测试消息，间隔太短纯烧 credits。额度耗尽这种最常见的失效
-                  不依赖它——那条走余额接口，由反代统计每分钟免费查一次。
+                  每轮每个号都会发一条测试消息，间隔太短纯烧 credits。
                 </p>
               </div>
             )}
-            <ToggleField
-              checked={config.autoDeleteExhausted}
-              onChange={(autoDeleteExhausted) => setConfig({ ...config, autoDeleteExhausted })}
-              title="额度耗尽自动删除"
-              hint="反代统计每分钟采一次余额，发现额度已耗尽（剩余 0）就把凭据从 kiro-rs 反代删掉，并连带删除本地账号库里的对应账号。查余额是只读计量，不消耗额度。"
-            />
             <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
               <div>
                 <Label>验活模型</Label>

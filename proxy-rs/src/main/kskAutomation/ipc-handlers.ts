@@ -163,12 +163,10 @@ export interface LocalAdminTarget {
   baseUrl: string
   adminApiKey: string
   timeoutSeconds: number
-  /** 反代统计采到用量后是否自动删掉额度耗尽的凭据，取自同一条任务配置。 */
-  autoDeleteExhausted: boolean
 }
 
 /**
- * 从已有任务里取本机 Admin 连接信息，供单账号手动推送与反代统计复用。
+ * 从已有任务里取本机 Admin 连接信息，供单账号手动推送与托管账号查询复用。
  * 启用中的任务优先；仅暂停的任务配置仍然可用（暂停停的是轮询，不是这份地址）。
  */
 export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
@@ -183,8 +181,7 @@ export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
       baseUrl: accountDbTarget.baseUrl,
       adminApiKey: accountDbTarget.adminApiKey,
       timeoutSeconds:
-        task?.config.requestTimeoutSeconds ?? Math.ceil(accountDbTarget.timeoutMs / 1000),
-      autoDeleteExhausted: task?.config.autoDeleteExhausted ?? false
+        task?.config.requestTimeoutSeconds ?? Math.ceil(accountDbTarget.timeoutMs / 1000)
     }
   }
   const candidates = store.tasks.filter(
@@ -199,8 +196,7 @@ export async function resolveLocalAdminTarget(): Promise<LocalAdminTarget> {
   return {
     baseUrl: task.config.localAdminBaseUrl,
     adminApiKey: task.secrets.localAdminApiKey,
-    timeoutSeconds: task.config.requestTimeoutSeconds,
-    autoDeleteExhausted: task.config.autoDeleteExhausted
+    timeoutSeconds: task.config.requestTimeoutSeconds
   }
 }
 

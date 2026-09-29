@@ -18,7 +18,6 @@ import {
   providerUrlHint
 } from '../../src/shared/kskAutomation'
 import {
-  deleteLocalAdminCredentialsById,
   deleteLocalAdminCredentialsByKey,
   pushAccountToLocalAdmin,
   resolveLocalAdminApiBase,
@@ -425,69 +424,6 @@ describe('本机 Admin 地址与同步验活', () => {
 
     expect(result).toMatchObject({ checked: 2, removed: 1 })
     expect(result.errors).toHaveLength(1)
-  })
-
-  it('按 id 删除凭据时走先禁用再删两步，并回传 apiKeyHash 供对齐本地账号库', async () => {
-    const requests: string[] = []
-    const fetchImpl: KskAutomationFetch = async (url, init) => {
-      requests.push(`${init.method} ${url}`)
-      if (url.endsWith('/credentials') && init.method === 'GET') {
-        return jsonResponse({
-          credentials: [
-            {
-              id: 9,
-              authMethod: 'api_key',
-              apiKeyHash: sha256Hex(KSK_ONE),
-              maskedApiKey: 'ksk_...rcnS',
-              disabled: false
-            }
-          ]
-        })
-      }
-      if (url.endsWith('/credentials/9/disabled') && init.method === 'POST') {
-        return jsonResponse({})
-      }
-      if (url.endsWith('/credentials/9') && init.method === 'DELETE') return jsonResponse({})
-      return jsonResponse({}, 404)
-    }
-
-    const result = await deleteLocalAdminCredentialsById({
-      credentials: [{ credentialId: '9', disabled: false }],
-      baseUrl: 'http://127.0.0.1:12888/admin',
-      adminApiKey: 'admin_secret',
-      timeoutSeconds: 5,
-      fetchImpl
-    })
-
-    expect(result.errors).toEqual([])
-    expect(result.deleted).toEqual([
-      { credentialId: '9', apiKeyHash: sha256Hex(KSK_ONE), maskedApiKey: 'ksk_...rcnS' }
-    ])
-    // Admin 只收已禁用的凭据，少了 disabled 那一步启用中的号永远删不掉
-    expect(requests).toContain('POST http://127.0.0.1:12888/api/admin/credentials/9/disabled')
-    expect(requests).toContain('DELETE http://127.0.0.1:12888/api/admin/credentials/9')
-  })
-
-  it('按 id 删除时列表里已不存在的凭据算成功，不报错也不再发删除请求', async () => {
-    const requests: string[] = []
-    const fetchImpl: KskAutomationFetch = async (url, init) => {
-      requests.push(`${init.method} ${url}`)
-      if (url.endsWith('/credentials') && init.method === 'GET') {
-        return jsonResponse({ credentials: [] })
-      }
-      return jsonResponse({}, 404)
-    }
-
-    const result = await deleteLocalAdminCredentialsById({
-      credentials: [{ credentialId: '9' }],
-      baseUrl: 'http://127.0.0.1:12888/admin',
-      adminApiKey: 'admin_secret',
-      timeoutSeconds: 5,
-      fetchImpl
-    })
-
-    expect(result).toEqual({ deleted: [], errors: [] })
-    expect(requests.some((request) => request.startsWith('DELETE'))).toBe(false)
   })
 
   it('验活消息留空时回落到与账号页一致的默认提示词', () => {

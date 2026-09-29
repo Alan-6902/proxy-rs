@@ -60,12 +60,6 @@ const FEATURES: { titleEn: string; titleZh: string; descEn: string; descZh: stri
     descZh: '账号绑定出口代理与健康检查'
   },
   {
-    titleEn: 'Batch Registration',
-    titleZh: '批量注册',
-    descEn: 'Email OTP automation and account import',
-    descZh: '邮箱验证码自动化与账号导入'
-  },
-  {
     titleEn: 'Auto Switch',
     titleZh: '自动换号',
     descEn: 'Fail over to an available account when quota runs low',
@@ -125,8 +119,8 @@ export function AboutPage(): React.ReactNode {
           {/* 首段用略大字号做引言，与后续正文分层 */}
           <p className="max-w-3xl text-base leading-relaxed text-foreground/80">
             {isEn
-              ? `${APP_NAME} is a local multi-account tool for Kiro. It covers account pools, automatic token refresh, group and tag management, registration and subscriptions.`
-              : `${APP_NAME} 是一款本地 Kiro 多账号工具，覆盖账号池、Token 自动刷新、分组标签、注册订阅。`}
+              ? `${APP_NAME} is a local multi-account tool for Kiro. It covers account pools, automatic token refresh, group and tag management, and subscriptions.`
+              : `${APP_NAME} 是一款本地 Kiro 多账号工具，覆盖账号池、Token 自动刷新、分组标签与订阅。`}
           </p>
           <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
             {isEn

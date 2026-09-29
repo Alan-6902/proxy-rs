@@ -8,7 +8,6 @@ import {
   CloudDownload,
   Edit3,
   Eraser,
-  Gauge,
   ListChecks,
   Loader2,
   Mail,
@@ -521,12 +520,6 @@ export function TaskManagerPage(): React.ReactNode {
                           {task.status.lastCleanupRetainedCount > 0
                             ? `，保留 ${task.status.lastCleanupRetainedCount} 个待确认`
                             : ''}
-                        </div>
-                      )}
-                      {task.config.autoDeleteExhausted && (
-                        <div className="flex items-center gap-2 text-muted-foreground sm:col-span-2">
-                          <Gauge className="h-3.5 w-3.5" />
-                          额度耗尽自动删除已开启 · 由反代统计每分钟查余额触发
                         </div>
                       )}
                     </div>

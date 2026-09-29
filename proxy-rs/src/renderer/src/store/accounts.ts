@@ -17,13 +17,6 @@ import type {
   AccountLivenessResult
 } from '../types/account'
 import { buildAccountLivenessRequestAccount } from '../types/account'
-import type {
-  ProxyEntry,
-  ProxyPoolConfig,
-  ProxyValidationResult,
-  ProxyProtocol
-} from '../types/proxy'
-import { DEFAULT_PROXY_POOL_CONFIG, applyValidationResult } from '../types/proxy'
 
 // ============================================
 // 账号管理 Store
@@ -184,16 +177,6 @@ interface AccountsState {
 
   // 语言设置
   language: 'auto' | 'en' | 'zh' // auto: 跟随系统
-
-  // ============ 代理池（用于注册时 IP 轮换）============
-  /** 代理条目列表（Map 保证 O(1) 查找） */
-  proxyPool: Map<string, ProxyEntry>
-  /** 代理池配置（启用状态、调度策略等） */
-  proxyPoolConfig: ProxyPoolConfig
-  /** 轮询调度光标（仅用于 round_robin 策略）；语义为"上次选中的代理 id" */
-  proxyPoolCursor: string
-  /** 账号-代理绑定映射（accountId → proxyId）；用于"N 个账号共用 1 个出口 IP" */
-  accountProxyBindings: Record<string, string>
 }
 
 interface AccountsActions {
@@ -346,60 +329,6 @@ interface AccountsActions {
   // 定时自动保存（防止数据丢失）
   startAutoSave: () => void
   stopAutoSave: () => void
-
-  // ============ 代理池操作 ============
-  /** 添加单个代理（自动解析协议/主机/端口/认证） */
-  addProxy: (
-    url: string,
-    options?: { label?: string; source?: string; tags?: string[] }
-  ) => string | null
-  /** 批量导入（文本，每行一个，支持 http://host:port、socks5://user:pass@host:port、host:port 等） */
-  importProxies: (text: string) => { added: number; skipped: number; failed: number }
-  /** 删除代理 */
-  removeProxy: (id: string) => void
-  /** 批量删除 */
-  removeProxies: (ids: string[]) => void
-  /** 切换启用状态 */
-  toggleProxyEnabled: (id: string, enabled?: boolean) => void
-  /** 更新代理元数据 */
-  updateProxy: (id: string, updates: Partial<ProxyEntry>) => void
-  /** 测试单个代理（异步，主进程执行） */
-  validateProxy: (id: string) => Promise<ProxyValidationResult>
-  /** 批量测试（并发） */
-  validateProxiesBatch: (ids: string[], concurrency?: number) => Promise<void>
-  /** 合并主进程定时验活推来的结果（主进程已写盘，此处只更新内存供 UI 展示） */
-  applyValidatedEntries: (entries: ProxyEntry[]) => void
-  /** 清空所有代理 */
-  clearProxyPool: () => void
-  /** 更新代理池配置 */
-  setProxyPoolConfig: (config: Partial<ProxyPoolConfig>) => void
-  /** 按当前策略挑选下一个可用代理（注册流程内部调用） */
-  pickNextProxy: () => ProxyEntry | null
-  /** 标记代理使用结果（供注册流程上报，用于失败计数与自动停用） */
-  reportProxyResult: (id: string, success: boolean, boundEmail?: string, errorMsg?: string) => void
-
-  // ============ 账号-代理绑定（出口 IP 分桶）============
-  /** 把账号绑定到指定代理 */
-  bindAccountToProxy: (accountId: string, proxyId: string) => void
-  /** 批量绑定（用于批量分配） */
-  bindAccountsToProxy: (accountIds: string[], proxyId: string) => void
-  /** 解除账号绑定 */
-  unbindAccountFromProxy: (accountId: string) => void
-  /** 清空全部账号绑定 */
-  clearAccountProxyBindings: () => void
-  /**
-   * 自动分配：把账号按 N:1 比例平均分配到当前启用的代理上
-   * @param accountsPerProxy 每个代理承载的账号数；为 0 表示尽量均分
-   * @param onlyUnbound 是否仅分配尚未绑定的账号；false 则重新分配全部
-   * @returns 分配统计
-   */
-  autoDistributeAccountsToProxies: (params: {
-    accountsPerProxy?: number
-    onlyUnbound?: boolean
-    accountIds?: string[] // 限定分配范围，不填则全部
-  }) => { distributed: number; perProxy: Record<string, number>; skipped: number }
-  /** 读取账号绑定的代理 URL（供主进程同步用） */
-  getAccountProxyUrl: (accountId: string) => string | undefined
 }
 
 type AccountsStore = AccountsState & AccountsActions
@@ -446,9 +375,7 @@ async function probeAccountLiveness(
   let result: AccountLivenessResult
   try {
     result = await window.api.diagnoseAccountLiveness({
-      account: get().adminManagedIds.has(id)
-        ? { id }
-        : buildAccountLivenessRequestAccount(account, get().getAccountProxyUrl(account.id)),
+      account: get().adminManagedIds.has(id) ? { id } : buildAccountLivenessRequestAccount(account),
       model,
       message
     })
@@ -520,12 +447,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   darkMode: false,
   language: 'auto',
 
-  // 代理池初始状态
-  proxyPool: new Map<string, ProxyEntry>(),
-  proxyPoolConfig: { ...DEFAULT_PROXY_POOL_CONFIG },
-  proxyPoolCursor: '',
-  accountProxyBindings: {},
-
   // ==================== 账号 CRUD ====================
 
   addAccount: (accountData) => {
@@ -573,16 +494,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
       const activeAccountId = state.activeAccountId === id ? null : state.activeAccountId
 
-      // 同时清理账号-代理绑定
-      const bindings = { ...state.accountProxyBindings }
-      delete bindings[id]
-
       return {
         accounts,
         selectedIds,
         selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId,
-        activeAccountId,
-        accountProxyBindings: bindings
+        activeAccountId
       }
     })
     get().saveToStorage()
@@ -596,13 +512,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const accounts = new Map(state.accounts)
       const selectedIds = new Set(state.selectedIds)
       let activeAccountId = state.activeAccountId
-      const bindings = { ...state.accountProxyBindings }
 
       for (const id of ids) {
         if (accounts.has(id)) {
           accounts.delete(id)
           selectedIds.delete(id)
-          delete bindings[id]
           if (activeAccountId === id) activeAccountId = null
           result.success++
         } else {
@@ -615,8 +529,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accounts,
         selectedIds,
         selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId,
-        activeAccountId,
-        accountProxyBindings: bindings
+        activeAccountId
       }
     })
 
@@ -1788,18 +1701,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchInterval: data.autoSwitchInterval ?? 5,
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
-          language,
-          proxyPool: data.proxyPool
-            ? new Map(Object.entries(data.proxyPool as Record<string, ProxyEntry>))
-            : new Map<string, ProxyEntry>(),
-          proxyPoolConfig: {
-            ...DEFAULT_PROXY_POOL_CONFIG,
-            ...(data.proxyPoolConfig as Partial<ProxyPoolConfig> | undefined)
-          },
-          // 旧版本这里存的是递增数字下标，语义已改为"上次选中的代理 id"；非字符串一律丢弃从头轮
-          proxyPoolCursor: typeof data.proxyPoolCursor === 'string' ? data.proxyPoolCursor : '',
-          accountProxyBindings:
-            (data.accountProxyBindings as Record<string, string> | undefined) || {}
+          language
         })
 
         window.api.updateTrayLanguage(resolveTrayLanguage(language))
@@ -1906,11 +1808,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       autoSwitchInterval,
       theme,
       darkMode,
-      language,
-      proxyPool,
-      proxyPoolConfig,
-      proxyPoolCursor,
-      accountProxyBindings
+      language
     } = get()
 
     set({ isSyncing: true })
@@ -1935,11 +1833,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchInterval,
           theme,
           darkMode,
-          language,
-          proxyPool: Object.fromEntries(proxyPool),
-          proxyPoolConfig,
-          proxyPoolCursor,
-          accountProxyBindings
+          language
         })
       } finally {
         set({ isSyncing: false })
@@ -2823,630 +2717,5 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       autoSaveTimer = null
       console.log('[AutoSave] Auto-save stopped')
     }
-  },
-
-  // ==================== 代理池 ====================
-
-  addProxy: (url, options) => {
-    const parsed = parseProxyUrl(url)
-    if (!parsed) return null
-
-    // 去重：同 host:port:protocol:username 视为重复
-    // 含 username 以支持 bestproxy 等「单入口、靠用户名区分地区/会话」的轮换代理添加多条
-    const existingPool = get().proxyPool
-    for (const entry of existingPool.values()) {
-      if (
-        entry.host === parsed.host &&
-        entry.port === parsed.port &&
-        entry.protocol === parsed.protocol &&
-        (entry.username || '') === (parsed.username || '')
-      ) {
-        return null
-      }
-    }
-
-    const id = uuidv4()
-    const entry: ProxyEntry = {
-      id,
-      url: parsed.normalized,
-      protocol: parsed.protocol,
-      host: parsed.host,
-      port: parsed.port,
-      username: parsed.username,
-      password: parsed.password,
-      label: options?.label,
-      source: options?.source ?? 'manual',
-      tags: options?.tags,
-      status: 'untested',
-      usedCount: 0,
-      failCount: 0,
-      enabled: true,
-      createdAt: Date.now()
-    }
-
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      next.set(id, entry)
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-    return id
-  },
-
-  importProxies: (text) => {
-    const result = { added: 0, skipped: 0, failed: 0 }
-    const lines = text
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#'))
-    if (lines.length === 0) return result
-
-    // 批量构造新条目，最后只 set 一次，避免 O(n²) re-render
-    const existingPool = get().proxyPool
-    const existingKeys = new Set<string>()
-    for (const entry of existingPool.values()) {
-      existingKeys.add(`${entry.protocol}://${entry.username || ''}@${entry.host}:${entry.port}`)
-    }
-    const newEntries: ProxyEntry[] = []
-
-    for (const line of lines) {
-      const parsed = parseProxyUrl(line)
-      if (!parsed) {
-        result.failed++
-        continue
-      }
-      const key = `${parsed.protocol}://${parsed.username || ''}@${parsed.host}:${parsed.port}`
-      if (existingKeys.has(key)) {
-        result.skipped++
-        continue
-      }
-      existingKeys.add(key)
-      newEntries.push({
-        id: uuidv4(),
-        url: parsed.normalized,
-        protocol: parsed.protocol,
-        host: parsed.host,
-        port: parsed.port,
-        username: parsed.username,
-        password: parsed.password,
-        source: 'import',
-        status: 'untested',
-        usedCount: 0,
-        failCount: 0,
-        enabled: true,
-        createdAt: Date.now()
-      })
-      result.added++
-    }
-
-    if (newEntries.length > 0) {
-      set((state) => {
-        const next = new Map(state.proxyPool)
-        for (const e of newEntries) next.set(e.id, e)
-        return { proxyPool: next }
-      })
-      get().saveToStorage()
-    }
-    return result
-  },
-
-  removeProxy: (id) => {
-    // 收集受影响的账号（绑定到该代理的账号）
-    const affectedAccountIds = Object.entries(get().accountProxyBindings)
-      .filter(([, pid]) => pid === id)
-      .map(([aid]) => aid)
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      next.delete(id)
-      // 同步清理绑定
-      const bindings = { ...state.accountProxyBindings }
-      for (const aid of affectedAccountIds) delete bindings[aid]
-      return { proxyPool: next, accountProxyBindings: bindings }
-    })
-    get().saveToStorage()
-  },
-
-  removeProxies: (ids) => {
-    if (ids.length === 0) return
-    const idSet = new Set(ids)
-    const affectedAccountIds = Object.entries(get().accountProxyBindings)
-      .filter(([, pid]) => idSet.has(pid))
-      .map(([aid]) => aid)
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      for (const id of ids) next.delete(id)
-      const bindings = { ...state.accountProxyBindings }
-      for (const aid of affectedAccountIds) delete bindings[aid]
-      return { proxyPool: next, accountProxyBindings: bindings }
-    })
-    get().saveToStorage()
-  },
-
-  toggleProxyEnabled: (id, enabled) => {
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const entry = next.get(id)
-      if (entry) {
-        next.set(id, { ...entry, enabled: enabled ?? !entry.enabled })
-      }
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-  },
-
-  updateProxy: (id, updates) => {
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const entry = next.get(id)
-      if (entry) {
-        next.set(id, { ...entry, ...updates })
-      }
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-  },
-
-  validateProxy: async (id) => {
-    const entry = get().proxyPool.get(id)
-    if (!entry) {
-      return { success: false, error: 'Proxy not found' }
-    }
-    const { proxyPoolConfig } = get()
-
-    // 先置为 testing 状态
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const existing = next.get(id)
-      if (existing) next.set(id, { ...existing, status: 'testing' })
-      return { proxyPool: next }
-    })
-
-    let result: ProxyValidationResult
-    try {
-      result = await window.api.proxyPoolValidate({
-        url: entry.url,
-        testUrl: proxyPoolConfig.testUrl,
-        timeoutMs: proxyPoolConfig.testTimeoutMs,
-        upstreamProxy: proxyPoolConfig.upstreamProxy
-      })
-    } catch (err) {
-      result = { success: false, error: err instanceof Error ? err.message : String(err) }
-    }
-
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const existing = next.get(id)
-      if (existing) {
-        // 判定规则与主进程定时验活共用（src/shared/proxyPool.ts），避免两条路径走偏
-        next.set(
-          id,
-          applyValidationResult(
-            existing,
-            result,
-            state.proxyPoolConfig,
-            Array.from(state.proxyPool.values())
-          )
-        )
-      }
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-    return result
-  },
-
-  validateProxiesBatch: async (ids, concurrency = 5) => {
-    if (ids.length === 0) return
-    const validateProxy = get().validateProxy
-    let cursor = 0
-    const worker = async (): Promise<void> => {
-      while (cursor < ids.length) {
-        const idx = cursor++
-        try {
-          await validateProxy(ids[idx])
-        } catch {
-          /* per-item error logged */
-        }
-      }
-    }
-    const workers = Array.from({ length: Math.max(1, Math.min(concurrency, ids.length)) }, () =>
-      worker()
-    )
-    await Promise.all(workers)
-  },
-
-  applyValidatedEntries: (entries) => {
-    if (entries.length === 0) return
-    const changedIds: string[] = []
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      for (const entry of entries) {
-        // 只更新仍存在的条目：主进程推送在途时用户可能已删除该代理
-        if (!next.has(entry.id)) continue
-        next.set(entry.id, entry)
-        changedIds.push(entry.id)
-      }
-      return { proxyPool: next }
-    })
-    // 不调用 saveToStorage：主进程调度器已在写锁内落盘，这里再写一次会把
-    // 渲染进程内存整份覆盖回去，反而可能盖掉主进程刚写的其它字段。
-    if (changedIds.length > 0) {
-      console.log(`[Store] Applied ${changedIds.length} background validation results`)
-    }
-  },
-
-  clearProxyPool: () => {
-    set({ proxyPool: new Map(), proxyPoolCursor: '', accountProxyBindings: {} })
-    get().saveToStorage()
-  },
-
-  setProxyPoolConfig: (config) => {
-    const prev = get().proxyPoolConfig
-    set((state) => ({
-      proxyPoolConfig: { ...state.proxyPoolConfig, ...config }
-    }))
-    get().saveToStorage()
-
-    // 定时验活相关字段变更时通知主进程重启调度器。
-    // 主进程调度器是读盘拿配置的，必须等写盘落地后再重启，否则会读到旧值。
-    const schedulerFieldsChanged =
-      (config.autoValidateIntervalMin !== undefined &&
-        config.autoValidateIntervalMin !== prev.autoValidateIntervalMin) ||
-      (config.autoValidateConcurrency !== undefined &&
-        config.autoValidateConcurrency !== prev.autoValidateConcurrency)
-    if (schedulerFieldsChanged) {
-      void (async () => {
-        try {
-          await get().flushSaveImmediately()
-          await window.api.proxyPoolRestartScheduler()
-        } catch (err) {
-          console.warn('[Store] Failed to restart proxy pool scheduler:', err)
-        }
-      })()
-    }
-  },
-
-  pickNextProxy: () => {
-    const { proxyPool, proxyPoolConfig, proxyPoolCursor } = get()
-    if (!proxyPoolConfig.enabled) return null
-
-    // 仅在启用且非 dead 的代理中挑选。
-    // 按 createdAt 稳定排序：Map 的插入序在重启后由 store 的 key 顺序决定，不可靠；
-    // round_robin 需要一个跨会话稳定的顺序，否则"接着上次往下轮"没有意义。
-    const candidates = Array.from(proxyPool.values())
-      .filter((p) => p.enabled && p.status !== 'dead')
-      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
-    if (candidates.length === 0) return null
-
-    let picked: ProxyEntry
-    switch (proxyPoolConfig.strategy) {
-      case 'random':
-        picked = candidates[Math.floor(Math.random() * candidates.length)]
-        break
-      case 'least_used':
-        picked = candidates.reduce((min, cur) => (cur.usedCount < min.usedCount ? cur : min))
-        break
-      case 'fastest':
-        // 已测过的优先按延迟升序；未测过的排最后
-        picked = candidates.slice().sort((a, b) => {
-          const la = a.latencyMs ?? Number.POSITIVE_INFINITY
-          const lb = b.latencyMs ?? Number.POSITIVE_INFINITY
-          return la - lb
-        })[0]
-        break
-      case 'round_robin':
-      default: {
-        // 游标记的是"上次选中的代理 id"而非数字下标：候选集因停用/验活而增删时，
-        // 数字下标取模会跳位甚至连续命中同一条，按 id 定位则总能接着下一个走。
-        // 上次那条已不在候选集（被停用/删除）时 indexOf 返回 -1，正好从头开始。
-        const lastIdx = candidates.findIndex((p) => p.id === proxyPoolCursor)
-        picked = candidates[(lastIdx + 1) % candidates.length]
-        set({ proxyPoolCursor: picked.id })
-        break
-      }
-    }
-
-    // 更新使用计数（即时反映到 UI，使用 saveToStorage 防抖）
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const existing = next.get(picked.id)
-      if (existing) {
-        next.set(picked.id, {
-          ...existing,
-          usedCount: existing.usedCount + 1,
-          lastUsedAt: Date.now()
-        })
-      }
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-    return picked
-  },
-
-  reportProxyResult: (id, success, boundEmail, errorMsg) => {
-    set((state) => {
-      const next = new Map(state.proxyPool)
-      const existing = next.get(id)
-      if (!existing) return state
-      // 仅「代理连接层错误」才累加 failCount；AWS 业务/风控失败（如 Portal/EOF/邮箱已注册）不计，
-      // 避免把好代理（尤其只配了一条的轮换代理）误判停用导致变直连暴露真实 IP。
-      const isProxyFail = !success && isProxyConnectionError(errorMsg)
-      const failCount = isProxyFail ? existing.failCount + 1 : existing.failCount
-      // 轮换代理保护：池中可用代理 <= 1 时不自动停用
-      const enabledCount = Array.from(state.proxyPool.values()).filter(
-        (p) => p.enabled && p.status !== 'dead'
-      ).length
-      const autoDisable =
-        isProxyFail &&
-        state.proxyPoolConfig.autoDisableDead &&
-        failCount >= state.proxyPoolConfig.failureThreshold &&
-        enabledCount > 1
-      next.set(id, {
-        ...existing,
-        failCount,
-        lastBoundEmail: boundEmail || existing.lastBoundEmail,
-        lastError: success ? existing.lastError : errorMsg || existing.lastError,
-        enabled: autoDisable ? false : existing.enabled,
-        status: autoDisable ? 'dead' : existing.status
-      })
-      return { proxyPool: next }
-    })
-    get().saveToStorage()
-  },
-
-  // ==================== 账号-代理绑定 ====================
-
-  bindAccountToProxy: (accountId, proxyId) => {
-    set((state) => ({
-      accountProxyBindings: { ...state.accountProxyBindings, [accountId]: proxyId }
-    }))
-    get().saveToStorage()
-  },
-
-  bindAccountsToProxy: (accountIds, proxyId) => {
-    if (accountIds.length === 0) return
-    set((state) => {
-      const next = { ...state.accountProxyBindings }
-      for (const id of accountIds) next[id] = proxyId
-      return { accountProxyBindings: next }
-    })
-    get().saveToStorage()
-  },
-
-  unbindAccountFromProxy: (accountId) => {
-    set((state) => {
-      const next = { ...state.accountProxyBindings }
-      delete next[accountId]
-      return { accountProxyBindings: next }
-    })
-    get().saveToStorage()
-  },
-
-  clearAccountProxyBindings: () => {
-    set({ accountProxyBindings: {} })
-    get().saveToStorage()
-  },
-
-  autoDistributeAccountsToProxies: ({ accountsPerProxy = 0, onlyUnbound = false, accountIds }) => {
-    const state = get()
-    const aliveProxies = Array.from(state.proxyPool.values()).filter(
-      (p) => p.enabled && p.status !== 'dead'
-    )
-    if (aliveProxies.length === 0) {
-      return { distributed: 0, perProxy: {}, skipped: 0 }
-    }
-
-    // 候选账号
-    const candidates = accountIds
-      ? accountIds.map((id) => state.accounts.get(id)).filter((a): a is Account => !!a)
-      : Array.from(state.accounts.values())
-    const targets = onlyUnbound
-      ? candidates.filter((a) => !state.accountProxyBindings[a.id])
-      : candidates
-
-    if (targets.length === 0) {
-      return { distributed: 0, perProxy: {}, skipped: candidates.length }
-    }
-
-    const perProxy: Record<string, number> = {}
-    aliveProxies.forEach((p) => {
-      perProxy[p.id] = 0
-    })
-    const newBindings = { ...state.accountProxyBindings }
-
-    // 取消已绑定到失效/不存在代理的账号（仅 onlyUnbound=false 时统一重新分配）
-    if (!onlyUnbound) {
-      for (const id of Object.keys(newBindings)) {
-        const proxyExists = aliveProxies.some((p) => p.id === newBindings[id])
-        if (!proxyExists) delete newBindings[id]
-      }
-    }
-
-    let distributed = 0
-    let cursor = 0
-    for (const account of targets) {
-      // accountsPerProxy=0：均分；非 0：每代理填满 N 个再换下一个
-      let chosenProxyId: string
-      if (accountsPerProxy > 0) {
-        // 找第一个还未填满的代理
-        let found: string | undefined
-        for (let i = 0; i < aliveProxies.length; i++) {
-          const pid = aliveProxies[i].id
-          if (perProxy[pid] < accountsPerProxy) {
-            found = pid
-            break
-          }
-        }
-        if (!found) {
-          // 全部代理都满了：跳过剩余账号
-          break
-        }
-        chosenProxyId = found
-      } else {
-        chosenProxyId = aliveProxies[cursor % aliveProxies.length].id
-        cursor++
-      }
-      newBindings[account.id] = chosenProxyId
-      perProxy[chosenProxyId]++
-      distributed++
-    }
-
-    set({ accountProxyBindings: newBindings })
-    get().saveToStorage()
-    return { distributed, perProxy, skipped: targets.length - distributed }
-  },
-
-  getAccountProxyUrl: (accountId) => {
-    const state = get()
-    const proxyId = state.accountProxyBindings[accountId]
-    if (!proxyId) return undefined
-    const proxy = state.proxyPool.get(proxyId)
-    if (!proxy || !proxy.enabled || proxy.status === 'dead') return undefined
-    return proxy.url
   }
 }))
-
-// ==================== 代理 URL 解析辅助 ====================
-
-interface ParsedProxy {
-  protocol: ProxyProtocol
-  host: string
-  port: number
-  username?: string
-  password?: string
-  normalized: string
-}
-
-/**
- * 解析多种代理 URL 格式：
- *   - http://host:port
- *   - http://user:pass@host:port
- *   - socks5://host:port
- *   - host:port              （默认 http）
- *   - host:port:user:pass    （Stormproxies 等代理商常用格式）
- *   - user:pass@host:port    （省略 scheme）
- */
-// 判断错误是否为「代理连接层」问题（而非 AWS 业务/风控失败）。
-// 仅这类错误才累加代理 failCount / 触发自动停用，避免风控失败把好代理（尤其单条轮换代理）误杀成直连。
-function isProxyConnectionError(msg: string | undefined): boolean {
-  const m = (msg || '').toLowerCase()
-  if (!m) return false
-  return (
-    m.includes('proxy') ||
-    m.includes('econnrefused') ||
-    m.includes('econnreset') ||
-    m.includes('etimedout') ||
-    m.includes('ehostunreach') ||
-    m.includes('enetunreach') ||
-    m.includes('tunnel') ||
-    m.includes('dial tcp') ||
-    m.includes('connection refused') ||
-    m.includes('connection reset') ||
-    m.includes('407') ||
-    m.includes('socks')
-  )
-}
-
-function parseProxyUrl(raw: string): ParsedProxy | null {
-  const trimmed = (raw || '').trim()
-  if (!trimmed) return null
-
-  // 形式 1: scheme://...
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
-    try {
-      const u = new URL(trimmed)
-      const protocol = normalizeProtocol(u.protocol.replace(':', ''))
-      if (!protocol) return null
-      const port = Number(u.port) || defaultPort(protocol)
-      if (!u.hostname || !Number.isFinite(port)) return null
-      return {
-        protocol,
-        host: u.hostname,
-        port,
-        username: u.username ? decodeURIComponent(u.username) : undefined,
-        password: u.password ? decodeURIComponent(u.password) : undefined,
-        normalized: buildProxyUrl(protocol, u.hostname, port, u.username, u.password)
-      }
-    } catch {
-      return null
-    }
-  }
-
-  // 形式 2: host:port:user:pass（4 段冒号分隔）
-  const segs = trimmed.split(':')
-  if (segs.length === 4 && /^\d+$/.test(segs[1])) {
-    const [host, portStr, user, pass] = segs
-    const port = Number(portStr)
-    if (!host || !Number.isFinite(port)) return null
-    return {
-      protocol: 'http',
-      host,
-      port,
-      username: user || undefined,
-      password: pass || undefined,
-      normalized: buildProxyUrl('http', host, port, user, pass)
-    }
-  }
-
-  // 形式 3: user:pass@host:port（缺 scheme）
-  if (trimmed.includes('@')) {
-    const [authPart, hostPart] = trimmed.split('@')
-    const [user, pass] = authPart.split(':')
-    const [host, portStr] = (hostPart || '').split(':')
-    const port = Number(portStr)
-    if (!host || !Number.isFinite(port)) return null
-    return {
-      protocol: 'http',
-      host,
-      port,
-      username: user || undefined,
-      password: pass || undefined,
-      normalized: buildProxyUrl('http', host, port, user, pass)
-    }
-  }
-
-  // 形式 4: host:port（裸格式，默认 http）
-  if (segs.length === 2 && /^\d+$/.test(segs[1])) {
-    const port = Number(segs[1])
-    if (!segs[0] || !Number.isFinite(port)) return null
-    return {
-      protocol: 'http',
-      host: segs[0],
-      port,
-      normalized: buildProxyUrl('http', segs[0], port)
-    }
-  }
-
-  return null
-}
-
-function normalizeProtocol(raw: string): ProxyProtocol | null {
-  const p = raw.toLowerCase()
-  if (p === 'http' || p === 'https' || p === 'socks5' || p === 'socks4') return p
-  if (p === 'socks') return 'socks5'
-  return null
-}
-
-function defaultPort(protocol: ProxyProtocol): number {
-  switch (protocol) {
-    case 'http':
-      return 8080
-    case 'https':
-      return 443
-    case 'socks5':
-    case 'socks4':
-      return 1080
-  }
-}
-
-function buildProxyUrl(
-  protocol: ProxyProtocol,
-  host: string,
-  port: number,
-  username?: string,
-  password?: string
-): string {
-  const auth = username
-    ? `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
-    : ''
-  return `${protocol}://${auth}${host}:${port}`
-}

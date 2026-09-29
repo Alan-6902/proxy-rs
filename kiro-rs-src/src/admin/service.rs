@@ -9,14 +9,14 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::{MultiTokenManager, UsageLimitsHttpError};
+use crate::kiro::token_manager::{AdoptOutcome, MultiTokenManager, UsageLimitsHttpError};
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, EnsureFreshRequest, EnsureFreshResponse, ImportAccountRequest,
-    ImportAccountResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest, SetProxyRequest,
-    StoreInfoResponse,
+    AddCredentialRequest, AddCredentialResponse, AdoptCredentialRequest, AdoptCredentialResponse,
+    BalanceResponse, CredentialStatusItem, CredentialsStatusResponse, EnsureFreshRequest,
+    EnsureFreshResponse, ImportAccountRequest, ImportAccountResponse, LoadBalancingModeResponse,
+    SetLoadBalancingModeRequest, SetProxyRequest, StoreInfoResponse,
 };
 use crate::kiro::account_store::NewAccountMeta;
 
@@ -315,6 +315,44 @@ impl AdminService {
         self.token_manager
             .set_proxy(id, req.proxy_url, req.proxy_username, req.proxy_password)
             .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 收编外部（kiro-cli）自行刷新得到的凭据
+    pub async fn adopt_credential(
+        &self,
+        req: AdoptCredentialRequest,
+    ) -> Result<AdoptCredentialResponse, AdminServiceError> {
+        let cred = KiroCredentials {
+            access_token: Some(req.access_token),
+            refresh_token: Some(req.refresh_token),
+            expires_at: crate::kiro::account_store::ms_to_rfc3339(req.expires_at_ms),
+            auth_method: Some(req.auth_method),
+            client_id: req.client_id,
+            client_secret: req.client_secret,
+            profile_arn: req.profile_arn,
+            region: req.region,
+            ..Default::default()
+        };
+        let outcome = self
+            .token_manager
+            .adopt_external_credential(cred, req.account_uuid.as_deref())
+            .await
+            .map_err(|e| AdminServiceError::UpstreamError(e.to_string()))?;
+        Ok(match outcome {
+            AdoptOutcome::Adopted {
+                id,
+                credential_version,
+            } => adopt_response("adopted", Some(id), Some(credential_version)),
+            AdoptOutcome::Current {
+                id,
+                credential_version,
+            } => adopt_response("current", Some(id), Some(credential_version)),
+            AdoptOutcome::Stale {
+                id,
+                credential_version,
+            } => adopt_response("stale", Some(id), Some(credential_version)),
+            AdoptOutcome::NotFound => adopt_response("not_found", None, None),
+        })
     }
 
     /// 导入已有凭据（不刷新）
@@ -703,5 +741,17 @@ mod tests {
         let info = service.store_info();
         assert!(info.enabled);
         assert!(info.database_id.is_some_and(|id| !id.is_empty()));
+    }
+}
+
+fn adopt_response(
+    outcome: &'static str,
+    credential_id: Option<u64>,
+    credential_version: Option<i64>,
+) -> AdoptCredentialResponse {
+    AdoptCredentialResponse {
+        outcome,
+        credential_id,
+        credential_version,
     }
 }

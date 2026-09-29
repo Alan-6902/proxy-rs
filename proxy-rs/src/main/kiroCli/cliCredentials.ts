@@ -337,7 +337,18 @@ export interface KiroCliCurrentToken {
   key: string
   refreshToken: string
   provider?: string
+  accessToken?: string
+  /** 过期时间，Unix 毫秒 */
+  expiresAtMs?: number
+  profileArn?: string
+  region?: string
+  /** IdC：kiro-cli 自己的客户端注册（refresh token 与它绑定） */
+  clientId?: string
+  clientSecret?: string
 }
+
+const optionalString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value ? value : undefined
 
 /**
  * 读 CLI 当前持有的凭据。社交优先（切号时两者互斥，只会存在一条）。
@@ -353,13 +364,35 @@ export async function readKiroCliCurrentToken(
     const raw = await readKiroCliAuthValue(dbPath, key)
     if (!raw) continue
     try {
-      const token = JSON.parse(raw) as { refresh_token?: unknown; provider?: unknown }
+      const token = JSON.parse(raw) as Record<string, unknown>
       if (typeof token.refresh_token === 'string' && token.refresh_token) {
-        return {
+        const expiresAtMs = Date.parse(String(token.expires_at ?? ''))
+        const current: KiroCliCurrentToken = {
           key,
           refreshToken: token.refresh_token,
-          provider: typeof token.provider === 'string' ? token.provider : undefined
+          provider: optionalString(token.provider),
+          accessToken: optionalString(token.access_token),
+          expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : undefined,
+          profileArn: optionalString(token.profile_arn),
+          region: optionalString(token.region)
         }
+        if (key === KIRO_CLI_AUTH_KEY.OIDC_TOKEN) {
+          const registration = await readKiroCliAuthValue(
+            dbPath,
+            KIRO_CLI_AUTH_KEY.OIDC_DEVICE_REGISTRATION
+          )
+          if (registration) {
+            try {
+              const parsed = JSON.parse(registration) as Record<string, unknown>
+              current.clientId = optionalString(parsed.client_id)
+              current.clientSecret = optionalString(parsed.client_secret)
+              current.region ??= optionalString(parsed.region)
+            } catch {
+              // 注册信息损坏：IdC 无法收编，由调用方跳过
+            }
+          }
+        }
+        return current
       }
     } catch {
       // 内容损坏：当作没有可同步的凭据

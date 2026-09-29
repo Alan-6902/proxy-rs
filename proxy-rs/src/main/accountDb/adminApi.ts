@@ -120,3 +120,29 @@ export function ensureFresh(
     fetchImpl
   )
 }
+
+export interface AdoptCredentialResult {
+  /** adopted：已换成外部这份；current：库里已是这份；stale：外部更旧；not_found：不在库中 */
+  outcome: 'adopted' | 'current' | 'stale' | 'not_found'
+  credentialId?: number | null
+  credentialVersion?: number | null
+}
+
+/** 让 kiro-rs 收编 kiro-cli 自行刷新得到的凭据（按上游身份认账号） */
+export function adoptCredential(
+  target: KiroRsAdminTarget,
+  body: {
+    accountUuid?: string
+    authMethod: 'social' | 'idc'
+    accessToken: string
+    refreshToken: string
+    expiresAtMs?: number
+    clientId?: string
+    clientSecret?: string
+    profileArn?: string
+    region?: string
+  },
+  fetchImpl?: AdminFetch
+): Promise<AdoptCredentialResult> {
+  return adminRequest(target, '/accounts/adopt', { method: 'POST', body }, fetchImpl)
+}

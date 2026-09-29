@@ -7,10 +7,11 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, ensure_credential_fresh, force_refresh_token,
-        get_all_credentials, get_credential_balance, get_load_balancing_mode, get_store_info,
-        import_account, reset_failure_count, set_credential_disabled, set_credential_in_pool,
-        set_credential_priority, set_credential_proxy, set_load_balancing_mode,
+        add_credential, adopt_account_credential, delete_credential, ensure_credential_fresh,
+        force_refresh_token, get_all_credentials, get_credential_balance, get_load_balancing_mode,
+        get_store_info, import_account, reset_failure_count, set_credential_disabled,
+        set_credential_in_pool, set_credential_priority, set_credential_proxy,
+        set_load_balancing_mode,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -30,6 +31,7 @@ use super::{
 /// - `POST /credentials/:id/ensure-fresh` - 确保凭据新鲜（账号库模式）
 /// - `POST /credentials/:id/proxy` - 设置凭据级代理（账号库模式）
 /// - `POST /accounts/import` - 导入已有凭据，不刷新（账号库模式）
+/// - `POST /accounts/adopt` - 收编 kiro-cli 自行刷新的凭据（账号库模式）
 /// - `GET /store/info` - 账号库信息
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
@@ -57,6 +59,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         .route("/credentials/{id}/proxy", post(set_credential_proxy))
         .route("/accounts/import", post(import_account))
+        .route("/accounts/adopt", post(adopt_account_credential))
         .route("/store/info", get(get_store_info))
         .route(
             "/config/load-balancing",

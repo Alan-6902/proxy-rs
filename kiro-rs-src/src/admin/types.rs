@@ -363,6 +363,35 @@ pub struct ImportAccountRequest {
     pub upstream_identity: Option<String>,
 }
 
+/// POST /accounts/adopt：收编外部（kiro-cli）自行刷新得到的凭据
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptCredentialRequest {
+    /// 调用方认为的账号（proxy 侧账号 ID）；只用于查询身份时沿用其机器码与代理
+    pub account_uuid: Option<String>,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    /// 过期时间，Unix 毫秒
+    pub expires_at_ms: Option<i64>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub profile_arn: Option<String>,
+    pub region: Option<String>,
+}
+
+/// POST /accounts/adopt 的结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptCredentialResponse {
+    /// adopted：已换成外部这份；current：库里已是这份；stale：外部这份更旧，未替换；
+    /// not_found：上游身份不在账号库中
+    pub outcome: &'static str,
+    pub credential_id: Option<u64>,
+    pub credential_version: Option<i64>,
+}
+
 /// GET /credentials 查询参数
 #[derive(Debug, Default, Deserialize)]
 pub struct ListCredentialsQuery {

@@ -196,6 +196,11 @@ export function accountDbAccountsWithSecrets(ids?: readonly string[]): Record<st
 }
 
 /** 单个账号的库行（未启用账号库或账号未入库时返回 null） */
+/** 账号库全部行（含秘密字段，只在主进程内使用） */
+export function accountDbRows(): AccountDbRow[] {
+  return runtime ? runtime.db.listRows() : []
+}
+
 export function accountDbRow(accountId: string): AccountDbRow | null {
   if (!runtime || !accountId) return null
   return runtime.db.listRows().find((row) => row.accountUuid === accountId) ?? null

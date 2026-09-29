@@ -636,6 +636,19 @@ const SESSION_AFFINITY_TTL: StdDuration = StdDuration::from_secs(600);
 /// 会话粘性映射的最大条目数，超出后按最久未命中顺序淘汰
 const SESSION_AFFINITY_MAX_ENTRIES: usize = 1024;
 
+/// 收编外部凭据的结果（见 `adopt_external_credential`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptOutcome {
+    /// 库里已经是这份凭据
+    Current { id: u64, credential_version: i64 },
+    /// 已替换成外部这份
+    Adopted { id: u64, credential_version: i64 },
+    /// 外部这份不比库里新，未替换
+    Stale { id: u64, credential_version: i64 },
+    /// 上游身份不在账号库中
+    NotFound,
+}
+
 /// 导入凭据的结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportOutcome {
@@ -2617,6 +2630,171 @@ impl MultiTokenManager {
             .unwrap_or(version))
     }
 
+    /// 整体替换某账号的凭据（重新登录 / 收编外部刷新结果），库与内存同时更新。
+    ///
+    /// 保留账号自身的配置（机器码、代理、端点、优先级等），只换 token 与认证参数。
+    /// 返回新的凭据版本。
+    fn replace_entry_credentials(&self, id: u64, cred: &KiroCredentials) -> anyhow::Result<i64> {
+        let store = self.require_store()?;
+        let (version, enabled) = store.replace_credentials(id, cred)?;
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            let keep = entry.credentials.clone();
+            entry.credentials = KiroCredentials {
+                id: keep.id,
+                credential_identity: keep.credential_identity,
+                email: keep.email.or(cred.email.clone()),
+                priority: keep.priority,
+                subscription_title: keep.subscription_title,
+                machine_id: keep.machine_id,
+                endpoint: keep.endpoint,
+                proxy_url: keep.proxy_url,
+                proxy_username: keep.proxy_username,
+                proxy_password: keep.proxy_password,
+                profile_arn: cred.profile_arn.clone().or(keep.profile_arn),
+                region: cred.region.clone().or(keep.region),
+                auth_region: cred.auth_region.clone().or(keep.auth_region),
+                api_region: cred.api_region.clone().or(keep.api_region),
+                disabled: !enabled,
+                ..cred.clone()
+            };
+            entry.credential_version = version;
+            entry.refresh_failure_count = 0;
+            if enabled {
+                entry.disabled = false;
+                entry.disabled_reason = None;
+            }
+        }
+        Ok(version)
+    }
+
+    /// 收编外部（kiro-cli）自行刷新得到的凭据：库里那份作废了，直接换成外部这份用，
+    /// 不再自己刷新一次。
+    ///
+    /// 先用外部 access token 查上游身份（userInfo.userId），命中库中账号才替换，
+    /// 所以不会把别的账号的 token 写进来。`hint_uuid` 是调用方认为的账号，
+    /// 只用于查询身份时沿用该账号的机器码与代理。
+    pub async fn adopt_external_credential(
+        &self,
+        mut cred: KiroCredentials,
+        hint_uuid: Option<&str>,
+    ) -> anyhow::Result<AdoptOutcome> {
+        let store = self.require_store()?;
+        cred.canonicalize_auth_method();
+        if cred.is_api_key_credential() {
+            anyhow::bail!("只能收编 OAuth 凭据");
+        }
+        let refresh_token = cred
+            .refresh_token
+            .clone()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
+        let access_token = cred
+            .access_token
+            .clone()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("缺少 accessToken"))?;
+        if let Some(id) = store.find_by_secret(Some(&refresh_token), None)? {
+            return Ok(AdoptOutcome::Current {
+                id,
+                credential_version: self.credential_version_of(id),
+            });
+        }
+
+        // 查询身份时借用提示账号的机器码与代理，指纹与平时一致
+        let mut probe = cred.clone();
+        if let Some((hint_id, false)) = hint_uuid
+            .map(|uuid| store.find_by_uuid(uuid))
+            .transpose()?
+            .flatten()
+            && let Some(entry) = self.entries.lock().iter().find(|e| e.id == hint_id)
+        {
+            probe.machine_id = entry.credentials.machine_id.clone();
+            probe.proxy_url = entry.credentials.proxy_url.clone();
+            probe.proxy_username = entry.credentials.proxy_username.clone();
+            probe.proxy_password = entry.credentials.proxy_password.clone();
+        }
+        if probe.machine_id.is_none() {
+            probe.machine_id = Some(machine_id::generate_from_credentials(&probe, &self.config));
+        }
+        let effective_proxy = probe.effective_proxy(self.proxy.as_ref());
+        let usage = get_usage_limits(
+            &probe,
+            &self.config,
+            &access_token,
+            effective_proxy.as_ref(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("用外部凭据查询上游身份失败: {e}"))?;
+        let user_id = usage
+            .user_info
+            .as_ref()
+            .and_then(|u| u.user_id.clone())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("上游未返回 userId，无法确认是哪个账号"))?;
+
+        // 与自身刷新互斥：等锁期间库里可能已刷新或已收编，持锁后再判断一次
+        let _guard = self.refresh_lock.lock().await;
+        self.adopt_with_identity(&cred, &user_id)
+    }
+
+    /// 收编的同步部分（已确认上游身份，调用方持有 refresh_lock）
+    fn adopt_with_identity(
+        &self,
+        cred: &KiroCredentials,
+        upstream_identity: &str,
+    ) -> anyhow::Result<AdoptOutcome> {
+        let store = self.require_store()?;
+        if let Some(id) = store.find_by_secret(cred.refresh_token.as_deref(), None)? {
+            return Ok(AdoptOutcome::Current {
+                id,
+                credential_version: self.credential_version_of(id),
+            });
+        }
+        let Some(id) = store.find_by_upstream_identity(upstream_identity)? else {
+            return Ok(AdoptOutcome::NotFound);
+        };
+        // 外部这份不比库里新（例如 CLI 里是被轮换掉的旧 token）：不能拿旧的覆盖新的
+        let current_expiry = self
+            .entries
+            .lock()
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.credentials.expires_at.clone())
+            .and_then(|v| DateTime::parse_from_rfc3339(&v).ok());
+        let external_expiry = cred
+            .expires_at
+            .as_deref()
+            .and_then(|v| DateTime::parse_from_rfc3339(v).ok());
+        if let (Some(current), Some(external)) = (current_expiry, external_expiry)
+            && external <= current
+        {
+            return Ok(AdoptOutcome::Stale {
+                id,
+                credential_version: self.credential_version_of(id),
+            });
+        }
+        let credential_version = self.replace_entry_credentials(id, cred)?;
+        tracing::info!(
+            "凭据 #{} 已收编外部刷新的凭据（版本 {}），不再自行刷新这一轮",
+            id,
+            credential_version
+        );
+        Ok(AdoptOutcome::Adopted {
+            id,
+            credential_version,
+        })
+    }
+
+    fn credential_version_of(&self, id: u64) -> i64 {
+        self.entries
+            .lock()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.credential_version)
+            .unwrap_or_default()
+    }
+
     /// 导入已有凭据（库模式）：不刷新、不查额度，原样写库。
     ///
     /// 用于 proxy-rs 新增账号（登录 / 注册 / 抢号）：它已拿到首份凭据，交给 kiro-rs 接管。
@@ -2658,35 +2836,7 @@ impl MultiTokenManager {
         // 同一上游账号重新登录：替换已有那一行的凭据，不新增账号（验收 A39 / A34）
         if let Some(identity) = meta.upstream_identity.as_deref().filter(|v| !v.is_empty()) {
             if let Some(id) = store.find_by_upstream_identity(identity)? {
-                let (version, enabled) = store.replace_credentials(id, &cred)?;
-                let mut entries = self.entries.lock();
-                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                    let keep = entry.credentials.clone();
-                    entry.credentials = KiroCredentials {
-                        id: keep.id,
-                        credential_identity: keep.credential_identity,
-                        email: keep.email.or(cred.email.clone()),
-                        priority: keep.priority,
-                        subscription_title: keep.subscription_title,
-                        machine_id: keep.machine_id,
-                        endpoint: keep.endpoint,
-                        proxy_url: keep.proxy_url,
-                        proxy_username: keep.proxy_username,
-                        proxy_password: keep.proxy_password,
-                        profile_arn: cred.profile_arn.clone().or(keep.profile_arn),
-                        region: cred.region.clone().or(keep.region),
-                        auth_region: cred.auth_region.clone().or(keep.auth_region),
-                        api_region: cred.api_region.clone().or(keep.api_region),
-                        disabled: !enabled,
-                        ..cred.clone()
-                    };
-                    entry.credential_version = version;
-                    entry.refresh_failure_count = 0;
-                    if enabled {
-                        entry.disabled = false;
-                        entry.disabled_reason = None;
-                    }
-                }
+                let version = self.replace_entry_credentials(id, &cred)?;
                 tracing::info!(
                     "凭据 #{} 已按上游身份重新登录，凭据已替换（版本 {}）",
                     id,
@@ -4141,6 +4291,77 @@ mod tests {
         assert!(m.snapshot().entries[0].in_pool);
         m.purge_credential(id).unwrap();
         assert!(m.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_adopt_external_credential_replaces_only_newer_token_of_same_account() {
+        let (m, store, _) = db_manager();
+        let imported = m
+            .import_credential(
+                live_oauth("rt-db"),
+                NewAccountMeta {
+                    account_uuid: Some("p-1".into()),
+                    upstream_identity: Some("user-1".into()),
+                    in_pool: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let base_version = m.snapshot().entries[0].credential_version;
+        let machine_before = store.load_all().unwrap()[0].credentials.machine_id.clone();
+        let with_expiry = |rt: &str, hours: i64| KiroCredentials {
+            expires_at: Some((Utc::now() + Duration::hours(hours)).to_rfc3339()),
+            ..live_oauth(rt)
+        };
+
+        // 库里已是这份：不动
+        assert_eq!(
+            m.adopt_with_identity(&live_oauth("rt-db"), "user-1")
+                .unwrap(),
+            AdoptOutcome::Current {
+                id: imported.id,
+                credential_version: base_version
+            }
+        );
+        // 别的上游账号：不写
+        assert_eq!(
+            m.adopt_with_identity(&with_expiry("rt-other", 2), "user-2")
+                .unwrap(),
+            AdoptOutcome::NotFound
+        );
+        // 外部这份不比库里新（CLI 里是旧 token）：不能覆盖
+        assert_eq!(
+            m.adopt_with_identity(&with_expiry("rt-old", 0), "user-1")
+                .unwrap(),
+            AdoptOutcome::Stale {
+                id: imported.id,
+                credential_version: base_version
+            }
+        );
+        // kiro-rs 自己的刷新在途时收编：在途结果写不进去，外部这份生效
+        let in_flight = store.begin_refresh(imported.id).unwrap();
+        let adopted = m
+            .adopt_with_identity(&with_expiry("rt-cli", 2), "user-1")
+            .unwrap();
+        assert_eq!(
+            adopted,
+            AdoptOutcome::Adopted {
+                id: imported.id,
+                credential_version: in_flight + 1
+            }
+        );
+        let row = &store.load_all().unwrap()[0];
+        assert_eq!(row.credentials.refresh_token.as_deref(), Some("rt-cli"));
+        assert_eq!(m.snapshot().entries[0].credential_version, in_flight + 1);
+        assert!(
+            store
+                .save_rotated_credentials(imported.id, Some(in_flight), &live_oauth("rt-late"))
+                .is_err(),
+            "在途的自身刷新结果不能覆盖收编的凭据"
+        );
+        // 账号自身配置（机器码）保留
+        assert!(row.credentials.machine_id.is_some());
+        assert_eq!(row.credentials.machine_id, machine_before);
     }
 
     #[tokio::test]

@@ -9,9 +9,10 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, BalanceQuery, DeleteCredentialQuery, EnsureFreshRequest,
-        ImportAccountRequest, ListCredentialsQuery, SetDisabledRequest, SetInPoolRequest,
-        SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest, SuccessResponse,
+        AddCredentialRequest, AdoptCredentialRequest, BalanceQuery, DeleteCredentialQuery,
+        EnsureFreshRequest, ImportAccountRequest, ListCredentialsQuery, SetDisabledRequest,
+        SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest,
+        SuccessResponse,
     },
 };
 
@@ -201,6 +202,18 @@ pub async fn import_account(
     Json(payload): Json<ImportAccountRequest>,
 ) -> impl IntoResponse {
     match state.service.import_account(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/accounts/adopt
+/// 收编外部（kiro-cli）自行刷新得到的凭据：按上游身份认账号，更新时替换，不再自己刷新
+pub async fn adopt_account_credential(
+    State(state): State<AdminState>,
+    Json(payload): Json<AdoptCredentialRequest>,
+) -> impl IntoResponse {
+    match state.service.adopt_credential(payload).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  adoptKiroCliIntoAccountDb,
+  KIRO_CLI_NOT_IN_DB_RECHECK_MS,
   hashRefreshToken,
   readKiroCliSyncState,
   syncKiroCliFromAccountDb,
   writeKiroCliSyncState,
   KIRO_CLI_SYNC_KEY,
+  type KiroCliSyncState,
   type KiroCliSyncStore
 } from '../../src/main/accountDb/kiroCliSync'
 import {
@@ -307,5 +310,162 @@ describe('CLI 数据库真实读写', () => {
     // 切号已清掉旧版键，同步也没有把它带回来
     expect(after.prepare('SELECT COUNT(*) c FROM auth_kv').get()).toEqual({ c: 1 })
     after.close()
+  })
+})
+
+describe('adoptKiroCliIntoAccountDb（CLI 自己刷新过 → 收编进账号库）', () => {
+  const cliToken = (overrides: Partial<KiroCliCurrentToken> = {}): KiroCliCurrentToken => ({
+    key: KIRO_CLI_AUTH_KEY.SOCIAL_TOKEN,
+    refreshToken: 'rt-cli',
+    accessToken: 'at-cli',
+    expiresAtMs: Date.now() + 3_600_000,
+    provider: 'github',
+    region: 'us-east-1',
+    ...overrides
+  })
+  const synced = (refreshToken: string, credentialVersion = 2): KiroCliSyncState => ({
+    accountId: 'acc-1',
+    refreshTokenHash: hashRefreshToken(refreshToken),
+    credentialVersion
+  })
+
+  it('CLI 自己刷新过：交给 kiro-rs 收编，并把映射更新到新凭据与新版本', async () => {
+    const store = memoryStore(synced('rt-new'))
+    const adopt = vi.fn(async () => ({
+      outcome: 'adopted' as const,
+      credentialId: 7,
+      credentialVersion: 3
+    }))
+    const outcome = await adoptKiroCliIntoAccountDb({
+      store,
+      rows: [row()],
+      adopt,
+      notInDb: new Map(),
+      readCurrent: async () => cliToken()
+    })
+    expect(outcome).toEqual({ status: 'adopted', accountId: 'acc-1', credentialVersion: 3 })
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountUuid: 'acc-1',
+        authMethod: 'social',
+        accessToken: 'at-cli',
+        refreshToken: 'rt-cli'
+      })
+    )
+    expect(readKiroCliSyncState(store)).toEqual(synced('rt-cli', 3))
+  })
+
+  it('CLI 与库里是同一份：不调 kiro-rs，只补映射', async () => {
+    const store = memoryStore()
+    const adopt = vi.fn()
+    const outcome = await adoptKiroCliIntoAccountDb({
+      store,
+      rows: [row({ refreshToken: 'rt-cli' })],
+      adopt,
+      notInDb: new Map(),
+      readCurrent: async () => cliToken()
+    })
+    expect(outcome).toEqual({ status: 'linked', accountId: 'acc-1' })
+    expect(adopt).not.toHaveBeenCalled()
+    expect(readKiroCliSyncState(store)?.refreshTokenHash).toBe(hashRefreshToken('rt-cli'))
+  })
+
+  it('CLI 仍是上次写进去的那份：交给正向同步，不收编', async () => {
+    const adopt = vi.fn()
+    const outcome = await adoptKiroCliIntoAccountDb({
+      store: memoryStore(synced('rt-cli')),
+      rows: [row()],
+      adopt,
+      notInDb: new Map(),
+      readCurrent: async () => cliToken()
+    })
+    expect(outcome.status).toBe('skipped')
+    expect(adopt).not.toHaveBeenCalled()
+  })
+
+  it('不在账号库中：清掉映射，10 分钟内不再问 kiro-rs', async () => {
+    const store = memoryStore(synced('rt-new'))
+    const notInDb = new Map<string, number>()
+    const adopt = vi.fn(async () => ({ outcome: 'not_found' as const }))
+    let now = 1_000
+    const run = (): ReturnType<typeof adoptKiroCliIntoAccountDb> =>
+      adoptKiroCliIntoAccountDb({
+        store,
+        rows: [row()],
+        adopt,
+        notInDb,
+        now: () => now,
+        readCurrent: async () => cliToken()
+      })
+    expect(await run()).toEqual({ status: 'not-in-db' })
+    expect(readKiroCliSyncState(store)).toBeNull()
+    expect((await run()).status).toBe('skipped')
+    now += KIRO_CLI_NOT_IN_DB_RECHECK_MS
+    await run()
+    expect(adopt).toHaveBeenCalledTimes(2)
+  })
+
+  it('CLI 里这份比库里旧：记下映射让正向同步把新凭据写给 CLI', async () => {
+    const store = memoryStore()
+    const outcome = await adoptKiroCliIntoAccountDb({
+      store,
+      rows: [row()],
+      adopt: async () => ({ outcome: 'stale', credentialId: 7, credentialVersion: 2 }),
+      notInDb: new Map(),
+      readCurrent: async () => cliToken()
+    })
+    expect(outcome).toEqual({ status: 'linked', accountId: 'acc-1' })
+    expect(readKiroCliSyncState(store)).toEqual({
+      accountId: 'acc-1',
+      refreshTokenHash: hashRefreshToken('rt-cli'),
+      credentialVersion: -1
+    })
+  })
+
+  it('IdC：带上 CLI 自己的客户端注册；缺注册时跳过', async () => {
+    const adopt = vi.fn(async () => ({
+      outcome: 'adopted' as const,
+      credentialId: 7,
+      credentialVersion: 3
+    }))
+    const idc = cliToken({
+      key: KIRO_CLI_AUTH_KEY.OIDC_TOKEN,
+      clientId: 'cid',
+      clientSecret: 'csec'
+    })
+    await adoptKiroCliIntoAccountDb({
+      store: memoryStore(),
+      rows: [row()],
+      adopt,
+      notInDb: new Map(),
+      readCurrent: async () => idc
+    })
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({ authMethod: 'idc', clientId: 'cid', clientSecret: 'csec' })
+    )
+    const skipped = await adoptKiroCliIntoAccountDb({
+      store: memoryStore(),
+      rows: [row()],
+      adopt,
+      notInDb: new Map(),
+      readCurrent: async () => ({ ...idc, clientSecret: undefined })
+    })
+    expect(skipped.status).toBe('skipped')
+    expect(adopt).toHaveBeenCalledTimes(1)
+  })
+
+  it('kiro-rs 调用失败：返回失败，不改映射', async () => {
+    const store = memoryStore(synced('rt-new'))
+    const outcome = await adoptKiroCliIntoAccountDb({
+      store,
+      rows: [row()],
+      adopt: async () => {
+        throw new Error('kiro-rs 未就绪')
+      },
+      notInDb: new Map(),
+      readCurrent: async () => cliToken()
+    })
+    expect(outcome).toEqual({ status: 'failed', error: 'kiro-rs 未就绪' })
+    expect(readKiroCliSyncState(store)).toEqual(synced('rt-new'))
   })
 })

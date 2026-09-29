@@ -11,14 +11,21 @@
  * 安全前提：只覆盖"管理器上次写进 CLI 的那一份"。每次同步前读 CLI 当前 refresh token，
  * 与记录的哈希比对；不一致说明用户在 CLI 里自己登录过别的账号，此时放弃同步并清掉映射，
  * 绝不覆盖用户的手动登录。哈希用 sha256，不落明文。
+ *
+ * 反向（adoptKiroCliIntoAccountDb）：CLI 自己刷新过（例如 App 没开时一直在用 CLI），
+ * 库里那份 refresh token 已作废。这时不再让 kiro-rs 刷新，而是把 CLI 的新凭据交给
+ * kiro-rs 收编：kiro-rs 用它查上游身份（userId），命中库中账号、且比库里新才替换。
+ * CLI 里是库中账号的独立登录（用户直接 kiro-cli login）时同样收编，两边从此共用一条 token 链。
  */
 
 import { createHash } from 'node:crypto'
 import {
+  KIRO_CLI_AUTH_KEY,
   readKiroCliCurrentToken,
   resolveKiroCliDbPath,
   syncRefreshedKiroCliCredentials
 } from '../kiroCli/cliCredentials'
+import type { AdoptCredentialResult, adoptCredential } from './adminApi'
 import type { AccountDbRow } from './db'
 
 /** electron-store 里的映射键 */
@@ -144,4 +151,117 @@ export async function syncKiroCliFromAccountDb(
     accountId: state.accountId,
     credentialVersion: row.credentialVersion
   }
+}
+
+/** 确认"CLI 里的账号不在账号库"后，多久再问一次 kiro-rs（期间用户可能把它导入库） */
+export const KIRO_CLI_NOT_IN_DB_RECHECK_MS = 10 * 60 * 1000
+
+export type KiroCliAdoptOutcome =
+  /** 无需处理（CLI 未登录、已一致、CLI 没自己刷新过等） */
+  | { status: 'skipped'; reason: string }
+  /** CLI 自己刷新得到的凭据已由 kiro-rs 收编 */
+  | { status: 'adopted'; accountId: string; credentialVersion: number }
+  /** CLI 与库中账号对上了，已建立同步映射（之后 kiro-rs 续期会同步给 CLI） */
+  | { status: 'linked'; accountId: string }
+  /** CLI 当前账号不在账号库中 */
+  | { status: 'not-in-db' }
+  | { status: 'failed'; error: string }
+
+export interface AdoptKiroCliInput {
+  store: KiroCliSyncStore
+  /** 账号库当前的全部行 */
+  rows: readonly AccountDbRow[]
+  /** kiro-rs 的收编接口（已绑定连接信息） */
+  adopt: (body: Parameters<typeof adoptCredential>[1]) => Promise<AdoptCredentialResult>
+  /** 已确认不在库中的 CLI refresh token 哈希 → 确认时间 */
+  notInDb: Map<string, number>
+  dbPath?: string
+  readCurrent?: typeof readKiroCliCurrentToken
+  now?: () => number
+}
+
+/**
+ * CLI 自己刷新过时，把它的新凭据收编进账号库，kiro-rs 不再重复刷新。幂等。
+ */
+export async function adoptKiroCliIntoAccountDb(
+  input: AdoptKiroCliInput
+): Promise<KiroCliAdoptOutcome> {
+  const now = input.now ?? Date.now
+  const readCurrent = input.readCurrent ?? readKiroCliCurrentToken
+  const current = await readCurrent(input.dbPath ?? resolveKiroCliDbPath())
+  if (!current) return { status: 'skipped', reason: 'CLI 未登录' }
+  const hash = hashRefreshToken(current.refreshToken)
+  const state = readKiroCliSyncState(input.store)
+
+  // CLI 与库里某账号用的是同一份：已一致，补上映射即可
+  const same = input.rows.find(
+    (row) => row.refreshToken && hashRefreshToken(row.refreshToken) === hash
+  )
+  if (same) {
+    if (state?.accountId === same.accountUuid && state.refreshTokenHash === hash) {
+      return { status: 'skipped', reason: '已一致' }
+    }
+    writeKiroCliSyncState(input.store, {
+      accountId: same.accountUuid,
+      refreshTokenHash: hash,
+      credentialVersion: same.credentialVersion
+    })
+    return { status: 'linked', accountId: same.accountUuid }
+  }
+  // CLI 仍是上次写进去的那份：库里更新，交给正向同步
+  if (state?.refreshTokenHash === hash) return { status: 'skipped', reason: 'CLI 未自行刷新' }
+
+  const checkedAt = input.notInDb.get(hash)
+  if (checkedAt !== undefined && now() - checkedAt < KIRO_CLI_NOT_IN_DB_RECHECK_MS) {
+    return { status: 'skipped', reason: '不在账号库中' }
+  }
+  if (!current.accessToken) return { status: 'skipped', reason: 'CLI 凭据缺少 access token' }
+  const isIdc = current.key === KIRO_CLI_AUTH_KEY.OIDC_TOKEN
+  if (isIdc && (!current.clientId || !current.clientSecret)) {
+    return { status: 'skipped', reason: 'CLI 缺少 IdC 客户端注册，无法收编' }
+  }
+
+  let result: AdoptCredentialResult
+  try {
+    result = await input.adopt({
+      accountUuid: state?.accountId,
+      authMethod: isIdc ? 'idc' : 'social',
+      accessToken: current.accessToken,
+      refreshToken: current.refreshToken,
+      expiresAtMs: current.expiresAtMs,
+      clientId: isIdc ? current.clientId : undefined,
+      clientSecret: isIdc ? current.clientSecret : undefined,
+      profileArn: current.profileArn,
+      region: current.region
+    })
+  } catch (error) {
+    return { status: 'failed', error: error instanceof Error ? error.message : String(error) }
+  }
+
+  if (result.outcome === 'not_found') {
+    input.notInDb.set(hash, now())
+    if (state) clearKiroCliSyncState(input.store)
+    return { status: 'not-in-db' }
+  }
+  const row = input.rows.find((item) => item.id === result.credentialId)
+  if (!row)
+    return { status: 'failed', error: `kiro-rs 返回的账号 #${result.credentialId} 不在库中` }
+  if (result.outcome === 'stale') {
+    // CLI 里这份比库里旧：记下映射，正向同步会把库里的新凭据写给 CLI
+    writeKiroCliSyncState(input.store, {
+      accountId: row.accountUuid,
+      refreshTokenHash: hash,
+      credentialVersion: -1
+    })
+    return { status: 'linked', accountId: row.accountUuid }
+  }
+  const credentialVersion = result.credentialVersion ?? row.credentialVersion
+  writeKiroCliSyncState(input.store, {
+    accountId: row.accountUuid,
+    refreshTokenHash: hash,
+    credentialVersion
+  })
+  return result.outcome === 'adopted'
+    ? { status: 'adopted', accountId: row.accountUuid, credentialVersion }
+    : { status: 'linked', accountId: row.accountUuid }
 }

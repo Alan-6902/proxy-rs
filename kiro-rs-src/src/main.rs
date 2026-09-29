@@ -252,7 +252,12 @@ async fn main() {
     if account_store.is_some() {
         let tm = token_manager.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            // 首轮推迟：kiro-cli 可能在本进程没运行时自己刷新过 token，库里那份已被轮换作废。
+            // 留时间给 proxy-rs 先把 CLI 的新凭据收编进来（POST /accounts/adopt），
+            // 否则一启动就拿作废的 refresh token 去刷新。
+            let period = std::time::Duration::from_secs(60);
+            let first_run = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut ticker = tokio::time::interval_at(first_run, period);
             loop {
                 ticker.tick().await;
                 tm.maintain_credentials().await;

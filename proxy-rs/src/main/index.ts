@@ -1250,6 +1250,7 @@ import {
   activateAccountDb,
   defaultAccountDbConfig,
   accountDbRow,
+  accountDbRows,
   ensureFreshAccountDbCredential,
   isAccountDbMode,
   loadAccountDbConfig,
@@ -1263,13 +1264,14 @@ import {
 } from './accountDb/runtime'
 import { rollbackAccountDb, runMigration } from './accountDb/migrate'
 import {
+  adoptKiroCliIntoAccountDb,
   clearKiroCliSyncState,
   hashRefreshToken,
   readKiroCliSyncState,
   syncKiroCliFromAccountDb,
   writeKiroCliSyncState
 } from './accountDb/kiroCliSync'
-import { setInPool as setAccountInPool } from './accountDb/adminApi'
+import { adoptCredential, setInPool as setAccountInPool } from './accountDb/adminApi'
 import { loadAdminManagedEntries } from './adminManaged/registryStore'
 const accountStoreCoordinator = new AccountStoreCoordinator()
 type CanonicalKiroCredentialRefreshResult = OidcRefreshResult & {
@@ -1850,7 +1852,7 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
  */
 async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise<void> {
   /*
-   * 账号库模式：CLI 的续期统一走 maintainKiroCliFromAccountDb（它按切号时记下的映射
+   * 账号库模式：CLI 的续期统一走 reconcileKiroCliWithAccountDb（它按切号时记下的映射
    * 定位账号，社交与 IdC 都覆盖）。这里按 CLI 手里的 refresh token 反查账号，而
    * kiro-rs 续期后 CLI 那份在同步前会短暂落后，反查不到就会退回"让 CLI 自己刷"，
    * 正是要避免的。
@@ -6980,6 +6982,49 @@ async function runAccountDbCommand(argv: readonly string[]): Promise<void> {
  *
  * 只在"CLI 当前那份确实是管理器写入的"时覆盖；被用户手动改过就停止同步并提示。
  */
+/** 已确认"CLI 当前账号不在账号库"的 refresh token 哈希（见 adoptKiroCliIntoAccountDb） */
+const kiroCliNotInDb = new Map<string, number>()
+let kiroCliReconcileChain: Promise<void> = Promise.resolve()
+
+/**
+ * CLI 与账号库对账，串行执行（账号库变化、定时兜底、kiro-rs 就绪三处都会触发）：
+ * 1. CLI 自己刷新过 → 交给 kiro-rs 收编 CLI 的新凭据，不再重复刷新
+ * 2. 库里更新 → 把新凭据写给 CLI
+ */
+function reconcileKiroCliWithAccountDb(options: { renew?: boolean } = {}): Promise<void> {
+  kiroCliReconcileChain = kiroCliReconcileChain
+    .then(async () => {
+      await adoptKiroCliAfterSelfRefresh()
+      if (options.renew) await renewKiroCliAccountIfExpiring()
+      await syncKiroCliAfterAccountDbChange()
+    })
+    .catch((error) => {
+      console.warn('[KiroCLI] 对账失败：', error instanceof Error ? error.message : error)
+    })
+  return kiroCliReconcileChain
+}
+
+async function adoptKiroCliAfterSelfRefresh(): Promise<void> {
+  if (!store) return
+  const target = accountDbAdminTarget()
+  if (!target) return
+  const outcome = await adoptKiroCliIntoAccountDb({
+    store: store as unknown as Parameters<typeof adoptKiroCliIntoAccountDb>[0]['store'],
+    rows: accountDbRows(),
+    adopt: (body) => adoptCredential(target, body),
+    notInDb: kiroCliNotInDb
+  })
+  if (outcome.status === 'adopted') {
+    console.log(
+      `[KiroCLI] CLI 自行刷新过账号 ${outcome.accountId}，已把新凭据收编进账号库（版本 ${outcome.credentialVersion}），kiro-rs 不再重复刷新`
+    )
+  } else if (outcome.status === 'linked') {
+    console.log(`[KiroCLI] CLI 当前账号对应账号库中的 ${outcome.accountId}，已开启自动同步`)
+  } else if (outcome.status === 'failed') {
+    console.warn(`[KiroCLI] 收编 CLI 凭据失败：${outcome.error}`)
+  }
+}
+
 async function syncKiroCliAfterAccountDbChange(): Promise<void> {
   if (!store) return
   const syncStore = store as unknown as Parameters<typeof syncKiroCliFromAccountDb>[0]['store']
@@ -7014,7 +7059,7 @@ async function syncKiroCliAfterAccountDbChange(): Promise<void> {
  * token 临期时主动请 kiro-rs 确保新鲜，避免"proxy 在跑但恰好错过 kiro-rs 那一轮"。
  * 与社交专用的 kiroCliSocialRenewal 不同，它覆盖社交与 IdC 两种账号。
  */
-async function maintainKiroCliFromAccountDb(): Promise<void> {
+async function renewKiroCliAccountIfExpiring(): Promise<void> {
   if (!store) return
   const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
   if (!state) return
@@ -7031,7 +7076,6 @@ async function maintainKiroCliFromAccountDb(): Promise<void> {
       console.warn(`[KiroCLI] 续期 CLI 当前账号失败：${fresh.error}`)
     }
   }
-  await syncKiroCliAfterAccountDbChange()
 }
 
 /** 内嵌 Admin 页面的地址与 Key；kiro-rs 未就绪时为 null */
@@ -7045,12 +7089,12 @@ function resolveKiroAdminView(): { adminUiUrl: string; adminApiKey: string } | n
 async function startAccountDbServices(): Promise<void> {
   startAccountDbWatcher(() => {
     sendRendererEvent('account-db-changed', null)
-    void syncKiroCliAfterAccountDbChange()
+    void reconcileKiroCliWithAccountDb()
   })
   startAccountDbBackups()
   // CLI 当前账号的续期兜底；与 kiro-rs 后台那轮互不冲突（ensure-fresh 幂等）
   accountDbCliTimer = setInterval(() => {
-    void maintainKiroCliFromAccountDb()
+    void reconcileKiroCliWithAccountDb({ renew: true })
   }, KIRO_CLI_RENEWAL_INTERVAL_MS)
   const config = loadAccountDbConfig(app.getPath('userData'))
   if (!config) return
@@ -7061,6 +7105,9 @@ async function startAccountDbServices(): Promise<void> {
       onStateChange: (state, detail) => {
         console.log(`[kiro-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
         sendRendererEvent('account-db-status', { ...accountDbStatus(), error: detail })
+        // 就绪后立刻对账：App 没开期间 CLI 可能自己刷新过，要赶在 kiro-rs 首轮巡检
+        // （启动后 30 秒）拿作废的旧 token 去刷新之前把 CLI 的新凭据收编进来
+        if (state === 'running') void reconcileKiroCliWithAccountDb()
       }
     })
   } catch (error) {

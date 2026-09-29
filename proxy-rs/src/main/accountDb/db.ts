@@ -197,6 +197,14 @@ export class AccountDb {
     return result.changes > 0
   }
 
+  /**
+   * 在线一致性备份（SQLite Backup API）。写入过程中另一端照常读写，备份得到的是某一时刻的
+   * 完整快照；不能用直接复制 .sqlite3 文件代替（WAL 里还没 checkpoint 的事务会丢）。
+   */
+  async backupTo(destination: string): Promise<void> {
+    await this.db.backup(destination)
+  }
+
   /** 底层连接，仅供离线迁移器使用 */
   get connection(): Database.Database {
     return this.db

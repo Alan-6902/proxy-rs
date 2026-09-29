@@ -359,6 +359,8 @@ pub struct ImportAccountRequest {
     pub metadata: Option<serde_json::Value>,
     /// 旧额度展示数据（{usage, subscription}），kiro-rs 首次查询前 proxy-rs 用它展示
     pub legacy_usage: Option<serde_json::Value>,
+    /// 上游账号身份（userInfo.userId）：命中库中已有账号时视为重新登录，替换其凭据
+    pub upstream_identity: Option<String>,
 }
 
 /// GET /credentials 查询参数
@@ -383,6 +385,8 @@ pub struct ImportAccountResponse {
     pub credential_id: u64,
     /// false 表示命中已有账号，未新建
     pub created: bool,
+    /// true 表示按上游身份命中已有账号并替换了凭据（重新登录）
+    pub replaced: bool,
 }
 
 /// GET /store/info

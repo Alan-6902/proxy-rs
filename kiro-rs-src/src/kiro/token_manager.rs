@@ -636,6 +636,16 @@ const SESSION_AFFINITY_TTL: StdDuration = StdDuration::from_secs(600);
 /// 会话粘性映射的最大条目数，超出后按最久未命中顺序淘汰
 const SESSION_AFFINITY_MAX_ENTRIES: usize = 1024;
 
+/// 导入凭据的结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportOutcome {
+    pub id: u64,
+    /// 新建了一行
+    pub created: bool,
+    /// 按上游身份命中已有账号并替换了凭据（重新登录）
+    pub replaced: bool,
+}
+
 /// API 调用上下文
 ///
 /// 绑定特定凭据的调用上下文，确保 token、credentials 和 id 的一致性
@@ -2615,7 +2625,7 @@ impl MultiTokenManager {
         &self,
         mut cred: KiroCredentials,
         meta: NewAccountMeta,
-    ) -> anyhow::Result<(u64, bool)> {
+    ) -> anyhow::Result<ImportOutcome> {
         let store = self.require_store()?;
         cred.canonicalize_auth_method();
         if cred.is_api_key_credential() {
@@ -2625,10 +2635,15 @@ impl MultiTokenManager {
         } else if cred.refresh_token.as_deref().is_none_or(str::is_empty) {
             anyhow::bail!("缺少 refreshToken");
         }
+        let existing = |id| ImportOutcome {
+            id,
+            created: false,
+            replaced: false,
+        };
         if let Some(uuid) = meta.account_uuid.as_deref() {
             match store.find_by_uuid(uuid)? {
                 Some((_, true)) => anyhow::bail!("账号 {uuid} 已被删除，不能重新导入同一 ID"),
-                Some((id, false)) => return Ok((id, false)),
+                Some((id, false)) => return Ok(existing(id)),
                 None => {}
             }
         }
@@ -2638,7 +2653,51 @@ impl MultiTokenManager {
         if let Some(id) =
             store.find_by_secret(secret_rt.as_deref(), cred.kiro_api_key.as_deref())?
         {
-            return Ok((id, false));
+            return Ok(existing(id));
+        }
+        // 同一上游账号重新登录：替换已有那一行的凭据，不新增账号（验收 A39 / A34）
+        if let Some(identity) = meta.upstream_identity.as_deref().filter(|v| !v.is_empty()) {
+            if let Some(id) = store.find_by_upstream_identity(identity)? {
+                let (version, enabled) = store.replace_credentials(id, &cred)?;
+                let mut entries = self.entries.lock();
+                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                    let keep = entry.credentials.clone();
+                    entry.credentials = KiroCredentials {
+                        id: keep.id,
+                        credential_identity: keep.credential_identity,
+                        email: keep.email.or(cred.email.clone()),
+                        priority: keep.priority,
+                        subscription_title: keep.subscription_title,
+                        machine_id: keep.machine_id,
+                        endpoint: keep.endpoint,
+                        proxy_url: keep.proxy_url,
+                        proxy_username: keep.proxy_username,
+                        proxy_password: keep.proxy_password,
+                        profile_arn: cred.profile_arn.clone().or(keep.profile_arn),
+                        region: cred.region.clone().or(keep.region),
+                        auth_region: cred.auth_region.clone().or(keep.auth_region),
+                        api_region: cred.api_region.clone().or(keep.api_region),
+                        disabled: !enabled,
+                        ..cred.clone()
+                    };
+                    entry.credential_version = version;
+                    entry.refresh_failure_count = 0;
+                    if enabled {
+                        entry.disabled = false;
+                        entry.disabled_reason = None;
+                    }
+                }
+                tracing::info!(
+                    "凭据 #{} 已按上游身份重新登录，凭据已替换（版本 {}）",
+                    id,
+                    version
+                );
+                return Ok(ImportOutcome {
+                    id,
+                    created: false,
+                    replaced: true,
+                });
+            }
         }
         if cred.machine_id.is_none() {
             cred.machine_id = Some(machine_id::generate_from_credentials(&cred, &self.config));
@@ -2656,7 +2715,11 @@ impl MultiTokenManager {
             self.select_highest_priority();
         }
         tracing::info!("已导入凭据 #{}（号池: {}）", id, in_pool);
-        Ok((id, true))
+        Ok(ImportOutcome {
+            id,
+            created: true,
+            replaced: false,
+        })
     }
 
     /// 设置凭据级代理（库模式）
@@ -3946,20 +4009,23 @@ mod tests {
             in_pool,
             ..Default::default()
         };
-        let (a, created) = m
+        let first = m
             .import_credential(live_oauth("rt-a"), meta("p-a", false))
             .unwrap();
-        assert!(created);
+        assert!(first.created);
+        let a = first.id;
         // 同一 refresh token / 同一 account_uuid 不会重复创建
         assert_eq!(
             m.import_credential(live_oauth("rt-a"), meta("p-x", false))
-                .unwrap(),
-            (a, false)
+                .unwrap()
+                .id,
+            a
         );
         assert_eq!(
             m.import_credential(live_oauth("rt-z"), meta("p-a", false))
-                .unwrap(),
-            (a, false)
+                .unwrap()
+                .id,
+            a
         );
         // 不在号池的账号不参与调度
         assert!(m.acquire_context(None).await.is_err());
@@ -3973,7 +4039,7 @@ mod tests {
     #[tokio::test]
     async fn db_auto_disable_reason_survives_restart() {
         let (m, store, _) = db_manager();
-        let (id, _) = m
+        let id = m
             .import_credential(
                 live_oauth("rt-a"),
                 NewAccountMeta {
@@ -3981,7 +4047,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .unwrap();
+            .unwrap()
+            .id;
         m.report_quota_exhausted(id);
         drop(m);
         let reloaded = MultiTokenManager::new_with_store(Config::default(), store, None).unwrap();
@@ -3993,7 +4060,7 @@ mod tests {
     #[tokio::test]
     async fn db_counters_are_flushed_and_reloaded() {
         let (m, store, _) = db_manager();
-        let (id, _) = m
+        let id = m
             .import_credential(
                 live_oauth("rt-a"),
                 NewAccountMeta {
@@ -4001,7 +4068,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .unwrap();
+            .unwrap()
+            .id;
         m.report_success(id);
         m.record_token_usage(id, 11, 22);
         m.flush_stats();
@@ -4016,9 +4084,10 @@ mod tests {
     #[tokio::test]
     async fn db_ensure_fresh_reuses_when_version_moved_or_token_valid() {
         let (m, _, _) = db_manager();
-        let (id, _) = m
+        let id = m
             .import_credential(live_oauth("rt-a"), NewAccountMeta::default())
-            .unwrap();
+            .unwrap()
+            .id;
         // token 有效、未强制：不刷新
         assert_eq!(m.ensure_fresh(id, None, false).await.unwrap(), 0);
         // 调用方持有的版本已落后：即使 force 也直接复用，不再轮换
@@ -4032,9 +4101,10 @@ mod tests {
             account_uuid: Some("p-a".into()),
             ..Default::default()
         };
-        let (id, _) = m
+        let id = m
             .import_credential(live_oauth("rt-a"), meta.clone())
-            .unwrap();
+            .unwrap()
+            .id;
         m.set_disabled(id, true).unwrap();
         m.delete_credential(id).unwrap();
         assert!(m.snapshot().entries.is_empty());
@@ -4061,14 +4131,201 @@ mod tests {
             kiro_api_key: Some("ksk_existing_key".into()),
             ..Default::default()
         };
-        let (id, _) = m
+        let id = m
             .import_credential(api.clone(), NewAccountMeta::default())
-            .unwrap();
+            .unwrap()
+            .id;
         assert!(!m.snapshot().entries[0].in_pool);
         // Admin "添加凭据"遇到库中已有的同一凭据：不报错，改为入池并返回已有 ID
         assert_eq!(m.add_credential(api).await.unwrap(), id);
         assert!(m.snapshot().entries[0].in_pool);
         m.purge_credential(id).unwrap();
         assert!(m.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_relogin_by_upstream_identity_replaces_credentials_in_place() {
+        let (m, store, _) = db_manager();
+        let meta = |uuid: &str| NewAccountMeta {
+            account_uuid: Some(uuid.into()),
+            upstream_identity: Some("user-1".into()),
+            in_pool: true,
+            ..Default::default()
+        };
+        let first = m
+            .import_credential(live_oauth("rt-old"), meta("p-old"))
+            .unwrap();
+        assert!(first.created);
+        // 旧 token 失效被禁用
+        m.report_refresh_token_invalid(first.id);
+        assert!(m.snapshot().entries[0].disabled);
+        // 旧凭据发起的额度查询还没回来
+        let stale_seq = store.begin_usage(first.id).unwrap();
+        // 在途刷新拿到的基准版本
+        let base = store.begin_refresh(first.id).unwrap();
+
+        // 用户重新登录同一个上游账号（proxy 里是一个新账号 ID）
+        let relogin = m
+            .import_credential(live_oauth("rt-new"), meta("p-new"))
+            .unwrap();
+        assert_eq!(
+            relogin,
+            ImportOutcome {
+                id: first.id,
+                created: false,
+                replaced: true
+            }
+        );
+        let entry = &m.snapshot().entries[0];
+        assert_eq!(m.snapshot().entries.len(), 1, "不新增行");
+        assert!(!entry.disabled, "失效禁用被解除");
+        assert_eq!(entry.credential_version, base + 1);
+        let row = &store.load_all().unwrap()[0];
+        assert_eq!(row.credentials.refresh_token.as_deref(), Some("rt-new"));
+        assert!(!row.credentials.disabled);
+
+        // 迟到的旧刷新结果写不进去（版本已变）
+        assert!(
+            store
+                .save_rotated_credentials(first.id, Some(base), &live_oauth("rt-from-old-refresh"))
+                .is_err()
+        );
+        // 旧额度查询的结果被丢弃
+        let write = UsageWrite {
+            seq: stale_seq,
+            raw_json: "{}",
+            used_amount: 1.0,
+            limit_amount: 1.0,
+            reset_at_ms: None,
+            subscription_title: None,
+            upstream_identity: None,
+        };
+        assert!(!store.finish_usage(first.id, &write).unwrap());
+        assert_eq!(
+            store.load_all().unwrap()[0]
+                .credentials
+                .refresh_token
+                .as_deref(),
+            Some("rt-new")
+        );
+    }
+
+    #[tokio::test]
+    async fn db_manual_disable_survives_relogin() {
+        let (m, _, _) = db_manager();
+        let meta = NewAccountMeta {
+            upstream_identity: Some("user-2".into()),
+            ..Default::default()
+        };
+        let id = m
+            .import_credential(live_oauth("rt-a"), meta.clone())
+            .unwrap()
+            .id;
+        m.set_disabled(id, true).unwrap();
+        let again = m.import_credential(live_oauth("rt-b"), meta).unwrap();
+        assert!(again.replaced);
+        // 手动禁用不是凭据问题，重新登录不应自动解除
+        assert!(m.snapshot().entries[0].disabled);
+    }
+
+    #[tokio::test]
+    async fn a03_a14_pool_toggle_never_touches_credentials() {
+        let (m, store, _) = db_manager();
+        let id = m
+            .import_credential(live_oauth("rt-a"), NewAccountMeta::default())
+            .unwrap()
+            .id;
+        let before = store.load_all().unwrap()[0].credentials.clone();
+        m.set_in_pool(id, true).unwrap();
+        m.set_in_pool(id, false).unwrap();
+        m.set_in_pool(id, true).unwrap();
+        let after = &store.load_all().unwrap()[0];
+        assert_eq!(after.credential_version, 0, "入池出池不刷新、不轮换");
+        assert_eq!(after.credentials.refresh_token, before.refresh_token);
+        assert_eq!(after.credentials.access_token, before.access_token);
+        assert_eq!(after.credentials.expires_at, before.expires_at);
+        // 出池不删除账号
+        m.set_in_pool(id, false).unwrap();
+        assert_eq!(m.snapshot().entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a15_late_refresh_result_cannot_revive_deleted_account() {
+        let (m, store, _) = db_manager();
+        let id = m
+            .import_credential(live_oauth("rt-a"), NewAccountMeta::default())
+            .unwrap()
+            .id;
+        let base = store.begin_refresh(id).unwrap();
+        m.purge_credential(id).unwrap();
+        // 在途刷新回来了：写入账号凭据表不会让账号重新出现
+        let _ = store.save_rotated_credentials(id, Some(base), &live_oauth("rt-late"));
+        assert!(store.load_all().unwrap().is_empty());
+        let reloaded = MultiTokenManager::new_with_store(Config::default(), store, None).unwrap();
+        assert!(reloaded.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a08_api_key_account_is_never_refreshed() {
+        let (m, store, _) = db_manager();
+        let key = KiroCredentials {
+            auth_method: Some("api_key".into()),
+            kiro_api_key: Some("ksk_no_refresh".into()),
+            ..Default::default()
+        };
+        let id = m
+            .import_credential(key, NewAccountMeta::default())
+            .unwrap()
+            .id;
+        // 强制刷新也直接返回当前版本，不进入 OAuth 刷新
+        assert_eq!(m.ensure_fresh(id, None, true).await.unwrap(), 0);
+        assert_eq!(store.load_all().unwrap()[0].credential_version, 0);
+    }
+
+    #[tokio::test]
+    async fn a05_concurrent_ensure_fresh_on_valid_token_does_not_refresh() {
+        let (m, store, _) = db_manager();
+        let m = Arc::new(m);
+        let id = m
+            .import_credential(live_oauth("rt-a"), NewAccountMeta::default())
+            .unwrap()
+            .id;
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let m = m.clone();
+                tokio::spawn(async move { m.ensure_fresh(id, None, false).await.unwrap() })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), 0);
+        }
+        assert_eq!(store.load_all().unwrap()[0].credential_version, 0);
+    }
+
+    #[tokio::test]
+    async fn a40_reimport_after_delete_creates_new_row_without_old_stats() {
+        let (m, store, _) = db_manager();
+        let meta = |uuid: &str| NewAccountMeta {
+            account_uuid: Some(uuid.into()),
+            upstream_identity: Some("user-del".into()),
+            in_pool: true,
+            ..Default::default()
+        };
+        let old = m
+            .import_credential(live_oauth("rt-1"), meta("p-1"))
+            .unwrap()
+            .id;
+        m.report_success(old);
+        m.flush_stats();
+        m.purge_credential(old).unwrap();
+        // 同一上游账号删除后重新导入：已删除行不参与身份匹配，新建一行，唯一索引不冲突
+        let again = m
+            .import_credential(live_oauth("rt-2"), meta("p-2"))
+            .unwrap();
+        assert!(again.created && !again.replaced);
+        assert_ne!(again.id, old);
+        let rows = store.load_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].counters.success_count, 0, "旧行统计不被复用");
     }
 }

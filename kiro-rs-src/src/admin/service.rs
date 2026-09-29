@@ -364,14 +364,16 @@ impl AdminService {
                 .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "[]".into())),
             metadata_json: req.metadata.map(|v| v.to_string()),
             legacy_usage_json: req.legacy_usage.map(|v| v.to_string()),
+            upstream_identity: req.upstream_identity,
         };
-        let (credential_id, created) = self
+        let outcome = self
             .token_manager
             .import_credential(cred, meta)
             .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
         Ok(ImportAccountResponse {
-            credential_id,
-            created,
+            credential_id: outcome.id,
+            created: outcome.created,
+            replaced: outcome.replaced,
         })
     }
 

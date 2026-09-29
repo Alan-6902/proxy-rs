@@ -238,6 +238,8 @@ export function toImportRequest(account: AccountLike, proxyUrl?: string): Import
       groupId: ui.groupId ?? undefined,
       tags: ui.tags,
       metadata: ui.metadata,
+      // 上游账号身份：命中库中已有账号时 kiro-rs 视为重新登录，替换其凭据而不是新增一行
+      upstreamIdentity: str(account.userId),
       legacyUsage:
         account.usage || account.subscription
           ? { usage: account.usage, subscription: account.subscription }

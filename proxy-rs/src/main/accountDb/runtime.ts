@@ -13,6 +13,7 @@ import { reloadAdminManagedIds, setAdminManagedSource } from '../adminManaged/ga
 import { AccountDb, type AccountDbRow } from './db'
 import { AccountDataBridge, type BridgeDeps, type RawStore } from './bridge'
 import { toAccount } from './projection'
+import { BACKUP_INTERVAL_MS, backupAccountDb } from './backup'
 import { ensureFresh, type KiroRsAdminTarget } from './adminApi'
 import { KiroRsProcess, type KiroRsState } from './kiroRsProcess'
 
@@ -104,6 +105,7 @@ interface Runtime {
   kiroRsState: KiroRsState
   kiroRsDetail?: string
   watcher: NodeJS.Timeout | null
+  backupTimer: NodeJS.Timeout | null
   lastSeq: number
   pendingTimer: NodeJS.Timeout | null
 }
@@ -141,6 +143,7 @@ export function activateAccountDb(input: {
     process: null,
     kiroRsState: 'stopped',
     watcher: null,
+    backupTimer: null,
     lastSeq: db.changeSeq(),
     pendingTimer: null
   }
@@ -326,6 +329,32 @@ export function stopAccountDbWatcher(): void {
     clearInterval(runtime.watcher)
     runtime.watcher = null
   }
+  if (runtime?.backupTimer) {
+    clearInterval(runtime.backupTimer)
+    runtime.backupTimer = null
+  }
+}
+
+/** 立即备份一次并按天定时备份（验收 A27） */
+export function startAccountDbBackups(): void {
+  if (!runtime || runtime.backupTimer) return
+  const current = runtime
+  const run = (): void => {
+    void backupAccountDb(current.db)
+      .then((result) =>
+        console.log(
+          `[AccountDb] 已备份账号库：${result.file}` +
+            (result.trashed.length > 0
+              ? `（过期备份 ${result.trashed.length} 份已移入废纸篓）`
+              : '')
+        )
+      )
+      .catch((error) =>
+        console.warn('[AccountDb] 备份账号库失败：', error instanceof Error ? error.message : error)
+      )
+  }
+  run()
+  current.backupTimer = setInterval(run, BACKUP_INTERVAL_MS)
 }
 
 /**

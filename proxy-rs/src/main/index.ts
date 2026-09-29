@@ -1283,6 +1283,7 @@ import {
   ensureFreshAccountDbCredential,
   isAccountDbMode,
   loadAccountDbConfig,
+  startAccountDbBackups,
   startAccountDbWatcher,
   startManagedKiroRs,
   stopAccountDbWatcher,
@@ -5029,14 +5030,21 @@ app.whenReady().then(async () => {
         if (synced.status !== 'active') {
           return { success: false, error: { message: synced.errorMessage || '反代状态同步失败' } }
         }
+        /*
+         * 账号库模式：kiro-rs 这次查询已把上游原样额度写进库，展示一律用库投影
+         * （完整的 base / 试用 / 奖励明细），与后台刷新、其他页面看到的是同一份已提交结果。
+         */
+        const projected = accountDbBridge()?.projectedAccount(account.id)
         return {
           success: true,
           data: {
             status: synced.status,
-            email: account.email,
-            subscriptionTitle: synced.subscription?.title,
-            usage: synced.usage,
-            subscription: synced.subscription,
+            email: (projected?.email as string | undefined) || account.email,
+            subscriptionTitle:
+              (projected?.subscription as { title?: string } | undefined)?.title ??
+              synced.subscription?.title,
+            usage: projected?.usage ?? synced.usage,
+            subscription: projected?.subscription ?? synced.subscription,
             // 托管账号的 token 由反代维护，本地没有新凭据可回写
             newCredentials: undefined
           }
@@ -7757,6 +7765,7 @@ async function startAccountDbServices(): Promise<void> {
     sendRendererEvent('account-db-changed', null)
     void syncKiroCliAfterAccountDbChange()
   })
+  startAccountDbBackups()
   // CLI 当前账号的续期兜底；与 kiro-rs 后台那轮互不冲突（ensure-fresh 幂等）
   accountDbCliTimer = setInterval(() => {
     void maintainKiroCliFromAccountDb()

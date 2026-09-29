@@ -80,6 +80,8 @@ pub struct NewAccountMeta {
     pub metadata_json: Option<String>,
     /// 迁移 / 导入时带入的旧额度展示数据（{usage, subscription}），raw_json 为空时使用
     pub legacy_usage_json: Option<String>,
+    /// 上游账号身份（userInfo.userId）；导入时据此识别"同一账号重新登录"
+    pub upstream_identity: Option<String>,
 }
 
 /// 一次额度查询写库的内容
@@ -382,8 +384,8 @@ impl AccountStore {
             tx.execute(
                 "INSERT INTO accounts(id, account_uuid, credential_identity, email, in_pool,
                                       enabled, disabled_reason, priority, subscription_title,
-                                      created_at_ms, updated_at_ms)
-                 VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                                      created_at_ms, updated_at_ms, upstream_identity)
+                 VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?11)",
                 params![
                     account_uuid,
                     identity,
@@ -395,7 +397,8 @@ impl AccountStore {
                     credentials.subscription_title,
                     now,
                     // 迁移时保留原数字 ID；为空时由 AUTOINCREMENT 分配
-                    credentials.id.map(|v| v as i64)
+                    credentials.id.map(|v| v as i64),
+                    meta.upstream_identity.as_deref().filter(|v| !v.is_empty())
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -767,6 +770,94 @@ impl AccountStore {
                 params![id as i64, seq, message],
             )?;
             Ok(())
+        })
+    }
+
+    /// 按上游身份查未删除账号
+    pub fn find_by_upstream_identity(
+        &self,
+        upstream_identity: &str,
+    ) -> anyhow::Result<Option<u64>> {
+        let conn = self.conn.lock();
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM accounts WHERE upstream_identity = ?1 AND deleted_at_ms IS NULL",
+                params![upstream_identity],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id.map(|v| v as u64))
+    }
+
+    /// 重新登录：整体替换凭据（不是刷新结果），版本加一。
+    ///
+    /// - 凭据失效导致的禁用（InvalidRefreshToken / TooManyRefreshFailures）一并解除，状态回 ready
+    /// - 推进额度查询序号，旧凭据发起、尚未返回的额度结果会被丢弃
+    /// - 版本变化使在途的旧刷新结果写入失败（save_rotated_credentials 的条件写），旧 token 无法复活
+    ///
+    /// 返回新版本号与替换后是否可调度（未被其它原因禁用）。
+    pub fn replace_credentials(
+        &self,
+        id: u64,
+        credentials: &KiroCredentials,
+    ) -> anyhow::Result<(i64, bool)> {
+        self.write(|tx| {
+            let now = now_ms();
+            let n = tx.execute(
+                "UPDATE account_credentials
+                 SET credential_version = credential_version + 1, auth_kind = ?2, auth_method = ?3,
+                     access_token = ?4, refresh_token = ?5, expires_at_ms = ?6, kiro_api_key = ?7,
+                     client_id = ?8, client_secret = ?9, profile_arn = COALESCE(?10, profile_arn),
+                     region = COALESCE(?11, region), auth_region = COALESCE(?12, auth_region),
+                     api_region = COALESCE(?13, api_region), updated_at_ms = ?14
+                 WHERE account_id = ?1",
+                params![
+                    id as i64,
+                    auth_kind(credentials),
+                    auth_method(credentials),
+                    credentials.access_token,
+                    credentials.refresh_token,
+                    rfc3339_to_ms(credentials.expires_at.as_deref()),
+                    credentials.kiro_api_key,
+                    credentials.client_id,
+                    credentials.client_secret,
+                    credentials.profile_arn,
+                    credentials.region,
+                    credentials.auth_region,
+                    credentials.api_region,
+                    now
+                ],
+            )?;
+            if n == 0 {
+                bail!("凭据不存在: {id}");
+            }
+            tx.execute(
+                "UPDATE accounts
+                 SET enabled = CASE WHEN disabled_reason IN ('InvalidRefreshToken', 'TooManyRefreshFailures')
+                                    THEN 1 ELSE enabled END,
+                     disabled_reason = CASE WHEN disabled_reason IN ('InvalidRefreshToken', 'TooManyRefreshFailures')
+                                            THEN NULL ELSE disabled_reason END,
+                     status = 'ready', last_error = NULL, consecutive_refresh_failures = 0,
+                     refresh_state = 'idle', refresh_started_at_ms = NULL, refresh_base_version = NULL,
+                     updated_at_ms = ?2
+                 WHERE id = ?1",
+                params![id as i64, now],
+            )?;
+            tx.execute(
+                "UPDATE account_usage SET requested_seq = requested_seq + 1 WHERE account_id = ?1",
+                params![id as i64],
+            )?;
+            let version: i64 = tx.query_row(
+                "SELECT credential_version FROM account_credentials WHERE account_id = ?1",
+                params![id as i64],
+                |r| r.get(0),
+            )?;
+            let enabled: bool = tx.query_row(
+                "SELECT enabled FROM accounts WHERE id = ?1",
+                params![id as i64],
+                |r| r.get(0),
+            )?;
+            Ok((version, enabled))
         })
     }
 
@@ -1151,5 +1242,143 @@ mod tests {
         assert_eq!(next, 10);
         // 目标库已存在时拒绝重复迁移
         assert!(migrate_from_json(&db, vec![], None).is_err());
+    }
+
+    #[test]
+    fn a21_mixed_auth_migration_keeps_all_fields_and_time_units() {
+        let dir = std::env::temp_dir().join(format!("migrate-mixed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let social = KiroCredentials {
+            id: Some(1),
+            auth_method: Some("social".into()),
+            refresh_token: Some("rt-social".into()),
+            access_token: Some("at-social".into()),
+            expires_at: Some("2031-02-03T04:05:06+00:00".into()),
+            profile_arn: Some("arn:aws:codewhisperer:us-east-1:1:profile/x".into()),
+            ..Default::default()
+        };
+        let idc = KiroCredentials {
+            id: Some(2),
+            auth_method: Some("builder-id".into()),
+            refresh_token: Some("rt-idc".into()),
+            client_id: Some("cid".into()),
+            client_secret: Some("csec".into()),
+            auth_region: Some("us-east-1".into()),
+            api_region: Some("eu-central-1".into()),
+            ..Default::default()
+        };
+        let key = KiroCredentials {
+            id: Some(3),
+            auth_method: Some("api_key".into()),
+            kiro_api_key: Some("ksk_mixed".into()),
+            endpoint: Some("amazonq".into()),
+            proxy_url: Some("socks5://127.0.0.1:1080".into()),
+            proxy_username: Some("u".into()),
+            proxy_password: Some("p".into()),
+            ..Default::default()
+        };
+        let db = dir.join("accounts.sqlite3");
+        assert_eq!(
+            migrate_from_json(&db, vec![social, idc, key], None).unwrap(),
+            3
+        );
+        let all = AccountStore::open_existing(&db)
+            .unwrap()
+            .load_all()
+            .unwrap();
+        let by = |id: u64| all.iter().find(|a| a.credentials.id == Some(id)).unwrap();
+        let s = &by(1).credentials;
+        assert_eq!(s.auth_method.as_deref(), Some("social"));
+        assert_eq!(
+            rfc3339_to_ms(s.expires_at.as_deref()),
+            rfc3339_to_ms(Some("2031-02-03T04:05:06+00:00")),
+            "过期时间按毫秒往返，不猜单位"
+        );
+        assert!(s.profile_arn.is_some());
+        let i = &by(2).credentials;
+        assert_eq!(
+            i.auth_method.as_deref(),
+            Some("idc"),
+            "builder-id 归一为 idc"
+        );
+        assert_eq!(
+            (i.client_id.as_deref(), i.client_secret.as_deref()),
+            (Some("cid"), Some("csec"))
+        );
+        assert_eq!(i.api_region.as_deref(), Some("eu-central-1"));
+        let k = &by(3).credentials;
+        assert!(k.is_api_key_credential());
+        assert_eq!(k.endpoint.as_deref(), Some("amazonq"));
+        assert_eq!(k.proxy_password.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn a43_change_log_retention_only_drops_expired_rows() {
+        let (store, _) = test_store();
+        let (id, _) = store
+            .insert_account(&oauth("rt"), &NewAccountMeta::default())
+            .unwrap();
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE account_changes SET occurred_at_ms = ?1",
+            [now_ms() - CHANGES_RETENTION_MS - 1000],
+        )
+        .unwrap();
+        let old: i64 = conn
+            .query_row("SELECT COUNT(*) FROM account_changes", [], |r| r.get(0))
+            .unwrap();
+        let max_before: i64 = conn
+            .query_row("SELECT MAX(seq) FROM account_changes", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert!(old > 0);
+        // 计数写入会顺带清理过期变更，但新写入的那条保留，序号继续单调递增
+        store
+            .save_counters(&[(
+                id,
+                StoredCounters {
+                    success_count: 1,
+                    ..Default::default()
+                },
+            )])
+            .unwrap();
+        let conn = store.conn.lock();
+        let (count, min_seq): (i64, i64) = conn
+            .query_row("SELECT COUNT(*), MIN(seq) FROM account_changes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(min_seq > max_before);
+    }
+
+    #[test]
+    fn a17_busy_on_commit_is_retried_without_redoing_network() {
+        let (store, path) = test_store();
+        let (id, _) = store
+            .insert_account(&oauth("rt"), &NewAccountMeta::default())
+            .unwrap();
+        let base = store.begin_refresh(id).unwrap();
+        // 另一个连接持写锁 300ms：模拟 proxy 正在写 UI 字段
+        let path2 = path.clone();
+        let holder = std::thread::spawn(move || {
+            let mut c = Connection::open(&path2).unwrap();
+            let tx = c
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("UPDATE account_ui SET nickname = 'x'", [])
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            tx.commit().unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        // 上游刷新已经成功，这里只做提交：等锁释放后成功，且只加一次版本
+        let mut next = oauth("rt-2");
+        next.access_token = Some("at-2".into());
+        let v = store
+            .save_rotated_credentials(id, Some(base), &next)
+            .unwrap();
+        holder.join().unwrap();
+        assert_eq!(v, base + 1);
     }
 }

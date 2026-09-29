@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  readdirSync,
+  statSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import Database from 'better-sqlite3'
@@ -11,6 +18,7 @@ import {
 } from '../../src/main/accountDb/bridge'
 import { toAccount, toImportRequest, withoutSecrets } from '../../src/main/accountDb/projection'
 import { planMigration, rollbackAccountDb } from '../../src/main/accountDb/migrate'
+import { backupAccountDb, backupDirFor } from '../../src/main/accountDb/backup'
 import { managedEntryOf, defaultAccountDbConfig } from '../../src/main/accountDb/runtime'
 import type { KiroRsAdminTarget } from '../../src/main/accountDb/adminApi'
 
@@ -227,6 +235,7 @@ describe('projection', () => {
     const social = toImportRequest({
       id: 'p1',
       email: 'a@example.com',
+      userId: 'upstream-user-1',
       nickname: 'nick',
       tags: ['t'],
       credentials: {
@@ -244,6 +253,7 @@ describe('projection', () => {
       refreshToken: 'rt',
       accessToken: 'at',
       expiresAtMs: 123,
+      upstreamIdentity: 'upstream-user-1',
       apiRegion: 'us-east-1',
       nickname: 'nick'
     })
@@ -495,5 +505,67 @@ describe('迁移', () => {
     expect(exported[0].refreshToken).toBe('rt-latest')
     const saved = JSON.parse(readFileSync(join(dir, 'account-db.json'), 'utf8'))
     expect(saved.enabled).toBe(false)
+  })
+})
+
+describe('账号库备份（A27）', () => {
+  it('在线备份得到可打开的一致快照；同日覆盖；超出保留数的移入废纸篓；权限 600', async () => {
+    const path = createDb()
+    seed(path, { uuid: 'a', refreshToken: 'rt-a' })
+    const db = new AccountDb(path)
+    // 另一个连接持续写入，模拟 kiro-rs 在备份期间工作
+    const writer = new Database(path)
+    writer.pragma('journal_mode = WAL')
+    const insertCounter = writer.prepare(
+      'UPDATE account_counters SET success_count = success_count + 1'
+    )
+    for (let i = 0; i < 50; i++) insertCounter.run()
+
+    const trashDir = mkdtempSync(join(tmpdir(), 'trash-'))
+    for (let day = 1; day <= 9; day++) {
+      insertCounter.run()
+      await backupAccountDb(db, {
+        now: new Date(`2026-09-0${day}T12:00:00Z`),
+        keep: 7,
+        trashDir
+      })
+    }
+    // 同一天再备一次：覆盖而不是新增
+    await backupAccountDb(db, { now: new Date('2026-09-09T20:00:00Z'), keep: 7, trashDir })
+    writer.close()
+
+    const dir = backupDirFor(path)
+    const files = readdirSync(dir)
+      .filter((name) => name.endsWith('.sqlite3'))
+      .sort()
+    expect(files).toHaveLength(7)
+    expect(files[0]).toBe('accounts-2026-09-03.sqlite3')
+    expect(readdirSync(trashDir)).toHaveLength(2)
+    expect(readdirSync(dir).some((name) => name.endsWith('.partial'))).toBe(false)
+
+    const latest = join(dir, files[files.length - 1])
+    expect(statSync(latest).mode & 0o777).toBe(0o600)
+    const restored = new AccountDb(latest)
+    expect(restored.listRows()[0].refreshToken).toBe('rt-a')
+    expect(restored.connection.pragma('integrity_check', { simple: true })).toBe('ok')
+    restored.close()
+    db.close()
+  })
+})
+
+describe('A30：变更记录不含秘密', () => {
+  it('account_changes 只有账号 ID、种类和时间', () => {
+    const path = createDb()
+    seed(path, { uuid: 'a', refreshToken: 'rt-secret-value' })
+    const db = new Database(path)
+    const columns = (
+      db.prepare('PRAGMA table_info(account_changes)').all() as Array<{ name: string }>
+    )
+      .map((c) => c.name)
+      .sort()
+    expect(columns).toEqual(['account_id', 'kind', 'occurred_at_ms', 'seq'])
+    const dump = JSON.stringify(db.prepare('SELECT * FROM account_changes').all())
+    expect(dump).not.toContain('rt-secret-value')
+    db.close()
   })
 })

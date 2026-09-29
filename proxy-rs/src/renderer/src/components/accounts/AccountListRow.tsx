@@ -100,7 +100,8 @@ function AccountListRowComponent({
     switchToCli,
     cliSwitchState,
     canSwitchCli,
-    cliSwitchTitle
+    cliSwitchTitle,
+    isCliCurrent
   } = useAccountActions(account, isEn)
 
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -607,7 +608,9 @@ function AccountListRowComponent({
           variant="ghost"
           className={cn(
             'h-7 w-7',
-            cliSwitchState === 'done' ? 'text-success' : 'text-muted-foreground hover:text-primary'
+            cliSwitchState === 'done' || isCliCurrent
+              ? 'text-success bg-success/10'
+              : 'text-muted-foreground hover:text-primary'
           )}
           onClick={(e) => {
             e.stopPropagation()

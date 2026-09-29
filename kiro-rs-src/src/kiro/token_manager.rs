@@ -619,6 +619,8 @@ pub struct CredentialEntrySnapshot {
     pub in_pool: bool,
     /// 账号库中的凭据版本（proxy-rs 请求"确保新鲜"时回传）
     pub credential_version: i64,
+    /// 由 kiro-cli 刷新（kiro-rs 不刷新它）
+    pub external_refresh: bool,
 }
 
 /// 凭据管理器状态快照
@@ -2044,6 +2046,7 @@ impl MultiTokenManager {
                     api_region: e.credentials.effective_api_region(&self.config).to_string(),
                     in_pool: e.in_pool,
                     credential_version: e.credential_version,
+                    external_refresh: e.external_refresh,
                 })
                 .collect(),
             current_id,

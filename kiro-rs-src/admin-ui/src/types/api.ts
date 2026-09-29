@@ -33,6 +33,8 @@ export interface CredentialStatusItem {
   apiRegion: string
   /** 是否在反代号池中。共享账号库模式下可能为 false（账号由 proxy-rs 管理但不参与反代） */
   inPool?: boolean
+  /** kiro-cli 当前登录的账号：由 kiro-cli 刷新，kiro-rs 不刷新它 */
+  externalRefresh?: boolean
   /** 账号库凭据版本 */
   credentialVersion?: number
 }

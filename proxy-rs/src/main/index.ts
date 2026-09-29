@@ -1838,6 +1838,8 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
       refreshTokenHash: hashRefreshToken(refreshed.refreshToken),
       credentialVersion: row?.credentialVersion ?? 0
     })
+    // 立即对账：告诉 kiro-rs 这个账号改由 CLI 刷新，账号页也随之更新
+    void reconcileKiroCliWithAccountDb()
   }
   console.log(`[KiroCLI] 已切换 Kiro CLI 账号 ${accountId}（${socialProvider ?? 'IdC'}）`)
   return {
@@ -3685,6 +3687,9 @@ app.whenReady().then(async () => {
     else proxyLogStore.clear()
     return { success: true }
   })
+
+  // IPC: Kiro CLI 当前登录的账号（账号库模式；该账号由 kiro-cli 自己刷新）
+  ipcMain.handle('kiro-cli-current-account', () => ({ accountId: currentKiroCliAccountId() }))
 
   // IPC: 内嵌 Admin 页面的地址（Key 由主进程在页面里注入，不下发给渲染进程）
   ipcMain.handle('kiro-admin-view', () => {
@@ -7003,6 +7008,7 @@ function reconcileKiroCliWithAccountDb(): Promise<void> {
       await adoptKiroCliAfterSelfRefresh()
       await pushKiroCliAccountToKiroRs()
       await syncKiroCliAfterAccountDbChange()
+      notifyKiroCliAccountIfChanged()
     })
     .catch((error) => {
       console.warn('[KiroCLI] 对账失败：', error instanceof Error ? error.message : error)
@@ -7031,14 +7037,27 @@ async function adoptKiroCliAfterSelfRefresh(): Promise<void> {
   }
 }
 
+/** Kiro CLI 当前登录的、且在账号库中的账号（proxy 侧账号 ID）；没有则 null */
+function currentKiroCliAccountId(): string | null {
+  if (!store || !isAccountDbMode()) return null
+  const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
+  return state && accountDbRow(state.accountId) ? state.accountId : null
+}
+
 /** 把 CLI 当前账号（没有则 null）告诉 kiro-rs。每轮都推：kiro-rs 重启后内存里的标记会丢 */
 async function pushKiroCliAccountToKiroRs(): Promise<void> {
-  if (!store) return
   const target = accountDbAdminTarget()
   if (!target) return
-  const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
-  const accountUuid = state && accountDbRow(state.accountId) ? state.accountId : null
-  await setExternalRefreshAccount(target, accountUuid)
+  await setExternalRefreshAccount(target, currentKiroCliAccountId())
+}
+
+/** 账号页据此标出"CLI 当前账号"；只在变化时推送 */
+let lastNotifiedKiroCliAccountId: string | null | undefined
+function notifyKiroCliAccountIfChanged(): void {
+  const accountId = currentKiroCliAccountId()
+  if (accountId === lastNotifiedKiroCliAccountId) return
+  lastNotifiedKiroCliAccountId = accountId
+  sendRendererEvent('kiro-cli-account-changed', { accountId })
 }
 
 async function syncKiroCliAfterAccountDbChange(): Promise<void> {

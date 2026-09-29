@@ -107,6 +107,7 @@ impl AdminService {
                 api_region: entry.api_region,
                 in_pool: entry.in_pool,
                 credential_version: entry.credential_version,
+                external_refresh: entry.external_refresh,
             })
             .collect();
 

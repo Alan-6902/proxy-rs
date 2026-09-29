@@ -223,7 +223,8 @@ export const AccountCard = memo(function AccountCard({
     switchToCli,
     cliSwitchState,
     canSwitchCli,
-    cliSwitchTitle
+    cliSwitchTitle,
+    isCliCurrent
   } = useAccountActions(account, isEn)
 
   // 格式化使用量数值
@@ -692,7 +693,7 @@ export const AccountCard = memo(function AccountCard({
             className={cn(
               'ml-auto h-5 px-1.5 rounded-md border text-2xs flex items-center gap-1 transition-colors',
               'disabled:opacity-40 disabled:cursor-not-allowed',
-              cliSwitchState === 'done'
+              cliSwitchState === 'done' || isCliCurrent
                 ? 'border-success/40 text-success bg-success/10'
                 : 'border-muted-foreground/30 text-muted-foreground hover:text-primary hover:border-primary/50'
             )}
@@ -710,7 +711,7 @@ export const AccountCard = memo(function AccountCard({
             ) : (
               <Terminal className="h-3 w-3" />
             )}
-            CLI
+            {isCliCurrent ? (isEn ? 'CLI in use' : 'CLI 当前') : 'CLI'}
           </button>
           {account.isActive && (
             <Badge

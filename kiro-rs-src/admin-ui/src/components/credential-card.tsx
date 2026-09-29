@@ -237,6 +237,11 @@ export function CredentialCard({
                 </span>
                 {credential.isCurrent && <Badge variant="success" className="rounded-full">当前路由</Badge>}
                 {credential.disabled && <Badge variant="destructive" className="rounded-full">已禁用</Badge>}
+                {credential.externalRefresh && (
+                  <Badge variant="outline" className="rounded-full border-sky-500/40 text-sky-600 dark:text-sky-400" title="kiro-cli 当前登录的账号：token 由 kiro-cli 自己刷新，kiro-rs 不刷新它；过期后暂停使用，等 kiro-cli 刷新后自动恢复">
+                    Kiro CLI
+                  </Badge>
+                )}
                 {storeEnabled && !inPool && (
                   <Badge variant="outline" className="rounded-full" title="该账号在共享账号库中，但不参与反代请求">未入池</Badge>
                 )}

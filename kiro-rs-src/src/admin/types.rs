@@ -79,6 +79,8 @@ pub struct CredentialStatusItem {
     pub in_pool: bool,
     /// 账号库凭据版本，调用 ensure-fresh 时回传
     pub credential_version: i64,
+    /// 由 kiro-cli 刷新（kiro-cli 当前登录的账号，kiro-rs 不刷新它）
+    pub external_refresh: bool,
 }
 
 // ============ 操作请求 ============

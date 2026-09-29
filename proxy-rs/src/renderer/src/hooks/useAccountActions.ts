@@ -3,6 +3,7 @@
  * 卡片视图与列表视图共用，避免两处各写一遍按钮状态与错误处理。
  */
 
+import { useKiroCliAccountId } from './useKiroCliAccount'
 import { useCallback, useMemo, useState } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { askConfirm } from '@/components/ui/confirmDialogStore'
@@ -45,6 +46,8 @@ interface UseAccountActions {
   /** 只有带 Refresh Token 的 OAuth 账号能切 CLI */
   canSwitchCli: boolean
   cliSwitchTitle: string
+  /** Kiro CLI 当前登录的就是这个账号（它的 token 由 kiro-cli 自己刷新） */
+  isCliCurrent: boolean
 }
 
 export type CliSwitchState = 'idle' | 'switching' | 'done'
@@ -197,6 +200,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   const switchAccountToCli = useAccountsStore((state) => state.switchAccountToCli)
   const adminManagedIds = useAccountsStore((state) => state.adminManagedIds)
   const [cliSwitchState, setCliSwitchState] = useState<CliSwitchState>('idle')
+  const isCliCurrent = useKiroCliAccountId() === account.id
   const isAdminManaged = adminManagedIds.has(account.id)
   /*
    * 托管账号的凭据由反代维护，本地那份已被轮换作废，切到 CLI 只会得到一份死 token。
@@ -241,9 +245,13 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
       ? isEn
         ? 'Kiro CLI switched to this account'
         : 'Kiro CLI 已切换到该账号'
-      : isEn
-        ? 'Switch Kiro CLI to this account (refreshes the token first)'
-        : '切换 Kiro CLI 到该账号（会先刷新一次 Token）'
+      : isCliCurrent
+        ? isEn
+          ? 'Kiro CLI is logged in with this account; its token is refreshed by kiro-cli, not kiro-rs'
+          : 'Kiro CLI 当前登录的就是这个账号：token 由 kiro-cli 自己刷新，kiro-rs 不刷新它'
+        : isEn
+          ? 'Switch Kiro CLI to this account (refreshes the token first)'
+          : '切换 Kiro CLI 到该账号（会先刷新一次 Token）'
 
   return {
     runLiveness,
@@ -261,6 +269,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
     switchToCli,
     cliSwitchState,
     canSwitchCli,
-    cliSwitchTitle
+    cliSwitchTitle,
+    isCliCurrent
   }
 }

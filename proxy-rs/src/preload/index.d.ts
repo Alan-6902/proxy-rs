@@ -483,6 +483,10 @@ interface KiroApi {
   // 获取应用运行日志数量（传 category 时只数该分类）
   appLogsCount: (category?: string) => Promise<number>
 
+  // Kiro CLI 当前登录的账号（账号库模式）
+  kiroCliCurrentAccount: () => Promise<{ accountId: string | null }>
+  onKiroCliAccountChanged: (callback: (data: { accountId: string | null }) => void) => () => void
+
   // 内嵌 kiro-rs Admin 页面
   kiroAdminView: () => Promise<{
     enabled: boolean

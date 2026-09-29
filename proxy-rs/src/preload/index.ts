@@ -537,6 +537,21 @@ const api = {
     return ipcRenderer.invoke('app-logs-count', category)
   },
 
+  // Kiro CLI 当前登录的账号（账号库模式；该账号由 kiro-cli 自己刷新，kiro-rs 不刷新它）
+  kiroCliCurrentAccount: (): Promise<{ accountId: string | null }> =>
+    ipcRenderer.invoke('kiro-cli-current-account'),
+
+  onKiroCliAccountChanged: (
+    callback: (data: { accountId: string | null }) => void
+  ): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { accountId: string | null }): void =>
+      callback(data)
+    ipcRenderer.on('kiro-cli-account-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('kiro-cli-account-changed', handler)
+    }
+  },
+
   // 内嵌 kiro-rs Admin 页面的地址与 kiro-rs 状态（Admin Key 由主进程注入，不经渲染进程）
   kiroAdminView: (): Promise<{
     enabled: boolean

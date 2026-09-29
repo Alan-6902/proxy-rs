@@ -322,6 +322,13 @@ impl AdminService {
         &self,
         req: AdoptCredentialRequest,
     ) -> Result<AdoptCredentialResponse, AdminServiceError> {
+        // 外部凭据自带区域，不能落到配置的默认区域（例如配置是 eu-central-1、
+        // CLI 的社交登录在 us-east-1，查身份会被上游回 400）
+        let api_region = req
+            .profile_arn
+            .as_deref()
+            .and_then(region_from_profile_arn)
+            .or(req.region.clone());
         let cred = KiroCredentials {
             access_token: Some(req.access_token),
             refresh_token: Some(req.refresh_token),
@@ -330,6 +337,8 @@ impl AdminService {
             client_id: req.client_id,
             client_secret: req.client_secret,
             profile_arn: req.profile_arn,
+            auth_region: req.region.clone(),
+            api_region,
             region: req.region,
             ..Default::default()
         };
@@ -642,6 +651,22 @@ impl AdminService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adopt_region_is_taken_from_profile_arn() {
+        assert_eq!(
+            super::region_from_profile_arn(
+                "arn:aws:codewhisperer:us-east-1:699475941385:profile/X"
+            )
+            .as_deref(),
+            Some("us-east-1")
+        );
+        assert_eq!(super::region_from_profile_arn("not-an-arn"), None);
+        assert_eq!(
+            super::region_from_profile_arn("arn:aws:codewhisperer::1:profile/X"),
+            None
+        );
+    }
+
     use super::*;
     use crate::model::config::Config;
 
@@ -742,6 +767,12 @@ mod tests {
         assert!(info.enabled);
         assert!(info.database_id.is_some_and(|id| !id.is_empty()));
     }
+}
+
+/// `arn:aws:codewhisperer:us-east-1:123:profile/X` → `us-east-1`
+fn region_from_profile_arn(arn: &str) -> Option<String> {
+    let region = arn.split(':').nth(3)?;
+    (!region.is_empty()).then(|| region.to_string())
 }
 
 fn adopt_response(

@@ -53,7 +53,6 @@
   - [2. 最小配置](#2-最小配置)
   - [3. 启动](#3-启动)
   - [4. 验证](#4-验证)
-  - [Docker](#docker)
 - [配置详解](#配置详解)
   - [config.json](#configjson)
   - [credentials.json](#credentialsjson)
@@ -154,16 +153,6 @@ curl http://127.0.0.1:8990/v1/messages \
     ]
   }'
 ```
-
-### Docker
-
-也可以通过 Docker 启动：
-
-```bash
-docker-compose up
-```
-
-需要将 `config.json` 和 `credentials.json` 挂载到容器中，具体参见 `docker-compose.yml`。
 
 ## 配置详解
 
@@ -524,8 +513,6 @@ kiro-rs/
 ├── tools/                      # 辅助工具
 ├── Cargo.toml                  # 项目配置
 ├── config.example.json         # 配置示例
-├── docker-compose.yml          # Docker Compose 配置
-└── Dockerfile                  # Docker 构建文件
 ```
 
 ## 技术栈

@@ -176,6 +176,8 @@ export async function syncAccountDbPending(): Promise<void> {
   const result = await runtime.bridge.syncPending(target)
   if (result.imported.length > 0) {
     console.log(`[AccountDb] 已导入 ${result.imported.length} 个新账号到 kiro-rs`)
+    // 立即刷新托管索引：不等变更轮询，避免刚导入的账号在这 1–2 秒里被当成"未托管"
+    await reloadAdminManagedIds()
   }
   for (const failure of result.failed) {
     console.warn(`[AccountDb] 账号 ${failure.id} 暂未导入 kiro-rs：${failure.reason}`)

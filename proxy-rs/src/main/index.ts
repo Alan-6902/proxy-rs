@@ -1252,6 +1252,7 @@ import {
   startManagedKiroRs,
   stopAccountDbWatcher,
   stopManagedKiroRs,
+  syncAccountDbPending,
   type AccountDbConfig
 } from './accountDb/runtime'
 import { rollbackAccountDb, runMigration } from './accountDb/migrate'
@@ -1464,6 +1465,23 @@ async function syncKiroCliAfterRefresh(
   }
 }
 
+/**
+ * 账号库模式下尚未入库（仍在 electron-store 待导入）的账号。
+ *
+ * 渲染层拿到的账号列表是脱敏的，这类账号的本地凭据路径一律走不通；更重要的是，
+ * 这时候在本地刷新会和随后的导入抢同一个 refresh token（导入带着旧值、本地轮换出新值，
+ * 新值写回时账号已入库、只剩 UI 字段可写，于是丢失）。所以一律先触发导入，
+ * 让调用方按"稍后重试"处理。
+ */
+const ACCOUNT_DB_PENDING_MESSAGE = '账号正在导入账号库，请稍后重试'
+
+async function isAccountDbPending(accountId: string | undefined): Promise<boolean> {
+  if (!isAccountDbMode() || !accountId) return false
+  if (accountDbRow(accountId)) return false
+  await syncAccountDbPending()
+  return accountDbRow(accountId) === null
+}
+
 /** proxy 自己调上游（模型、订阅、验活）需要的凭据与区域信息 */
 interface UpstreamCallContext {
   credential: Exclude<UpstreamKiroCredential, string>
@@ -1561,15 +1579,26 @@ async function refreshStoredKiroCredentials(params: {
     accountId: params.accountId,
     expectedCredentialVersion: Number(params.expectedCredentialRevision) || undefined
   })
-  if (fresh) {
-    return fresh.success
+  if (!fresh && (await isAccountDbPending(params.accountId))) {
+    return { success: false, error: ACCOUNT_DB_PENDING_MESSAGE }
+  }
+  const settled =
+    fresh ??
+    (isAccountDbMode()
+      ? await ensureFreshAccountDbCredential({
+          accountId: params.accountId,
+          expectedCredentialVersion: Number(params.expectedCredentialRevision) || undefined
+        })
+      : null)
+  if (settled) {
+    return settled.success
       ? {
-          ...fresh,
-          expiresIn: fresh.expiresAt
-            ? Math.max(0, Math.ceil((fresh.expiresAt - Date.now()) / 1000))
+          ...settled,
+          expiresIn: settled.expiresAt
+            ? Math.max(0, Math.ceil((settled.expiresAt - Date.now()) / 1000))
             : undefined
         }
-      : { success: false, error: fresh.error }
+      : { success: false, error: settled.error }
   }
 
   /*
@@ -3423,6 +3452,9 @@ app.whenReady().then(async () => {
            * 账号在这里会显示验活失败，而它其实可能是好的。要彻底解决得靠反代新增
            * 一个发消息探针端点。
            */
+          if (await isAccountDbPending(acc?.id)) {
+            return { success: false, error: ACCOUNT_DB_PENDING_MESSAGE, latencyMs: 0 }
+          }
           if (acc?.id && isAdminManagedAccount(acc.id)) {
             const managedEntry = adminManagedEntry(acc.id)
             if (!managedEntry) {
@@ -4218,6 +4250,9 @@ app.whenReady().then(async () => {
      *
      * 反代不可达时如实报错、不退回直连：退回必然伴随一次刷新，等于重新引入双边抢刷。
      */
+    if (await isAccountDbPending(account?.id)) {
+      return { success: false, error: { message: ACCOUNT_DB_PENDING_MESSAGE } }
+    }
     if (isAdminManagedAccount(account?.id)) {
       const entry = adminManagedEntry(account.id)
       if (!entry) {
@@ -4610,6 +4645,11 @@ app.whenReady().then(async () => {
             completed++
             if (ok) success++
             else failed++
+            return
+          }
+          // 账号库模式下的待导入账号：先导入，由 kiro-rs 刷新；不算失败、不弹"刷新失败"通知
+          if (await isAccountDbPending(account.id)) {
+            completed++
             return
           }
           const needsTokenRefresh = account.needsTokenRefresh !== false // 默认为 true（兼容旧版本）

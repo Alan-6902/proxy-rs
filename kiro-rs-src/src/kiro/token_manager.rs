@@ -107,6 +107,45 @@ impl fmt::Display for RefreshTokenInvalidError {
 
 impl std::error::Error for RefreshTokenInvalidError {}
 
+/// 该账号由外部（kiro-cli）刷新，kiro-rs 不刷新它；当前 token 已不可用，需等外部刷新后收编
+#[derive(Debug)]
+pub(crate) struct ExternalRefreshPendingError {
+    pub id: u64,
+}
+
+impl fmt::Display for ExternalRefreshPendingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "凭据 #{} 由 kiro-cli 刷新，当前 token 已过期，等待 kiro-cli 刷新后自动收编",
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for ExternalRefreshPendingError {}
+
+/// 外部刷新账号留的余量：token 剩余不足这么多秒就不再拿来发请求
+const EXTERNAL_TOKEN_MIN_REMAINING_SECS: i64 = 60;
+
+/// 不刷新、直接用现有 access token 是否可行（外部刷新账号用）
+fn token_usable_without_refresh(credentials: &KiroCredentials) -> bool {
+    if credentials
+        .access_token
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        return false;
+    }
+    credentials
+        .expires_at
+        .as_deref()
+        .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+        .is_none_or(|expires| {
+            expires > Utc::now() + Duration::seconds(EXTERNAL_TOKEN_MIN_REMAINING_SECS)
+        })
+}
+
 /// 刷新 Token
 pub(crate) async fn refresh_token(
     credentials: &KiroCredentials,
@@ -450,12 +489,16 @@ struct CredentialEntry {
     in_pool: bool,
     /// 账号库中的凭据版本，刷新结果按它做条件写（JSON 模式恒为 0）
     credential_version: i64,
+    /// 由外部（kiro-cli）刷新：kiro-rs 不刷新它，token 过期前照常调度，过期后暂停调度
+    external_refresh: bool,
 }
 
 impl CredentialEntry {
     /// 可参与反代调度：未禁用且在号池中
     fn schedulable(&self) -> bool {
-        !self.disabled && self.in_pool
+        !self.disabled
+            && self.in_pool
+            && (!self.external_refresh || token_usable_without_refresh(&self.credentials))
     }
 }
 
@@ -722,6 +765,7 @@ impl MultiTokenManager {
                     has_new_machine_ids = true;
                 }
                 CredentialEntry {
+                    external_refresh: false,
                     id,
                     identity_pending: false,
                     credentials: cred.clone(),
@@ -855,6 +899,7 @@ impl MultiTokenManager {
                 disabled_reason = Some(DisabledReason::InvalidConfig);
             }
             entries.push(CredentialEntry {
+                external_refresh: false,
                 id,
                 credentials: cred,
                 identity_pending: false,
@@ -958,6 +1003,10 @@ impl MultiTokenManager {
         id: u64,
         current: &KiroCredentials,
     ) -> anyhow::Result<KiroCredentials> {
+        // 外部刷新账号：kiro-rs 一律不刷新（所有刷新入口最终都经过这里）
+        if self.is_external_refresh(id) {
+            return Err(ExternalRefreshPendingError { id }.into());
+        }
         let base_version = match &self.store {
             Some(store) => Some(store.begin_refresh(id)?),
             None => None,
@@ -1284,6 +1333,12 @@ impl MultiTokenManager {
                     if let Some(hint) = session_hint {
                         self.forget_affinity(hint);
                     }
+                    // 外部刷新账号的 token 过期：不算失败（它已不再被调度），换下一个
+                    if e.downcast_ref::<ExternalRefreshPendingError>().is_some() {
+                        tracing::debug!("{}", e);
+                        attempt_count += 1;
+                        continue;
+                    }
                     // refreshToken 永久失效 → 立即禁用，不累计重试
                     let has_available = if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
                         tracing::warn!("凭据 #{} refreshToken 永久失效: {}", id, e);
@@ -1347,6 +1402,23 @@ impl MultiTokenManager {
             return Ok(CallContext {
                 id,
                 credentials: credentials.clone(),
+                token,
+            });
+        }
+
+        // 外部刷新账号：不刷新，用库里（kiro-cli 刷新后收编进来的）现有 token
+        if self.is_external_refresh(id) {
+            let current = self.entry_credentials(id)?;
+            if !token_usable_without_refresh(&current) {
+                return Err(ExternalRefreshPendingError { id }.into());
+            }
+            let token = current
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("没有可用的 accessToken"))?;
+            return Ok(CallContext {
+                id,
+                credentials: current,
                 token,
             });
         }
@@ -2111,6 +2183,15 @@ impl MultiTokenManager {
                 .kiro_api_key
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
+        } else if self.is_external_refresh(id) {
+            // 外部刷新账号：不刷新，用现有 token 查
+            if !token_usable_without_refresh(&credentials) {
+                return Err(ExternalRefreshPendingError { id }.into());
+            }
+            credentials
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
         } else {
             // 检查是否需要刷新 token
             let needs_refresh =
@@ -2364,6 +2445,7 @@ impl MultiTokenManager {
         {
             let mut entries = self.entries.lock();
             entries.push(CredentialEntry {
+                external_refresh: false,
                 id: new_id,
                 credentials: validated_cred,
                 identity_pending: true,
@@ -2533,6 +2615,7 @@ impl MultiTokenManager {
 
     fn fresh_entry(id: u64, credentials: KiroCredentials, in_pool: bool) -> CredentialEntry {
         CredentialEntry {
+            external_refresh: false,
             id,
             credentials,
             identity_pending: false,
@@ -2601,6 +2684,14 @@ impl MultiTokenManager {
         if expected_version.is_some_and(|v| v != version) {
             return Ok(version);
         }
+        // 外部刷新账号：不刷新；token 还能用就直接给，否则等 kiro-cli 刷新
+        if self.is_external_refresh(id) {
+            return if token_usable_without_refresh(&credentials) {
+                Ok(version)
+            } else {
+                Err(ExternalRefreshPendingError { id }.into())
+            };
+        }
         let needs = force
             || credentials.access_token.is_none()
             || is_token_expired(&credentials)
@@ -2666,6 +2757,62 @@ impl MultiTokenManager {
             }
         }
         Ok(version)
+    }
+
+    /// 指定由外部（kiro-cli）刷新的账号，传 None 取消。同一时间只有一个（CLI 只登录一个账号）。
+    ///
+    /// 该账号 kiro-rs 不再刷新：请求与额度查询只用现有 token，过期前照常调度、过期后暂停调度，
+    /// 等 kiro-cli 刷新后由 proxy-rs 收编（`adopt_external_credential`）。返回生效的凭据 ID。
+    pub fn set_external_refresh_account(
+        &self,
+        account_uuid: Option<&str>,
+    ) -> anyhow::Result<Option<u64>> {
+        let target = match account_uuid.filter(|v| !v.is_empty()) {
+            None => None,
+            Some(uuid) => match self.require_store()?.find_by_uuid(uuid)? {
+                Some((id, false)) => Some(id),
+                Some((_, true)) => anyhow::bail!("账号 {uuid} 已被删除"),
+                None => anyhow::bail!("账号 {uuid} 不在账号库中"),
+            },
+        };
+        let mut changed = false;
+        for entry in self.entries.lock().iter_mut() {
+            let external = Some(entry.id) == target;
+            changed |= entry.external_refresh != external;
+            entry.external_refresh = external;
+        }
+        if changed {
+            match target {
+                Some(id) => tracing::info!("凭据 #{} 改由 kiro-cli 刷新，kiro-rs 不再刷新它", id),
+                None => tracing::info!("已取消外部刷新账号，全部账号由 kiro-rs 刷新"),
+            }
+        }
+        Ok(target)
+    }
+
+    /// 当前由外部刷新的账号
+    pub fn external_refresh_account(&self) -> Option<u64> {
+        self.entries
+            .lock()
+            .iter()
+            .find(|e| e.external_refresh)
+            .map(|e| e.id)
+    }
+
+    fn is_external_refresh(&self, id: u64) -> bool {
+        self.entries
+            .lock()
+            .iter()
+            .any(|e| e.id == id && e.external_refresh)
+    }
+
+    fn entry_credentials(&self, id: u64) -> anyhow::Result<KiroCredentials> {
+        self.entries
+            .lock()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.credentials.clone())
+            .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))
     }
 
     /// 收编外部（kiro-cli）自行刷新得到的凭据：库里那份作废了，直接换成外部这份用，
@@ -2905,6 +3052,7 @@ impl MultiTokenManager {
             entries
                 .iter()
                 .filter(|e| !e.disabled && !e.credentials.is_api_key_credential())
+                .filter(|e| !e.external_refresh)
                 .filter(|e| {
                     e.credentials.access_token.is_none()
                         || is_token_expired(&e.credentials)
@@ -4291,6 +4439,83 @@ mod tests {
         assert!(m.snapshot().entries[0].in_pool);
         m.purge_credential(id).unwrap();
         assert!(m.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_external_refresh_account_is_never_refreshed_by_kiro_rs() {
+        let (m, store, _) = db_manager();
+        let meta = |uuid: &str, identity: &str| NewAccountMeta {
+            account_uuid: Some(uuid.into()),
+            upstream_identity: Some(identity.into()),
+            in_pool: true,
+            ..Default::default()
+        };
+        let cli = m
+            .import_credential(live_oauth("rt-cli"), meta("p-cli", "user-cli"))
+            .unwrap();
+        let other = m
+            .import_credential(live_oauth("rt-other"), meta("p-other", "user-other"))
+            .unwrap();
+        assert_eq!(
+            m.set_external_refresh_account(Some("p-cli")).unwrap(),
+            Some(cli.id)
+        );
+        assert_eq!(m.external_refresh_account(), Some(cli.id));
+        let version = m.snapshot().entries[0].credential_version;
+
+        // token 还能用：强制确保新鲜也不刷新，直接给现有版本
+        assert_eq!(m.ensure_fresh(cli.id, None, true).await.unwrap(), version);
+        // 显式强刷 / 401 强刷：一律拒绝，不碰上游
+        let err = m
+            .refresh_token_if_current(cli.id, Some("at-rt-cli"))
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<ExternalRefreshPendingError>().is_some());
+
+        // token 过期：不再调度它，请求落到另一个账号；不计失败、不禁用
+        let expired = KiroCredentials {
+            expires_at: Some((Utc::now() - Duration::minutes(1)).to_rfc3339()),
+            ..live_oauth("rt-cli")
+        };
+        store.replace_credentials(cli.id, &expired).unwrap();
+        m.entries
+            .lock()
+            .iter_mut()
+            .find(|e| e.id == cli.id)
+            .unwrap()
+            .credentials
+            .expires_at = expired.expires_at.clone();
+        for _ in 0..3 {
+            assert_eq!(m.acquire_context(None).await.unwrap().id, other.id);
+        }
+        let err = m.ensure_fresh(cli.id, None, false).await.unwrap_err();
+        assert!(err.downcast_ref::<ExternalRefreshPendingError>().is_some());
+        let entry = m
+            .entries
+            .lock()
+            .iter()
+            .find(|e| e.id == cli.id)
+            .map(|e| (e.disabled, e.refresh_failure_count));
+        assert_eq!(entry, Some((false, 0)));
+
+        // kiro-cli 刷新后收编：恢复调度
+        let refreshed = live_oauth("rt-cli-2");
+        assert!(matches!(
+            m.adopt_with_identity(&refreshed, "user-cli").unwrap(),
+            AdoptOutcome::Adopted { .. }
+        ));
+        assert!(
+            m.entries
+                .lock()
+                .iter()
+                .find(|e| e.id == cli.id)
+                .is_some_and(|e| e.external_refresh && e.schedulable())
+        );
+
+        // 取消后恢复由 kiro-rs 刷新
+        assert_eq!(m.set_external_refresh_account(None).unwrap(), None);
+        assert_eq!(m.external_refresh_account(), None);
+        assert!(m.set_external_refresh_account(Some("no-such")).is_err());
     }
 
     #[tokio::test]

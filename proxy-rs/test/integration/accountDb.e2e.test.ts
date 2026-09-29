@@ -13,7 +13,7 @@ import { AccountDb } from '../../src/main/accountDb/db'
 import { AccountDataBridge, type RawStore } from '../../src/main/accountDb/bridge'
 import { KiroRsProcess } from '../../src/main/accountDb/kiroRsProcess'
 import { runMigration } from '../../src/main/accountDb/migrate'
-import { adminRequest } from '../../src/main/accountDb/adminApi'
+import { adminRequest, setExternalRefreshAccount } from '../../src/main/accountDb/adminApi'
 import type { AccountDbConfig } from '../../src/main/accountDb/runtime'
 
 const BIN = resolve(import.meta.dirname, '../../../kiro-rs-src/target/release/kiro-rs')
@@ -187,6 +187,16 @@ describe.skipIf(!existsSync(BIN))('账号库端到端（真实 kiro-rs）', () =
         { method: 'POST', body: {} }
       )
       expect(fresh.credentialVersion).toBe(0)
+
+      // 6b. CLI 当前账号改由 kiro-cli 刷新：设置后 store/info 可见，未知账号被拒，可取消
+      expect((await setExternalRefreshAccount(target, 'proxy-local')).credentialId).toBe(local.id)
+      const info = await adminRequest<{ externalRefreshCredentialId: number | null }>(
+        target,
+        '/store/info'
+      )
+      expect(info.externalRefreshCredentialId).toBe(local.id)
+      await expect(setExternalRefreshAccount(target, 'no-such')).rejects.toThrow()
+      expect((await setExternalRefreshAccount(target, null)).credentialId).toBeNull()
 
       // 7. 号池开关：移出后 Admin 默认列表看不到，加回来又出现
       await adminRequest(target, `/credentials/${local.id}/pool`, {

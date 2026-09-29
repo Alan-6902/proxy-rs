@@ -146,3 +146,20 @@ export function adoptCredential(
 ): Promise<AdoptCredentialResult> {
   return adminRequest(target, '/accounts/adopt', { method: 'POST', body }, fetchImpl)
 }
+
+/**
+ * 指定由 kiro-cli 刷新的账号（proxy 侧账号 ID，null 取消）。
+ * kiro-rs 不再刷新它，只用收编进来的 token；返回生效的凭据 ID。
+ */
+export function setExternalRefreshAccount(
+  target: KiroRsAdminTarget,
+  accountUuid: string | null,
+  fetchImpl?: AdminFetch
+): Promise<{ credentialId: number | null }> {
+  return adminRequest(
+    target,
+    '/accounts/external-refresh',
+    { method: 'PUT', body: { accountUuid } },
+    fetchImpl
+  )
+}

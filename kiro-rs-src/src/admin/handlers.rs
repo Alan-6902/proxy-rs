@@ -11,8 +11,8 @@ use super::{
     types::{
         AddCredentialRequest, AdoptCredentialRequest, BalanceQuery, DeleteCredentialQuery,
         EnsureFreshRequest, ImportAccountRequest, ListCredentialsQuery, SetDisabledRequest,
-        SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest,
-        SuccessResponse,
+        SetExternalRefreshRequest, SetInPoolRequest, SetLoadBalancingModeRequest,
+        SetPriorityRequest, SetProxyRequest, SuccessResponse,
     },
 };
 
@@ -214,6 +214,18 @@ pub async fn adopt_account_credential(
     Json(payload): Json<AdoptCredentialRequest>,
 ) -> impl IntoResponse {
     match state.service.adopt_credential(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/accounts/external-refresh
+/// 指定由 kiro-cli 刷新的账号：kiro-rs 不再刷新它，只用收编进来的 token
+pub async fn set_external_refresh_account(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetExternalRefreshRequest>,
+) -> impl IntoResponse {
+    match state.service.set_external_refresh(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

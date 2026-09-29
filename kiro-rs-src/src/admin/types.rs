@@ -381,6 +381,20 @@ pub struct AdoptCredentialRequest {
     pub region: Option<String>,
 }
 
+/// PUT /accounts/external-refresh：指定由 kiro-cli 刷新的账号（null 取消）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExternalRefreshRequest {
+    pub account_uuid: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExternalRefreshResponse {
+    /// 生效的凭据 ID；未指定时为 null
+    pub credential_id: Option<u64>,
+}
+
 /// POST /accounts/adopt 的结果
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -425,4 +439,6 @@ pub struct StoreInfoResponse {
     pub enabled: bool,
     pub database_id: Option<String>,
     pub path: Option<String>,
+    /// 由 kiro-cli 刷新的账号（kiro-rs 不刷新它）
+    pub external_refresh_credential_id: Option<u64>,
 }

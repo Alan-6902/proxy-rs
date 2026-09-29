@@ -16,7 +16,8 @@ use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdoptCredentialRequest, AdoptCredentialResponse,
     BalanceResponse, CredentialStatusItem, CredentialsStatusResponse, EnsureFreshRequest,
     EnsureFreshResponse, ImportAccountRequest, ImportAccountResponse, LoadBalancingModeResponse,
-    SetLoadBalancingModeRequest, SetProxyRequest, StoreInfoResponse,
+    SetExternalRefreshRequest, SetExternalRefreshResponse, SetLoadBalancingModeRequest,
+    SetProxyRequest, StoreInfoResponse,
 };
 use crate::kiro::account_store::NewAccountMeta;
 
@@ -317,6 +318,18 @@ impl AdminService {
             .map_err(|e| self.classify_error(e, id))
     }
 
+    /// 指定由 kiro-cli 刷新的账号
+    pub fn set_external_refresh(
+        &self,
+        req: SetExternalRefreshRequest,
+    ) -> Result<SetExternalRefreshResponse, AdminServiceError> {
+        let credential_id = self
+            .token_manager
+            .set_external_refresh_account(req.account_uuid.as_deref())
+            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        Ok(SetExternalRefreshResponse { credential_id })
+    }
+
     /// 收编外部（kiro-cli）自行刷新得到的凭据
     pub async fn adopt_credential(
         &self,
@@ -431,11 +444,13 @@ impl AdminService {
                 enabled: true,
                 database_id: store.database_id().ok(),
                 path: Some(store.path().display().to_string()),
+                external_refresh_credential_id: self.token_manager.external_refresh_account(),
             },
             None => StoreInfoResponse {
                 enabled: false,
                 database_id: None,
                 path: None,
+                external_refresh_credential_id: None,
             },
         }
     }

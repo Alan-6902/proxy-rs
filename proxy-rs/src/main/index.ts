@@ -11,7 +11,6 @@ import {
   createKiroCliSocialRenewal,
   kiroCliDbExists,
   KIRO_CLI_RENEWAL_INTERVAL_MS,
-  KIRO_CLI_RENEWAL_LEAD_MS,
   resolveKiroCliDbPath,
   resolveKiroCliSocialProvider,
   switchKiroCliAccount,
@@ -1271,7 +1270,11 @@ import {
   syncKiroCliFromAccountDb,
   writeKiroCliSyncState
 } from './accountDb/kiroCliSync'
-import { adoptCredential, setInPool as setAccountInPool } from './accountDb/adminApi'
+import {
+  adoptCredential,
+  setExternalRefreshAccount,
+  setInPool as setAccountInPool
+} from './accountDb/adminApi'
 import { loadAdminManagedEntries } from './adminManaged/registryStore'
 const accountStoreCoordinator = new AccountStoreCoordinator()
 type CanonicalKiroCredentialRefreshResult = OidcRefreshResult & {
@@ -6987,15 +6990,18 @@ const kiroCliNotInDb = new Map<string, number>()
 let kiroCliReconcileChain: Promise<void> = Promise.resolve()
 
 /**
- * CLI 与账号库对账，串行执行（账号库变化、定时兜底、kiro-rs 就绪三处都会触发）：
- * 1. CLI 自己刷新过 → 交给 kiro-rs 收编 CLI 的新凭据，不再重复刷新
- * 2. 库里更新 → 把新凭据写给 CLI
+ * CLI 与账号库对账，串行执行（账号库变化、每分钟定时、kiro-rs 就绪三处都会触发）。
+ *
+ * 分工：CLI 当前登录的账号只由 kiro-cli 自己刷新，其余账号由 kiro-rs 刷新。
+ * 1. CLI 自己刷新过 → 交给 kiro-rs 收编 CLI 的新凭据
+ * 2. 把 CLI 当前账号告诉 kiro-rs，它不再刷新该账号（只用收编进来的 token）
+ * 3. 库里更新（例如重新登录替换了凭据）→ 把新凭据写给 CLI
  */
-function reconcileKiroCliWithAccountDb(options: { renew?: boolean } = {}): Promise<void> {
+function reconcileKiroCliWithAccountDb(): Promise<void> {
   kiroCliReconcileChain = kiroCliReconcileChain
     .then(async () => {
       await adoptKiroCliAfterSelfRefresh()
-      if (options.renew) await renewKiroCliAccountIfExpiring()
+      await pushKiroCliAccountToKiroRs()
       await syncKiroCliAfterAccountDbChange()
     })
     .catch((error) => {
@@ -7025,6 +7031,16 @@ async function adoptKiroCliAfterSelfRefresh(): Promise<void> {
   }
 }
 
+/** 把 CLI 当前账号（没有则 null）告诉 kiro-rs。每轮都推：kiro-rs 重启后内存里的标记会丢 */
+async function pushKiroCliAccountToKiroRs(): Promise<void> {
+  if (!store) return
+  const target = accountDbAdminTarget()
+  if (!target) return
+  const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
+  const accountUuid = state && accountDbRow(state.accountId) ? state.accountId : null
+  await setExternalRefreshAccount(target, accountUuid)
+}
+
 async function syncKiroCliAfterAccountDbChange(): Promise<void> {
   if (!store) return
   const syncStore = store as unknown as Parameters<typeof syncKiroCliFromAccountDb>[0]['store']
@@ -7052,32 +7068,6 @@ async function syncKiroCliAfterAccountDbChange(): Promise<void> {
   }
 }
 
-/**
- * 账号库模式下 CLI 当前账号的续期兜底。
- *
- * kiro-rs 后台每分钟会刷新临期凭据，正常情况下 CLI 只需等同步。这里多一道：CLI 手里的
- * token 临期时主动请 kiro-rs 确保新鲜，避免"proxy 在跑但恰好错过 kiro-rs 那一轮"。
- * 与社交专用的 kiroCliSocialRenewal 不同，它覆盖社交与 IdC 两种账号。
- */
-async function renewKiroCliAccountIfExpiring(): Promise<void> {
-  if (!store) return
-  const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
-  if (!state) return
-  const row = accountDbRow(state.accountId)
-  if (!row) return
-  const expiringSoon =
-    row.expiresAtMs === null || row.expiresAtMs - Date.now() <= KIRO_CLI_RENEWAL_LEAD_MS
-  if (expiringSoon) {
-    const fresh = await ensureFreshAccountDbCredential({
-      accountId: state.accountId,
-      expectedCredentialVersion: row.credentialVersion
-    })
-    if (fresh && !fresh.success) {
-      console.warn(`[KiroCLI] 续期 CLI 当前账号失败：${fresh.error}`)
-    }
-  }
-}
-
 /** 内嵌 Admin 页面的地址与 Key；kiro-rs 未就绪时为 null */
 function resolveKiroAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
   const target = accountDbAdminTarget()
@@ -7092,9 +7082,9 @@ async function startAccountDbServices(): Promise<void> {
     void reconcileKiroCliWithAccountDb()
   })
   startAccountDbBackups()
-  // CLI 当前账号的续期兜底；与 kiro-rs 后台那轮互不冲突（ensure-fresh 幂等）
+  // 每分钟与 CLI 对账：收编 CLI 自刷的凭据、告诉 kiro-rs 哪个账号归 CLI 刷新
   accountDbCliTimer = setInterval(() => {
-    void reconcileKiroCliWithAccountDb({ renew: true })
+    void reconcileKiroCliWithAccountDb()
   }, KIRO_CLI_RENEWAL_INTERVAL_MS)
   const config = loadAccountDbConfig(app.getPath('userData'))
   if (!config) return

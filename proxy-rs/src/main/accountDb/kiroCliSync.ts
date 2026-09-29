@@ -1,21 +1,18 @@
 /**
- * 账号库模式下把 kiro-rs 的续期结果同步给 kiro-cli。
+ * 账号库模式下 kiro-cli 与账号库的对账。
  *
- * 为什么需要：kiro-cli 自己也会在 token 临期时刷新，而 refresh token 是一次性的——
- * 它刷一次，账号库里那份就作废，于是变成两个刷新方互相抢（正是这次改造要消除的）。
+ * 分工：CLI 当前登录的账号只由 kiro-cli 自己刷新，其余账号由 kiro-rs 刷新。
+ * refresh token 是一次性的，两边都刷同一个账号迟早会撞车（CLI 大约在过期前 9～10 分钟
+ * 刷新，kiro-rs 的阈值是 10 分钟），所以一个账号只能有一个刷新方。
  *
- * 做法：让 kiro-rs 始终提前续期（后台每分钟检查、临期 10 分钟就刷），CLI 看到的 token
- * 一直很新鲜，它自己的刷新逻辑不会触发；管理器监听账号库的凭据版本变化，把新 token
- * 写进 CLI。这与 Kiro IDE 那边"主动续期避免对方刷新循环启动"的思路一致。
- *
- * 安全前提：只覆盖"管理器上次写进 CLI 的那一份"。每次同步前读 CLI 当前 refresh token，
- * 与记录的哈希比对；不一致说明用户在 CLI 里自己登录过别的账号，此时放弃同步并清掉映射，
- * 绝不覆盖用户的手动登录。哈希用 sha256，不落明文。
- *
- * 反向（adoptKiroCliIntoAccountDb）：CLI 自己刷新过（例如 App 没开时一直在用 CLI），
- * 库里那份 refresh token 已作废。这时不再让 kiro-rs 刷新，而是把 CLI 的新凭据交给
- * kiro-rs 收编：kiro-rs 用它查上游身份（userId），命中库中账号、且比库里新才替换。
- * CLI 里是库中账号的独立登录（用户直接 kiro-cli login）时同样收编，两边从此共用一条 token 链。
+ * - 反向（adoptKiroCliIntoAccountDb）：CLI 刷新后，把它的新凭据交给 kiro-rs 收编。
+ *   kiro-rs 用它查上游身份（userId），命中库中账号、且比库里新才替换，别的账号的 token
+ *   写不进来。用户直接 kiro-cli login 的账号如果也在库里，同样会被认出来。
+ * - 告知：对账时把 CLI 当前账号告诉 kiro-rs（PUT /accounts/external-refresh），
+ *   它不再刷新该账号，token 过期前照常用、过期后暂停调度，等 CLI 刷新后恢复。
+ * - 正向（syncKiroCliFromAccountDb）：库里的凭据被替换（例如重新登录）时写给 CLI。
+ *   只覆盖"管理器上次写进 CLI 的那一份"：先核对 CLI 当前 refresh token 的哈希，
+ *   不一致说明 CLI 里换了账号，放弃同步。哈希用 sha256，不落明文。
  */
 
 import { createHash } from 'node:crypto'

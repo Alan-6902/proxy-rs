@@ -27,12 +27,7 @@ export type AccountLike = Record<string, unknown> & {
 /** 存进 account_ui.metadata_json 的展示字段（凭据、额度、状态不在其中） */
 const METADATA_KEYS = ['password', 'idp', 'visitorId', 'createdAt', 'isActive', 'userId'] as const
 /** 存进 account_credentials.extra_json 的非秘密凭据配置 */
-const EXTRA_CREDENTIAL_KEYS = [
-  'csrfToken',
-  'preferredEndpoint',
-  'endpointFallbackOrder',
-  'endpointFallbackAfterFailures'
-] as const
+const EXTRA_CREDENTIAL_KEYS = ['csrfToken'] as const
 
 /** 账号卡片上附带的账号库信息（渲染层可选读取） */
 export interface AccountDbInfo {

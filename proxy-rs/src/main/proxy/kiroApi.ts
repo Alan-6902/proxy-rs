@@ -177,9 +177,7 @@ const KIRO_ENDPOINT_NAME_BY_PREFERENCE: Record<KiroEndpointPreference, KiroEndpo
   amazonq: 'AmazonQ',
   'amazonq-cli': 'AmazonQCLI'
 }
-const DEFAULT_ENDPOINT_FALLBACK_AFTER_FAILURES = 2
-const MIN_ENDPOINT_FALLBACK_AFTER_FAILURES = 1
-const MAX_ENDPOINT_FALLBACK_AFTER_FAILURES = 10
+const ENDPOINT_FALLBACK_AFTER_FAILURES = 2
 const ENDPOINT_CIRCUIT_COOLDOWN_MS = 60_000
 
 interface EndpointCircuitState {
@@ -193,13 +191,9 @@ function endpointCircuitKey(account: ProxyAccount, endpoint: KiroEndpoint): stri
   return `${account.id || 'anonymous'}:${endpoint.name}`
 }
 
-function endpointFailureThreshold(account: ProxyAccount): number {
-  const configured =
-    account.endpointFallbackAfterFailures ?? DEFAULT_ENDPOINT_FALLBACK_AFTER_FAILURES
-  return Math.min(
-    MAX_ENDPOINT_FALLBACK_AFTER_FAILURES,
-    Math.max(MIN_ENDPOINT_FALLBACK_AFTER_FAILURES, Math.floor(configured))
-  )
+/** 连续瞬时错误达到该次数后熔断端点（账号级可配置已移除，统一用默认值） */
+function endpointFailureThreshold(): number {
+  return ENDPOINT_FALLBACK_AFTER_FAILURES
 }
 
 function getCircuitEligibleEndpoints(
@@ -233,7 +227,7 @@ function recordEndpointFailure(account: ProxyAccount, endpoint: KiroEndpoint): v
   const key = endpointCircuitKey(account, endpoint)
   const previous = endpointCircuitStates.get(key)
   const consecutiveFailures = (previous?.consecutiveFailures ?? 0) + 1
-  const threshold = endpointFailureThreshold(account)
+  const threshold = endpointFailureThreshold()
   const openUntil = consecutiveFailures >= threshold ? Date.now() + ENDPOINT_CIRCUIT_COOLDOWN_MS : 0
   endpointCircuitStates.set(key, { consecutiveFailures, openUntil })
   if (openUntil > 0) {
@@ -1369,34 +1363,20 @@ function getAuthHeaders(
 }
 
 // 获取排序后的端点列表（根据首选端点配置）
-function getSortedEndpoints(
-  preferredEndpoint?: KiroEndpointPreference,
-  fallbackOrder?: KiroEndpointPreference[]
-): KiroEndpoint[] {
-  if (!preferredEndpoint && !fallbackOrder?.length)
-    return KIRO_ENDPOINTS.filter((ep) => ep.name !== 'AmazonQCLI')
+function getSortedEndpoints(preferredEndpoint?: KiroEndpointPreference): KiroEndpoint[] {
+  if (!preferredEndpoint) return KIRO_ENDPOINTS.filter((ep) => ep.name !== 'AmazonQCLI')
 
   // AmazonQ CLI 模式：只用这一个端点，失败不回退
-  if (preferredEndpoint === 'amazonq-cli' && !fallbackOrder?.length) {
+  if (preferredEndpoint === 'amazonq-cli') {
     return KIRO_ENDPOINTS.filter((ep) => ep.name === 'AmazonQCLI')
   }
 
-  const configuredOrder = [preferredEndpoint, ...(fallbackOrder ?? [])].filter(
-    (value): value is KiroEndpointPreference => Boolean(value)
-  )
-  const orderedNames = Array.from(
-    new Set(configuredOrder.map((value) => KIRO_ENDPOINT_NAME_BY_PREFERENCE[value]))
-  )
-  const explicitlyIncludesCli = orderedNames.includes('AmazonQCLI')
-  const ordered = orderedNames
-    .map((name) => KIRO_ENDPOINTS.find((endpoint) => endpoint.name === name))
-    .filter((endpoint): endpoint is KiroEndpoint => Boolean(endpoint))
+  const preferredName = KIRO_ENDPOINT_NAME_BY_PREFERENCE[preferredEndpoint]
+  const preferred = KIRO_ENDPOINTS.filter((endpoint) => endpoint.name === preferredName)
   const remaining = KIRO_ENDPOINTS.filter(
-    (endpoint) =>
-      !orderedNames.includes(endpoint.name) &&
-      (endpoint.name !== 'AmazonQCLI' || explicitlyIncludesCli)
+    (endpoint) => endpoint.name !== preferredName && endpoint.name !== 'AmazonQCLI'
   )
-  return [...ordered, ...remaining]
+  return [...preferred, ...remaining]
 }
 
 function getRegionalEndpointUrl(endpoint: KiroEndpoint, region?: string): string {
@@ -1562,11 +1542,7 @@ export async function callKiroApiStream(
 ): Promise<void> {
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
   // 所有账号类型均走正常端点优先级（含 fallback），不再强制 Enterprise 走 CodeWhisperer
-  const effectivePreferredEndpoint = account.preferredEndpoint ?? preferredEndpoint
-  const endpoints = getCircuitEligibleEndpoints(
-    account,
-    getSortedEndpoints(effectivePreferredEndpoint, account.endpointFallbackOrder)
-  )
+  const endpoints = getCircuitEligibleEndpoints(account, getSortedEndpoints(preferredEndpoint))
 
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底，流式端点自动不传占位符）
   if (!isKiroApiKeyAccount(account) && !account.profileArn && isEnterprise) {

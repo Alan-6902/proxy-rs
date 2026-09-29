@@ -24,10 +24,6 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
   const [clientSecret, setClientSecret] = useState('')
   const [region, setRegion] = useState('us-east-1')
   const [kiroApiKey, setKiroApiKey] = useState('')
-  const [preferredEndpoint, setPreferredEndpoint] = useState<
-    '' | 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-  >('')
-  const [endpointFallbackAfterFailures, setEndpointFallbackAfterFailures] = useState(2)
 
   // 可编辑字段
   const [nickname, setNickname] = useState('')
@@ -77,8 +73,6 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
       setClientSecret(account.credentials.clientSecret || '')
       setRegion(account.credentials.region || 'us-east-1')
       setKiroApiKey(account.credentials.kiroApiKey || '')
-      setPreferredEndpoint(account.credentials.preferredEndpoint || '')
-      setEndpointFallbackAfterFailures(account.credentials.endpointFallbackAfterFailures || 2)
       setNickname(account.nickname || '')
 
       // 设置当前账号信息
@@ -179,15 +173,6 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
     const isApiKey =
       account.credentials.credentialKind === 'kiro_api_key' ||
       Boolean(account.credentials.kiroApiKey)
-    const endpointFallbackOrder =
-      preferredEndpoint === 'codewhisperer'
-        ? (['amazonq'] as const)
-        : preferredEndpoint === 'amazonq'
-          ? (['codewhisperer'] as const)
-          : preferredEndpoint === 'amazonq-cli'
-            ? (['amazonq', 'codewhisperer'] as const)
-            : undefined
-
     updateAccount(account.id, {
       email: accountInfo.email,
       userId: accountInfo.userId,
@@ -205,10 +190,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
             clientId: isApiKey ? undefined : clientId,
             clientSecret: isApiKey ? undefined : clientSecret,
             region,
-            expiresAt: isApiKey ? undefined : now + 3600 * 1000,
-            preferredEndpoint: preferredEndpoint || undefined,
-            endpointFallbackOrder: endpointFallbackOrder ? [...endpointFallbackOrder] : undefined,
-            endpointFallbackAfterFailures
+            expiresAt: isApiKey ? undefined : now + 3600 * 1000
           },
       subscription: {
         type: accountInfo.subscriptionType as SubscriptionType,
@@ -472,48 +454,6 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
                   </div>
                 </>
               )}
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    {isEn ? 'Preferred Endpoint' : '首选上游端点'}
-                  </label>
-                  <select
-                    value={preferredEndpoint}
-                    onChange={(event) =>
-                      setPreferredEndpoint(event.target.value as typeof preferredEndpoint)
-                    }
-                    className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50"
-                  >
-                    <option value="">{isEn ? 'Use global setting' : '使用全局设置'}</option>
-                    <option value="codewhisperer">CodeWhisperer</option>
-                    <option value="amazonq">Amazon Q</option>
-                    <option value="amazonq-cli">Amazon Q CLI</option>
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">
-                    {isEn ? 'Failure threshold' : '熔断失败阈值'}
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={endpointFallbackAfterFailures}
-                    onChange={(event) =>
-                      setEndpointFallbackAfterFailures(
-                        Math.min(10, Math.max(1, Number(event.target.value) || 2))
-                      )
-                    }
-                    className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background/50"
-                  />
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {isEn
-                  ? 'Transient failures open the endpoint circuit for 60 seconds, then fall back to the remaining endpoints.'
-                  : '连续瞬时错误达到阈值后熔断该端点 60 秒，并按剩余端点顺序回退。'}
-              </p>
 
               <Button
                 type="button"

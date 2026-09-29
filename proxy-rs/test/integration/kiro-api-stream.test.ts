@@ -237,39 +237,55 @@ describe('callKiroApiStream 真实 EventStream 解析', () => {
       fakeResponse([
         eventStreamFrame('assistantResponseEvent', { assistantResponseEvent: { content: 'ok' } })
       ])
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('upstream unavailable', { status: 503 }))
-      .mockResolvedValueOnce(successResponse())
-      .mockResolvedValueOnce(new Response('upstream unavailable', { status: 503 }))
-      .mockResolvedValueOnce(successResponse())
-      .mockResolvedValueOnce(successResponse())
+    // 按 URL 路由：amazonq 一直 503，codewhisperer 成功；其它请求（如模型列表解析）给个空响应
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('q.us-east-1.amazonaws.com/generateAssistantResponse')) {
+        return new Response('upstream unavailable', { status: 503 })
+      }
+      if (url.includes('codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse')) {
+        return successResponse()
+      }
+      return new Response('{}', { status: 200 })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
-    const circuitAccount = {
-      ...account,
-      id: 'endpoint-circuit-account',
-      preferredEndpoint: 'amazonq' as const,
-      endpointFallbackOrder: ['amazonq-cli'] as Array<'amazonq-cli'>,
-      endpointFallbackAfterFailures: 2
+    const circuitAccount = { ...account, id: 'endpoint-circuit-account' }
+    // GPT 模型不能回退到 CodeWhisperer（它不支持），这里用 Claude 模型测熔断
+    const claudePayload = {
+      ...payload,
+      conversationState: {
+        ...payload.conversationState,
+        currentMessage: {
+          userInputMessage: {
+            ...payload.conversationState.currentMessage.userInputMessage,
+            modelId: 'claude-sonnet-4.5'
+          }
+        }
+      }
     }
+    // 首选 amazonq，连续 2 次瞬时错误后熔断，回退到 codewhisperer
     const run = (): Promise<void> =>
       callKiroApiStream(
         circuitAccount,
-        payload,
+        claudePayload,
         () => undefined,
         () => undefined,
-        () => undefined
+        () => undefined,
+        undefined,
+        'amazonq'
       )
 
     await run()
     await run()
     await run()
 
-    expect(fetchMock).toHaveBeenCalledTimes(5)
-    expect(String(fetchMock.mock.calls[0][0])).toContain('/generateAssistantResponse')
-    expect(String(fetchMock.mock.calls[1][0])).toContain('/SendMessageStreaming')
-    expect(String(fetchMock.mock.calls[4][0])).toContain('/SendMessageStreaming')
+    const generateCalls = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.endsWith('/generateAssistantResponse'))
+      .map((url) => (url.includes('codewhisperer.') ? 'cw' : 'q'))
+    // 前两轮先打 amazonq 失败再回退；第三轮 amazonq 已熔断，直接走 codewhisperer
+    expect(generateCalls).toEqual(['q', 'cw', 'q', 'cw', 'cw'])
   })
 
   it('鉴权错误只回调一次且 caller Promise 正常结束', async () => {
@@ -737,7 +753,7 @@ describe('Kiro MCP WebSearch', () => {
 })
 
 describe('Kiro API key account sync signature', () => {
-  it('账号测活请求保留 Kiro API key、区域和端点配置', async () => {
+  it('账号测活请求保留 Kiro API key 与区域', async () => {
     const { buildAccountLivenessRequestAccount } =
       await import('../../src/renderer/src/types/account')
     const requestAccount = buildAccountLivenessRequestAccount(
@@ -748,10 +764,7 @@ describe('Kiro API key account sync signature', () => {
         credentials: {
           credentialKind: 'kiro_api_key',
           kiroApiKey: 'ksk_test_redacted',
-          region: 'eu-central-1',
-          preferredEndpoint: 'amazonq',
-          endpointFallbackOrder: ['codewhisperer'],
-          endpointFallbackAfterFailures: 3
+          region: 'eu-central-1'
         }
       } as any,
       'http://127.0.0.1:7890'
@@ -762,9 +775,6 @@ describe('Kiro API key account sync signature', () => {
       credentialKind: 'kiro_api_key',
       kiroApiKey: 'ksk_test_redacted',
       region: 'eu-central-1',
-      preferredEndpoint: 'amazonq',
-      endpointFallbackOrder: ['codewhisperer'],
-      endpointFallbackAfterFailures: 3,
       proxyUrl: 'http://127.0.0.1:7890'
     })
   })
@@ -827,7 +837,6 @@ describe('后台刷新凭据计划', () => {
       shouldFetchUserInfo: true
     })
   })
-
 })
 
 describe('token-only 刷新生产者', () => {

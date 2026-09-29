@@ -506,22 +506,6 @@ export function AccountDetailDialog({
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-primary/10 last:border-0">
                   <span className="text-muted-foreground text-xs">
-                    {isEn ? 'Preferred Endpoint' : '首选端点'}
-                  </span>
-                  <Badge variant="outline" className="font-mono">
-                    {credentials.preferredEndpoint || (isEn ? 'Global' : '全局')}
-                  </Badge>
-                </div>
-                <div className="flex justify-between items-center py-1 border-b border-primary/10 last:border-0">
-                  <span className="text-muted-foreground text-xs">
-                    {isEn ? 'Circuit Threshold' : '熔断阈值'}
-                  </span>
-                  <span className="font-mono text-xs">
-                    {credentials.endpointFallbackAfterFailures || 2}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center py-1 border-b border-primary/10 last:border-0">
-                  <span className="text-muted-foreground text-xs">
                     {isEn ? 'Token Expires' : 'Token 到期'}
                   </span>
                   <span className="font-medium text-xs">

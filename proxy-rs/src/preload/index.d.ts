@@ -815,9 +815,6 @@ interface KiroApi {
       proxyUrl?: string
       credentialKind?: 'oauth' | 'kiro_api_key'
       kiroApiKey?: string
-      preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-      endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
-      endpointFallbackAfterFailures?: number
     }
     model?: string
     message?: string

@@ -37,12 +37,6 @@ export interface AccountCredentials {
   profileArn?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
-  /** 该凭据首选的 Kiro 上游端点；为空时使用内置默认顺序。 */
-  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-  /** 首选端点不可用时的账号级回退顺序。 */
-  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
-  /** 连续可重试错误达到该次数后，临时熔断当前端点。 */
-  endpointFallbackAfterFailures?: number
   /**
    * 账号库模式下渲染层不再收到 token 明文（改造方案 §6.3），用这两个标志表达"有没有"，
    * 供按钮可用性判断。非账号库模式为 undefined，判断回退到明文字段。
@@ -222,9 +216,6 @@ export function buildAccountLivenessRequestAccount(
   proxyUrl?: string
   credentialKind?: 'oauth' | 'kiro_api_key'
   kiroApiKey?: string
-  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
-  endpointFallbackAfterFailures?: number
 } {
   const credentials = account.credentials
   return {
@@ -242,10 +233,7 @@ export function buildAccountLivenessRequestAccount(
     credentialRevision: credentials.credentialRevision,
     proxyUrl,
     credentialKind: credentials.credentialKind,
-    kiroApiKey: credentials.kiroApiKey,
-    preferredEndpoint: credentials.preferredEndpoint,
-    endpointFallbackOrder: credentials.endpointFallbackOrder,
-    endpointFallbackAfterFailures: credentials.endpointFallbackAfterFailures
+    kiroApiKey: credentials.kiroApiKey
   }
 }
 

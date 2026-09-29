@@ -4185,9 +4185,6 @@ app.whenReady().then(async () => {
           proxyUrl?: string
           credentialKind?: 'oauth' | 'kiro_api_key'
           kiroApiKey?: string
-          preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-          endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
-          endpointFallbackAfterFailures?: number
         }
         model?: string
         message?: string
@@ -4312,10 +4309,7 @@ app.whenReady().then(async () => {
               proxyUrl: acc.proxyUrl,
               expiresAt: acc.expiresAt,
               credentialKind: acc.credentialKind,
-              kiroApiKey: acc.kiroApiKey,
-              preferredEndpoint: acc.preferredEndpoint,
-              endpointFallbackOrder: acc.endpointFallbackOrder,
-              endpointFallbackAfterFailures: acc.endpointFallbackAfterFailures
+              kiroApiKey: acc.kiroApiKey
             }
 
             // 3) 构建最小 OpenAI chat 请求 → 转 Kiro payload

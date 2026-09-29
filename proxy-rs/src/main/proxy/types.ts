@@ -448,12 +448,6 @@ export interface ProxyAccount {
   proxyUrl?: string
   /** 强制直连，禁止继承 App 全局代理或系统代理。 */
   bypassAppProxy?: boolean
-  /** 账号级首选 Kiro 上游端点；优先级高于全局 preferredEndpoint。 */
-  preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
-  /** 账号级端点回退顺序；未配置时沿用内置顺序。 */
-  endpointFallbackOrder?: Array<'codewhisperer' | 'amazonq' | 'amazonq-cli'>
-  /** 连续多少次可重试端点错误后开启熔断；默认 2。 */
-  endpointFallbackAfterFailures?: number
   /** 账号所属分组 ID；与 multiAccountSelectionMode='groups' + multiAccountGroupIds 配合做轮询分组过滤 */
   groupId?: string
   // 运行时状态

@@ -136,6 +136,20 @@ const api = {
   // 账号库模式：状态（是否启用、kiro-rs 子进程状态、待导入数量）
   accountDbStatus: (): Promise<AccountDbStatusView> => ipcRenderer.invoke('account-db:status'),
 
+  /*
+   * 账号库模式：CLI 当前账号的 Refresh Token 已失效（多半是 kiro-cli 自己刷新过一次，
+   * 把库里那份轮换作废）。渲染层据此提示重新登录该账号。
+   */
+  onKiroCliNeedsReauth: (callback: (payload: { accountId: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { accountId: string }): void => {
+      callback(payload)
+    }
+    ipcRenderer.on('kiro-cli-needs-reauth', handler)
+    return () => {
+      ipcRenderer.removeListener('kiro-cli-needs-reauth', handler)
+    }
+  },
+
   // 账号库模式：kiro-rs 更新了凭据 / 额度 / 状态（事件不带数据，收到后重新加载账号）
   onAccountDbChanged: (callback: () => void): (() => void) => {
     const handler = (): void => callback()

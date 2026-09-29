@@ -209,6 +209,7 @@ interface KiroApi {
     error?: string
   }>
   onAccountDbChanged: (callback: () => void) => () => void
+  onKiroCliNeedsReauth: (callback: (payload: { accountId: string }) => void) => () => void
   saveAccounts: (data: AccountData) => Promise<void>
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
   switchAccountCli: (accountId: string) => Promise<SwitchAccountCliResult>

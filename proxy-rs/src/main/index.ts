@@ -10,6 +10,8 @@ import {
 import {
   createKiroCliSocialRenewal,
   kiroCliDbExists,
+  KIRO_CLI_RENEWAL_INTERVAL_MS,
+  KIRO_CLI_RENEWAL_LEAD_MS,
   resolveKiroCliDbPath,
   resolveKiroCliSocialProvider,
   switchKiroCliAccount,
@@ -1288,6 +1290,13 @@ import {
   type AccountDbConfig
 } from './accountDb/runtime'
 import { rollbackAccountDb, runMigration } from './accountDb/migrate'
+import {
+  clearKiroCliSyncState,
+  hashRefreshToken,
+  readKiroCliSyncState,
+  syncKiroCliFromAccountDb,
+  writeKiroCliSyncState
+} from './accountDb/kiroCliSync'
 import { setInPool as setAccountInPool } from './accountDb/adminApi'
 import { loadAdminManagedEntries } from './adminManaged/registryStore'
 const accountStoreCoordinator = new AccountStoreCoordinator()
@@ -1793,8 +1802,12 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
    * 托管账号不能切到 Kiro CLI：它的 refreshToken 早已被反代轮换作废，写进 CLI 的
    * 会是一份死凭据——用户看到「切换成功」，CLI 那边立刻提示登录失效。挡在这里
    * 比让它静默失效好。
+   *
+   * 账号库模式例外：凭据在库里、kiro-rs 会持续续期，切号写进 CLI 的是当前有效值，
+   * 之后由 accountDb/kiroCliSync 把每次续期结果同步给 CLI（CLI 自己那套刷新
+   * 因为看到的 token 一直新鲜而不会触发）。
    */
-  if (isAdminManagedAccount(accountId)) {
+  if (!isAccountDbMode() && isAdminManagedAccount(accountId)) {
     throw new Error('该账号由反代托管，凭据不在本地维护，无法切换到 Kiro CLI')
   }
 
@@ -1841,6 +1854,16 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
     },
     dbPath
   )
+  // 账号库模式：记下"CLI 里这份是我们写的"，之后 kiro-rs 每次续期都同步给 CLI。
+  // 只存哈希：核对用得上，泄露风险为零。
+  if (isAccountDbMode() && store) {
+    const row = accountDbRow(accountId)
+    writeKiroCliSyncState(store as unknown as Parameters<typeof writeKiroCliSyncState>[0], {
+      accountId,
+      refreshTokenHash: hashRefreshToken(refreshed.refreshToken),
+      credentialVersion: row?.credentialVersion ?? 0
+    })
+  }
   console.log(`[KiroCLI] 已切换 Kiro CLI 账号 ${accountId}（${socialProvider ?? 'IdC'}）`)
   return {
     dbPath,
@@ -1856,6 +1879,13 @@ async function switchAccountToKiroCli(accountId: string): Promise<KiroCliSwitchR
  * 刷新成功后 singleflight 已把新凭据同步给 CLI，这里再通知渲染进程更新账号。
  */
 async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise<void> {
+  /*
+   * 账号库模式：CLI 的续期统一走 maintainKiroCliFromAccountDb（它按切号时记下的映射
+   * 定位账号，社交与 IdC 都覆盖）。这里按 CLI 手里的 refresh token 反查账号，而
+   * kiro-rs 续期后 CLI 那份在同步前会短暂落后，反查不到就会退回"让 CLI 自己刷"，
+   * 正是要避免的。
+   */
+  if (isAccountDbMode()) return
   const [candidate] = await readCanonicalKiroRefreshTransportCandidates(token.refresh_token)
   // CLI 当前账号不在账号库里，交给 kiro-cli 自己续期
   if (!candidate) return
@@ -2683,6 +2713,12 @@ async function cleanupInvalidStoredKskAccounts(
 async function deleteFromAccountDb(ids: readonly string[]): Promise<void> {
   const bridge = accountDbBridge()
   if (!bridge || ids.length === 0) return
+  // 被删的账号若正是 CLI 当前账号，停止自动同步（CLI 里那份仍可用到过期）
+  if (store) {
+    const syncStore = store as unknown as Parameters<typeof clearKiroCliSyncState>[0]
+    const state = readKiroCliSyncState(syncStore)
+    if (state && ids.includes(state.accountId)) clearKiroCliSyncState(syncStore)
+  }
   const failed = await bridge.deleteAccounts(ids, accountDbAdminTarget())
   for (const item of failed) console.warn(`[AccountDb] 删除账号 ${item.id} 失败：${item.reason}`)
 }
@@ -3051,6 +3087,8 @@ const downstreamSettlementManager = new DownstreamSettlementManager({
 let rawAccountStore: (RawStore & { path: string }) | null = null
 /** 账号库模式启用但打不开时的原因，启动后弹窗提示 */
 let accountDbStartupError: string | null = null
+/** 账号库模式下 CLI 当前账号的续期兜底定时器 */
+let accountDbCliTimer: NodeJS.Timeout | null = null
 
 /** 账号绑定的出口代理（与 readAccountBoundProxyUrl 同一判据），供账号库同步给 kiro-rs */
 function resolveBoundProxyUrl(
@@ -7660,9 +7698,75 @@ async function runAccountDbCommand(argv: readonly string[]): Promise<void> {
   }
 }
 
+/**
+ * kiro-rs 续期后把新凭据同步给 kiro-cli。
+ *
+ * 只在"CLI 当前那份确实是管理器写入的"时覆盖；被用户手动改过就停止同步并提示。
+ */
+async function syncKiroCliAfterAccountDbChange(): Promise<void> {
+  if (!store) return
+  const syncStore = store as unknown as Parameters<typeof syncKiroCliFromAccountDb>[0]['store']
+  const state = readKiroCliSyncState(syncStore)
+  if (!state) return
+  try {
+    const outcome = await syncKiroCliFromAccountDb({
+      store: syncStore,
+      row: accountDbRow(state.accountId)
+    })
+    if (outcome.status === 'synced') {
+      console.log(
+        `[KiroCLI] 已把账号 ${outcome.accountId} 的新凭据同步给 CLI（版本 ${outcome.credentialVersion}）`
+      )
+    } else if (outcome.status === 'detached') {
+      console.warn(`[KiroCLI] 停止自动同步：${outcome.reason}`)
+    } else if (outcome.status === 'needs-reauth') {
+      console.warn(
+        `[KiroCLI] 账号 ${outcome.accountId} 需要重新登录：账号库中的 Refresh Token 已失效（CLI 可能自行刷新过一次）`
+      )
+      sendRendererEvent('kiro-cli-needs-reauth', { accountId: outcome.accountId })
+    }
+  } catch (error) {
+    console.warn('[KiroCLI] 同步失败：', error instanceof Error ? error.message : error)
+  }
+}
+
+/**
+ * 账号库模式下 CLI 当前账号的续期兜底。
+ *
+ * kiro-rs 后台每分钟会刷新临期凭据，正常情况下 CLI 只需等同步。这里多一道：CLI 手里的
+ * token 临期时主动请 kiro-rs 确保新鲜，避免"proxy 在跑但恰好错过 kiro-rs 那一轮"。
+ * 与社交专用的 kiroCliSocialRenewal 不同，它覆盖社交与 IdC 两种账号。
+ */
+async function maintainKiroCliFromAccountDb(): Promise<void> {
+  if (!store) return
+  const state = readKiroCliSyncState(store as unknown as Parameters<typeof readKiroCliSyncState>[0])
+  if (!state) return
+  const row = accountDbRow(state.accountId)
+  if (!row) return
+  const expiringSoon =
+    row.expiresAtMs === null || row.expiresAtMs - Date.now() <= KIRO_CLI_RENEWAL_LEAD_MS
+  if (expiringSoon) {
+    const fresh = await ensureFreshAccountDbCredential({
+      accountId: state.accountId,
+      expectedCredentialVersion: row.credentialVersion
+    })
+    if (fresh && !fresh.success) {
+      console.warn(`[KiroCLI] 续期 CLI 当前账号失败：${fresh.error}`)
+    }
+  }
+  await syncKiroCliAfterAccountDbChange()
+}
+
 /** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
 async function startAccountDbServices(): Promise<void> {
-  startAccountDbWatcher(() => sendRendererEvent('account-db-changed', null))
+  startAccountDbWatcher(() => {
+    sendRendererEvent('account-db-changed', null)
+    void syncKiroCliAfterAccountDbChange()
+  })
+  // CLI 当前账号的续期兜底；与 kiro-rs 后台那轮互不冲突（ensure-fresh 幂等）
+  accountDbCliTimer = setInterval(() => {
+    void maintainKiroCliFromAccountDb()
+  }, KIRO_CLI_RENEWAL_INTERVAL_MS)
   const config = loadAccountDbConfig(app.getPath('userData'))
   if (!config) return
   try {
@@ -7696,6 +7800,10 @@ app.on('will-quit', async (event) => {
   localAdminStatsManager.stop()
   void localAdminDirectAgent.close()
   stopAccountDbWatcher()
+  if (accountDbCliTimer) {
+    clearInterval(accountDbCliTimer)
+    accountDbCliTimer = null
+  }
 
   // 防止应用立即退出，先保存数据
   if (lastSavedData && store) {

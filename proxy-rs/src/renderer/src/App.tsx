@@ -131,6 +131,19 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  // CLI 当前账号的 Refresh Token 失效：标为需要重新登录，卡片上能看到原因
+  useEffect(() => {
+    return window.api.onKiroCliNeedsReauth(({ accountId }) => {
+      useAccountsStore
+        .getState()
+        .updateAccountStatus(
+          accountId,
+          'expired',
+          'Kiro CLI 可能已自行刷新过该账号，账号库中的 Refresh Token 已失效，请重新登录'
+        )
+    })
+  }, [])
+
   // 应用内页面跳转（轻量 CustomEvent，供深层组件无需 prop 钻取即可切页）
   useEffect(() => {
     const handler = (e: Event): void => {

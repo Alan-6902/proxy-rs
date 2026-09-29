@@ -95,6 +95,9 @@ export function resolveKiroCliDbPath(
   platform: NodeJS.Platform = process.platform,
   home: string = homedir()
 ): string {
+  // 联调用：指向临时库即可在不动真实 kiro-cli 登录状态的前提下验证切号与同步
+  const override = process.env.KIRO_CLI_DB_PATH?.trim()
+  if (override) return override
   const dataDir =
     platform === 'darwin'
       ? join(home, 'Library', 'Application Support', 'kiro-cli')
@@ -326,6 +329,43 @@ export async function readKiroCliSocialToken(
   } catch {
     return null
   }
+}
+
+/** CLI 当前持有的凭据（social 与 IdC 共用；只列同步需要的字段） */
+export interface KiroCliCurrentToken {
+  /** auth_kv 里的键，用于区分社交与 IdC */
+  key: string
+  refreshToken: string
+  provider?: string
+}
+
+/**
+ * 读 CLI 当前持有的凭据。社交优先（切号时两者互斥，只会存在一条）。
+ *
+ * 账号库模式下用它作为"同步前的核对"：CLI 里那份必须还是管理器上次写进去的，
+ * 才允许覆盖，否则说明用户在 CLI 里自己登录过别的账号。
+ */
+export async function readKiroCliCurrentToken(
+  dbPath: string = resolveKiroCliDbPath()
+): Promise<KiroCliCurrentToken | null> {
+  if (!(await kiroCliDbExists(dbPath))) return null
+  for (const key of [KIRO_CLI_AUTH_KEY.SOCIAL_TOKEN, KIRO_CLI_AUTH_KEY.OIDC_TOKEN]) {
+    const raw = await readKiroCliAuthValue(dbPath, key)
+    if (!raw) continue
+    try {
+      const token = JSON.parse(raw) as { refresh_token?: unknown; provider?: unknown }
+      if (typeof token.refresh_token === 'string' && token.refresh_token) {
+        return {
+          key,
+          refreshToken: token.refresh_token,
+          provider: typeof token.provider === 'string' ? token.provider : undefined
+        }
+      }
+    } catch {
+      // 内容损坏：当作没有可同步的凭据
+    }
+  }
+  return null
 }
 
 /** 切号：数据库必须已由 kiro-cli 建好，不替它建库 */

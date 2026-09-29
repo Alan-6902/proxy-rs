@@ -198,8 +198,14 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   const adminManagedIds = useAccountsStore((state) => state.adminManagedIds)
   const [cliSwitchState, setCliSwitchState] = useState<CliSwitchState>('idle')
   const isAdminManaged = adminManagedIds.has(account.id)
-  // 托管账号的凭据由反代维护，本地那份已被轮换作废，切到 CLI 只会得到一份死 token
-  const canSwitchCli = canRefreshUpstreamCredential(account.credentials) && !isAdminManaged
+  /*
+   * 托管账号的凭据由反代维护，本地那份已被轮换作废，切到 CLI 只会得到一份死 token。
+   *
+   * 账号库模式例外：凭据在共享库里、kiro-rs 持续续期，切号写进 CLI 的是当前有效值，
+   * 之后每次续期都会自动同步给 CLI，所以这里不拦。
+   */
+  const canSwitchCli =
+    canRefreshUpstreamCredential(account.credentials) && (accountDb ? true : !isAdminManaged)
 
   const switchToCli = useCallback(() => {
     if (!canSwitchCli || cliSwitchState === 'switching') return
@@ -224,7 +230,7 @@ export function useAccountActions(account: Account, isEn: boolean): UseAccountAc
   }, [canSwitchCli, cliSwitchState, switchAccountToCli, account.id, isEn])
 
   const cliSwitchTitle = !canSwitchCli
-    ? isAdminManaged
+    ? isAdminManaged && !accountDb
       ? isEn
         ? 'Managed by the local proxy — its credentials are not maintained here'
         : '该账号由本机反代托管，凭据不在本地维护，请在反代侧使用'

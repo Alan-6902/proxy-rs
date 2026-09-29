@@ -45,7 +45,10 @@ const MESSAGE_COLORS: Record<string, string> = {
 const CATEGORY_COLORS: Record<string, string> = {
   Kiro: 'text-blue-600 dark:text-blue-400',
   KiroAPI: 'text-cyan-600 dark:text-cyan-400',
-  ProxyServer: 'text-violet-600 dark:text-violet-400'
+  ProxyServer: 'text-violet-600 dark:text-violet-400',
+  'kiro-rs': 'text-orange-600 dark:text-orange-400',
+  AccountDb: 'text-teal-600 dark:text-teal-400',
+  KiroCLI: 'text-sky-600 dark:text-sky-400'
 }
 const CATEGORY_COLOR_FALLBACK = 'text-muted-foreground/80'
 
@@ -70,9 +73,21 @@ const LEVEL_BTN_ACTIVE: Record<string, string> = {
   ERROR: 'bg-red-500 text-white'
 }
 
-export function LogsPage() {
+interface LogsPageProps {
+  /**
+   * 只看某一分类（如 kiro-rs 子进程的日志）。设置后从主进程按分类取数，
+   * 显示条数、清空都只作用于该分类，分类下拉隐藏。
+   */
+  category?: string
+  /** 固定分类时的页头 */
+  heading?: { title: string; eyebrow: string; description: string; icon?: React.ElementType }
+}
+
+export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.Element {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
+  // 两个日志页各自记住自己的显示条数
+  const displayLimitKey = category ? `logs_${category}_displayLimit` : 'systemLogs_displayLimit'
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [totalCount, setTotalCount] = useState(0)
   const [filter, setFilter] = useState('')
@@ -81,7 +96,7 @@ export function LogsPage() {
   const [timeRange, setTimeRange] = useState('all')
   // 显示数量默认 5K，用户改动后持久化到 localStorage（页面切换/重启后保留）
   const [displayLimit, setDisplayLimit] = useState<string>(() => {
-    return localStorage.getItem('systemLogs_displayLimit') || '5000'
+    return localStorage.getItem(displayLimitKey) || '5000'
   })
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isLoading, setIsLoading] = useState(false)
@@ -95,8 +110,8 @@ export function LogsPage() {
     try {
       const fetchCount = displayLimit === 'all' ? undefined : parseInt(displayLimit) || undefined
       const [allLogs, count] = await Promise.all([
-        window.api.appLogsGet(fetchCount),
-        window.api.appLogsCount()
+        window.api.appLogsGet(fetchCount, category),
+        window.api.appLogsCount(category)
       ])
       const newLogs = allLogs as LogEntry[]
       setLogs(newLogs)
@@ -109,7 +124,7 @@ export function LogsPage() {
     } catch {
       // ignore
     }
-  }, [isAtBottom, displayLimit])
+  }, [isAtBottom, displayLimit, category])
 
   useEffect(() => {
     setIsLoading(true)
@@ -122,8 +137,8 @@ export function LogsPage() {
 
   // 持久化 displayLimit
   useEffect(() => {
-    localStorage.setItem('systemLogs_displayLimit', displayLimit)
-  }, [displayLimit])
+    localStorage.setItem(displayLimitKey, displayLimit)
+  }, [displayLimit, displayLimitKey])
 
   // 智能滚动：用户在底部时自动跟随
   useEffect(() => {
@@ -150,7 +165,7 @@ export function LogsPage() {
   }
 
   const handleClear = async () => {
-    await window.api.appLogsClear()
+    await window.api.appLogsClear(category)
     setLogs([])
     setTotalCount(0)
     setNewLogCount(0)
@@ -231,11 +246,12 @@ export function LogsPage() {
       {/* 工具栏 */}
       <PageHeader
         dense
-        icon={Bug}
-        eyebrow={isEn ? 'Runtime' : '运行时'}
-        title={isEn ? 'System Logs' : '系统日志'}
+        icon={heading?.icon ?? Bug}
+        eyebrow={heading?.eyebrow ?? (isEn ? 'Runtime' : '运行时')}
+        title={heading?.title ?? (isEn ? 'System Logs' : '系统日志')}
         description={
-          isEn ? 'Live application and proxy runtime events' : '实时查看应用与代理运行事件'
+          heading?.description ??
+          (isEn ? 'Live application and proxy runtime events' : '实时查看应用与代理运行事件')
         }
         badges={
           <>
@@ -318,19 +334,21 @@ export function LogsPage() {
           <option value="7d">7d</option>
         </select>
 
-        {/* 分类 */}
-        <select
-          className="h-9 px-2.5 text-xs rounded-lg border border-border bg-background/70 text-foreground cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring max-w-[150px]"
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-        >
-          <option value="all">{isEn ? 'All Categories' : '全部分类'}</option>
-          {categories.map((cat) => (
-            <option key={cat} value={cat}>
-              {cat}
-            </option>
-          ))}
-        </select>
+        {/* 分类（固定分类时隐藏） */}
+        {!category && (
+          <select
+            className="h-9 px-2.5 text-xs rounded-lg border border-border bg-background/70 text-foreground cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring max-w-[150px]"
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+          >
+            <option value="all">{isEn ? 'All Categories' : '全部分类'}</option>
+            {categories.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+          </select>
+        )}
 
         {/* 显示条数 */}
         <select

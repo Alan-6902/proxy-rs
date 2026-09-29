@@ -1236,6 +1236,12 @@ import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
 import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
 import { withoutSecrets, type AccountLike } from './accountDb/projection'
 import {
+  KIRO_ADMIN_PARTITION,
+  adminUiUrlFromApiBase,
+  installAdminWebviewGuards,
+  logKiroRsLine
+} from './accountDb/kiroRsView'
+import {
   accountDbAccountsWithSecrets,
   accountDbAdminTarget,
   accountDbBackupPayload,
@@ -2952,9 +2958,12 @@ function createWindow(): void {
       // 关闭后台节流：最小化到托盘后窗口被隐藏，Chromium 默认会把渲染进程里的
       // setInterval（含 token 自动刷新定时器）重度降频（对齐到约每分钟甚至更慢），
       // 导致挂托盘时 token 过期好几分钟才刷新。关掉它保证定时器照常运行。
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      // 内嵌 kiro-rs Admin 页面用；加载地址与权限由 installAdminWebviewGuards 限定
+      webviewTag: true
     }
   })
+  installAdminWebviewGuards(mainWindow.webContents, { resolve: resolveKiroAdminView })
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
     const action = resolveWindowZoomAction(input)
@@ -3654,6 +3663,34 @@ app.whenReady().then(async () => {
       return { success: true }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  // IPC: App 运行日志（系统日志页、kiro-rs 日志页）。category 为空时取全部
+  ipcMain.handle('app-logs-get', (_event, count?: number, category?: string) => {
+    const limit = typeof count === 'number' && count > 0 ? count : undefined
+    if (category) return proxyLogStore.getLastOfCategory(category, limit)
+    return limit ? proxyLogStore.getLast(limit) : proxyLogStore.getAll()
+  })
+  ipcMain.handle('app-logs-count', (_event, category?: string) =>
+    category ? proxyLogStore.countOfCategory(category) : proxyLogStore.count()
+  )
+  ipcMain.handle('app-logs-clear', (_event, category?: string) => {
+    if (category) proxyLogStore.clearCategory(category)
+    else proxyLogStore.clear()
+    return { success: true }
+  })
+
+  // IPC: 内嵌 Admin 页面的地址（Key 由主进程在页面里注入，不下发给渲染进程）
+  ipcMain.handle('kiro-admin-view', () => {
+    const status = accountDbStatus()
+    const view = resolveKiroAdminView()
+    return {
+      enabled: status.enabled,
+      url: view?.adminUiUrl,
+      partition: KIRO_ADMIN_PARTITION,
+      kiroRsState: status.kiroRsState,
+      detail: status.kiroRsDetail ?? accountDbStartupError ?? undefined
     }
   })
 
@@ -6997,6 +7034,13 @@ async function maintainKiroCliFromAccountDb(): Promise<void> {
   await syncKiroCliAfterAccountDbChange()
 }
 
+/** 内嵌 Admin 页面的地址与 Key；kiro-rs 未就绪时为 null */
+function resolveKiroAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
+  const target = accountDbAdminTarget()
+  if (!target) return null
+  return { adminUiUrl: adminUiUrlFromApiBase(target.baseUrl), adminApiKey: target.adminApiKey }
+}
+
 /** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
 async function startAccountDbServices(): Promise<void> {
   startAccountDbWatcher(() => {
@@ -7013,7 +7057,7 @@ async function startAccountDbServices(): Promise<void> {
   try {
     await startManagedKiroRs({
       binary: resolveKiroRsBinary(config),
-      onLog: (line) => console.log(`[kiro-rs] ${line}`),
+      onLog: (line, stream) => logKiroRsLine(line, stream),
       onStateChange: (state, detail) => {
         console.log(`[kiro-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
         sendRendererEvent('account-db-status', { ...accountDbStatus(), error: detail })

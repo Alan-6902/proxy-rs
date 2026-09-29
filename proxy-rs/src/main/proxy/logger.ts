@@ -349,13 +349,31 @@ class ProxyLogStore {
     return this.logs.slice(-count)
   }
 
+  /** 某一分类的最近 count 条（count 缺省为全部） */
+  getLastOfCategory(category: string, count?: number): LogEntry[] {
+    const matched = this.logs.filter((entry) => entry.category === category)
+    return count === undefined ? matched : matched.slice(-count)
+  }
+
   clear(): void {
     this.logs = []
     void this.save()
   }
 
+  /** 只清除某一分类的日志 */
+  clearCategory(category: string): void {
+    this.logs = this.logs.filter((entry) => entry.category !== category)
+    void this.save()
+  }
+
   count(): number {
     return this.logs.length
+  }
+
+  countOfCategory(category: string): number {
+    let total = 0
+    for (const entry of this.logs) if (entry.category === category) total++
+    return total
   }
 
   onLog(listener: (entry: LogEntry) => void): () => void {

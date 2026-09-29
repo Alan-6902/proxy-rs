@@ -49,9 +49,15 @@ const zh = {
     tasks: '任务管理',
     diagnose: '一键诊断',
     configSync: '配置同步',
+    kiroAdmin: '反代管理',
+    kiroLogs: '反代日志',
     logs: '系统日志',
     settings: '设置',
     about: '关于'
+  },
+
+  kiroLogs: {
+    description: 'kiro-rs 子进程的输出：启动、刷新 token、查额度、请求报错'
   },
 
   // 主页

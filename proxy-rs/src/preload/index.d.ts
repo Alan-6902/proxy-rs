@@ -471,16 +471,29 @@ interface KiroApi {
 
   // 获取应用运行日志
   appLogsGet: (
-    count?: number
+    count?: number,
+    category?: string
   ) => Promise<
     Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
   >
 
-  // 清除应用运行日志
-  appLogsClear: () => Promise<{ success: boolean }>
+  // 清除应用运行日志（传 category 时只清该分类）
+  appLogsClear: (category?: string) => Promise<{ success: boolean }>
 
-  // 获取应用运行日志数量
-  appLogsCount: () => Promise<number>
+  // 获取应用运行日志数量（传 category 时只数该分类）
+  appLogsCount: (category?: string) => Promise<number>
+
+  // 内嵌 kiro-rs Admin 页面
+  kiroAdminView: () => Promise<{
+    enabled: boolean
+    url?: string
+    partition: string
+    kiroRsState?: string
+    detail?: string
+  }>
+  onAccountDbStatus: (
+    callback: (status: { kiroRsState?: string; kiroRsDetail?: string; error?: string }) => void
+  ) => () => void
 
   onLocalNotificationNavigate: (callback: (page: 'accounts') => void) => () => void
 

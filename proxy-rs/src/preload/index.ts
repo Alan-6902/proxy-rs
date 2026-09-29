@@ -517,22 +517,47 @@ const api = {
   // ============ 应用日志 ============
 
   // 获取应用运行日志
+  // category 为空时取全部；传 'kiro-rs' 只取 kiro-rs 子进程的日志
   appLogsGet: (
-    count?: number
+    count?: number,
+    category?: string
   ): Promise<
     Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
   > => {
-    return ipcRenderer.invoke('app-logs-get', count)
+    return ipcRenderer.invoke('app-logs-get', count, category)
   },
 
-  // 清除应用运行日志
-  appLogsClear: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('app-logs-clear')
+  // 清除应用运行日志（传 category 时只清该分类）
+  appLogsClear: (category?: string): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke('app-logs-clear', category)
   },
 
-  // 获取应用运行日志数量
-  appLogsCount: (): Promise<number> => {
-    return ipcRenderer.invoke('app-logs-count')
+  // 获取应用运行日志数量（传 category 时只数该分类）
+  appLogsCount: (category?: string): Promise<number> => {
+    return ipcRenderer.invoke('app-logs-count', category)
+  },
+
+  // 内嵌 kiro-rs Admin 页面的地址与 kiro-rs 状态（Admin Key 由主进程注入，不经渲染进程）
+  kiroAdminView: (): Promise<{
+    enabled: boolean
+    url?: string
+    partition: string
+    kiroRsState?: string
+    detail?: string
+  }> => ipcRenderer.invoke('kiro-admin-view'),
+
+  // kiro-rs 子进程状态变化（启动中 / 运行中 / 重启中 / 失败）
+  onAccountDbStatus: (
+    callback: (status: { kiroRsState?: string; kiroRsDetail?: string; error?: string }) => void
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      status: { kiroRsState?: string; kiroRsDetail?: string; error?: string }
+    ): void => callback(status)
+    ipcRenderer.on('account-db-status', handler)
+    return () => {
+      ipcRenderer.removeListener('account-db-status', handler)
+    }
   },
 
   onLocalNotificationNavigate: (callback: (page: 'accounts') => void): (() => void) => {

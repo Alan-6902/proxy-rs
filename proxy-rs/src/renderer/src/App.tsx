@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Terminal } from 'lucide-react'
+import { useTranslation } from './hooks/useTranslation'
 import { AccountManager } from './components/accounts'
 import { Sidebar, TitleBar, isPageType, type PageType } from './components/layout'
 import {
@@ -9,6 +11,7 @@ import {
   DiagnosePage,
   ConfigSyncPage,
   LogsPage,
+  KiroAdminPage,
   TaskManagerPage,
   CursorAccountsPage,
   GrokAccountsPage
@@ -25,6 +28,7 @@ const LEGACY_WEBHOOK_STORAGE_KEY = 'kiro-webhooks'
 const SETTINGS_SHORTCUT_KEY = ','
 
 function App(): React.JSX.Element {
+  const { t } = useTranslation()
   const [currentPage, setCurrentPage] = useState<PageType>('home')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
 
@@ -283,8 +287,23 @@ function App(): React.JSX.Element {
         return <DiagnosePage />
       case 'configSync':
         return <ConfigSyncPage />
+      case 'kiroAdmin':
+        return <KiroAdminPage />
+      case 'kiroLogs':
+        return (
+          <LogsPage
+            key="kiro-rs"
+            category="kiro-rs"
+            heading={{
+              icon: Terminal,
+              eyebrow: 'kiro-rs',
+              title: t('nav.kiroLogs'),
+              description: t('kiroLogs.description')
+            }}
+          />
+        )
       case 'logs':
-        return <LogsPage />
+        return <LogsPage key="all" />
       case 'settings':
         return <SettingsPage />
       case 'about':

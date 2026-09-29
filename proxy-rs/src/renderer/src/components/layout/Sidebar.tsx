@@ -11,7 +11,9 @@ import {
   GripVertical,
   ListChecks,
   MousePointer2,
-  Bot
+  Bot,
+  LayoutDashboard,
+  Terminal
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -27,6 +29,8 @@ export type PageType =
   | 'tasks'
   | 'diagnose'
   | 'configSync'
+  | 'kiroAdmin'
+  | 'kiroLogs'
   | 'logs'
   | 'settings'
   | 'about'
@@ -46,6 +50,8 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
+  { id: 'kiroAdmin', labelKey: 'nav.kiroAdmin', icon: LayoutDashboard },
+  { id: 'kiroLogs', labelKey: 'nav.kiroLogs', icon: Terminal },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings },
   { id: 'about', labelKey: 'nav.about', icon: Info }

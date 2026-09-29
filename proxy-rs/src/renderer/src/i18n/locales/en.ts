@@ -49,9 +49,16 @@ const en = {
     tasks: 'Tasks',
     diagnose: 'Diagnostics',
     configSync: 'Config Sync',
+    kiroAdmin: 'Proxy Admin',
+    kiroLogs: 'Proxy Logs',
     logs: 'Logs',
     settings: 'Settings',
     about: 'About'
+  },
+
+  kiroLogs: {
+    description:
+      'Output of the kiro-rs child process: startup, token refresh, quota checks, request errors'
   },
 
   // Home Page

@@ -18,7 +18,7 @@
     "postinstall": "node scripts/verify-native-deps.mjs",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
-    "build:mac": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac --x64 --arm64",
+    "build:mac": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac",
     "build:mac:current": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac",
     "dist:mac": "bash scripts/build-dist-mac.sh",
     "dist:current": "bash scripts/build-dist-current-mac.sh",

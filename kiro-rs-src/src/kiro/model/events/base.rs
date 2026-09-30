@@ -16,6 +16,8 @@ pub enum EventType {
     Metering,
     /// 上下文使用率事件
     ContextUsage,
+    /// 消息元数据事件（含 prompt cache 读写分解）
+    Metadata,
     /// 未知事件类型
     Unknown,
 }
@@ -28,6 +30,7 @@ impl EventType {
             "toolUseEvent" => Self::ToolUse,
             "meteringEvent" => Self::Metering,
             "contextUsageEvent" => Self::ContextUsage,
+            "metadataEvent" | "messageMetadataEvent" => Self::Metadata,
             _ => Self::Unknown,
         }
     }
@@ -39,6 +42,7 @@ impl EventType {
             Self::ToolUse => "toolUseEvent",
             Self::Metering => "meteringEvent",
             Self::ContextUsage => "contextUsageEvent",
+            Self::Metadata => "metadataEvent",
             Self::Unknown => "unknown",
         }
     }
@@ -74,6 +78,8 @@ pub enum Event {
     Metering(()),
     /// 上下文使用率
     ContextUsage(super::ContextUsageEvent),
+    /// 消息元数据
+    Metadata(super::MetadataEvent),
     /// 未知事件 (保留原始帧数据)
     Unknown {},
     /// 服务端错误
@@ -123,6 +129,10 @@ impl Event {
             EventType::ContextUsage => {
                 let payload = super::ContextUsageEvent::from_frame(&frame)?;
                 Ok(Self::ContextUsage(payload))
+            }
+            EventType::Metadata => {
+                let payload = super::MetadataEvent::from_frame(&frame)?;
+                Ok(Self::Metadata(payload))
             }
             EventType::Unknown => Ok(Self::Unknown {}),
         }
@@ -174,6 +184,11 @@ mod tests {
         assert_eq!(
             EventType::from_str("contextUsageEvent"),
             EventType::ContextUsage
+        );
+        assert_eq!(EventType::from_str("metadataEvent"), EventType::Metadata);
+        assert_eq!(
+            EventType::from_str("messageMetadataEvent"),
+            EventType::Metadata
         );
         assert_eq!(EventType::from_str("unknown_type"), EventType::Unknown);
     }

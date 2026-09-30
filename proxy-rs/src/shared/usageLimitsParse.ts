@@ -25,9 +25,14 @@ interface RawBreakdown extends RawAmount {
   unit?: string
   overageRate?: number
   overageCap?: number
-  freeTrialInfo?: RawAmount & { freeTrialStatus?: string; freeTrialExpiry?: string }
+  freeTrialInfo?: RawAmount & { freeTrialStatus?: string; freeTrialExpiry?: string | number }
   bonuses?: Array<
-    RawAmount & { status?: string; bonusCode?: string; displayName?: string; expiresAt?: string }
+    RawAmount & {
+      status?: string
+      bonusCode?: string
+      displayName?: string
+      expiresAt?: string | number
+    }
   >
 }
 
@@ -56,7 +61,7 @@ export interface ParsedUsage {
   freeTrialCurrent: number
   freeTrialExpiry?: string
   bonuses: Array<{ code: string; name: string; current: number; limit: number; expiresAt?: string }>
-  nextResetDate?: string | number
+  nextResetDate?: string
   resourceDetail?: {
     resourceType?: string
     displayName?: string
@@ -94,6 +99,12 @@ function amount(value: RawAmount | undefined, kind: 'limit' | 'current'): number
     : (value.currentUsageWithPrecision ?? value.currentUsage ?? 0)
 }
 
+/** 上游日期字段可能是 Unix 秒或 ISO 字符串，统一成 ISO 字符串 */
+function toIsoDate(value: string | number | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return typeof value === 'number' ? new Date(value * 1000).toISOString() : value
+}
+
 /** 解析失败（非对象）返回 null；字段缺失按 0 / 空处理 */
 export function parseUsageLimits(raw: unknown, observedAt: number): ParsedUsageLimits | null {
   if (typeof raw !== 'object' || raw === null) return null
@@ -110,7 +121,7 @@ export function parseUsageLimits(raw: unknown, observedAt: number): ParsedUsageL
   if (credit?.freeTrialInfo?.freeTrialStatus === 'ACTIVE') {
     freeTrialLimit = amount(credit.freeTrialInfo, 'limit')
     freeTrialCurrent = amount(credit.freeTrialInfo, 'current')
-    freeTrialExpiry = credit.freeTrialInfo.freeTrialExpiry
+    freeTrialExpiry = toIsoDate(credit.freeTrialInfo.freeTrialExpiry)
   }
   const bonuses = (credit?.bonuses ?? [])
     .filter((bonus) => bonus.status === 'ACTIVE')
@@ -119,7 +130,7 @@ export function parseUsageLimits(raw: unknown, observedAt: number): ParsedUsageL
       name: bonus.displayName || '',
       current: amount(bonus, 'current'),
       limit: amount(bonus, 'limit'),
-      expiresAt: bonus.expiresAt
+      expiresAt: toIsoDate(bonus.expiresAt)
     }))
   const limit = baseLimit + freeTrialLimit + bonuses.reduce((sum, b) => sum + b.limit, 0)
   const current = baseCurrent + freeTrialCurrent + bonuses.reduce((sum, b) => sum + b.current, 0)
@@ -127,8 +138,9 @@ export function parseUsageLimits(raw: unknown, observedAt: number): ParsedUsageL
   const title = result.subscriptionInfo?.subscriptionTitle ?? 'Free'
   let expiresAt: number | undefined
   let daysRemaining: number | undefined
-  if (result.nextDateReset) {
-    expiresAt = new Date(result.nextDateReset).getTime()
+  const nextResetDate = toIsoDate(result.nextDateReset)
+  if (nextResetDate) {
+    expiresAt = new Date(nextResetDate).getTime()
     daysRemaining = Math.max(0, Math.ceil((expiresAt - observedAt) / MS_PER_DAY))
   }
 
@@ -146,7 +158,7 @@ export function parseUsageLimits(raw: unknown, observedAt: number): ParsedUsageL
       freeTrialCurrent,
       freeTrialExpiry,
       bonuses,
-      nextResetDate: result.nextDateReset,
+      nextResetDate,
       resourceDetail: credit
         ? {
             resourceType: credit.resourceType,

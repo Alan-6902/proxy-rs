@@ -365,6 +365,15 @@ impl KiroProvider {
                     continue;
                 }
             };
+            tracing::info!(
+                "[Account] Using account: {} (#{}, {}/{}, attempt: {}/{})",
+                ctx.credentials.email.as_deref().unwrap_or("unknown"),
+                ctx.id,
+                self.token_manager.available_count(),
+                total_credentials,
+                attempt + 1,
+                max_retries
+            );
 
             let config = self.token_manager.config();
             let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);

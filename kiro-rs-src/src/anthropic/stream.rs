@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::kiro::model::events::Event;
+use crate::kiro::model::events::{Event, TokenUsage, log_cache_summary};
 
 /// 找到小于等于目标位置的最近有效UTF-8字符边界
 ///
@@ -454,11 +454,7 @@ impl SseStateManager {
     }
 
     /// 生成最终事件序列
-    pub fn generate_final_events(
-        &mut self,
-        input_tokens: i32,
-        output_tokens: i32,
-    ) -> Vec<SseEvent> {
+    pub fn generate_final_events(&mut self, usage: serde_json::Value) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
         // 关闭所有未关闭的块
@@ -486,10 +482,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": usage
                 }),
             ));
         }
@@ -523,6 +516,8 @@ pub struct StreamContext {
     pub context_input_tokens: Option<i32>,
     /// 输出 tokens 累计
     pub output_tokens: i32,
+    /// 上游 metadataEvent 给出的 token 分解（含 prompt cache 读写）
+    pub token_usage: Option<TokenUsage>,
     /// 工具块索引映射 (tool_id -> block_index)
     pub tool_block_indices: HashMap<String, i32>,
     /// 工具名称反向映射（短名称 → 原始名称），用于响应时还原
@@ -559,6 +554,7 @@ impl StreamContext {
             input_tokens,
             context_input_tokens: None,
             output_tokens: 0,
+            token_usage: None,
             tool_block_indices: HashMap::new(),
             tool_name_map,
             thinking_enabled,
@@ -652,6 +648,12 @@ impl StreamContext {
                     context_usage.context_usage_percentage,
                     actual_input_tokens
                 );
+                Vec::new()
+            }
+            Event::Metadata(metadata) => {
+                if let Some(usage) = metadata.token_usage {
+                    self.token_usage = Some(usage);
+                }
                 Vec::new()
             }
             Event::Error {
@@ -1117,15 +1119,26 @@ impl StreamContext {
             events.extend(self.create_text_delta_events(" "));
         }
 
-        // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-        let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
+        log_cache_summary(&self.model, self.token_usage.as_ref());
 
         // 生成最终事件
-        events.extend(
-            self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
-        );
+        let usage = self.usage_json();
+        events.extend(self.state_manager.generate_final_events(usage));
         events
+    }
+
+    /// 下发给客户端的 usage 对象
+    ///
+    /// 上游给了 cache 分解时按 Anthropic 口径拆开：`input_tokens` 只含未缓存部分，
+    /// 缓存读写分别放 `cache_read_input_tokens` / `cache_creation_input_tokens`
+    /// （客户端会把三者相加得到上下文总量，不能重复计入）。
+    /// 没有分解时沿用 contextUsageEvent 反推值，缺失再回退到本地估算。
+    pub fn usage_json(&self) -> serde_json::Value {
+        anthropic_usage_json(
+            self.token_usage.as_ref(),
+            self.context_input_tokens.unwrap_or(self.input_tokens),
+            self.output_tokens,
+        )
     }
 
     /// 本次请求最终计入的 `(input_tokens, output_tokens)`
@@ -1212,18 +1225,14 @@ impl BufferedStreamContext {
         let final_events = self.inner.generate_final_events();
         self.event_buffer.extend(final_events);
 
-        // 获取正确的 input_tokens
-        let final_input_tokens = self
-            .inner
-            .context_input_tokens
-            .unwrap_or(self.estimated_input_tokens);
-
-        // 更正 message_start 事件中的 input_tokens
+        // 更正 message_start 事件中的 usage（output_tokens 保持占位值）
+        let mut final_usage = self.inner.usage_json();
         for event in &mut self.event_buffer {
             if event.event == "message_start" {
                 if let Some(message) = event.data.get_mut("message") {
                     if let Some(usage) = message.get_mut("usage") {
-                        usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                        final_usage["output_tokens"] = usage["output_tokens"].clone();
+                        *usage = final_usage.clone();
                     }
                 }
             }
@@ -1240,6 +1249,26 @@ impl BufferedStreamContext {
             .context_input_tokens
             .unwrap_or(self.estimated_input_tokens);
         (input.max(0) as u64, self.inner.output_tokens.max(0) as u64)
+    }
+}
+
+/// 按 Anthropic 口径构造 usage，见 [`StreamContext::usage_json`]
+pub(crate) fn anthropic_usage_json(
+    token_usage: Option<&TokenUsage>,
+    input_tokens: i32,
+    output_tokens: i32,
+) -> serde_json::Value {
+    match token_usage {
+        Some(u) if u.total_input_tokens() > 0 => json!({
+            "input_tokens": u.uncached_input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": u.cache_read_input_tokens,
+            "cache_creation_input_tokens": u.cache_write_input_tokens
+        }),
+        _ => json!({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens
+        }),
     }
 }
 
@@ -1607,6 +1636,55 @@ mod tests {
             ),
             Some(54)
         );
+    }
+
+    #[test]
+    fn test_final_usage_splits_prompt_cache_tokens() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let _ = ctx.generate_initial_events();
+        ctx.process_kiro_event(&Event::Metadata(crate::kiro::model::events::MetadataEvent {
+            token_usage: Some(TokenUsage {
+                uncached_input_tokens: 100,
+                cache_read_input_tokens: 800,
+                cache_write_input_tokens: 50,
+                output_tokens: 20,
+            }),
+        }));
+        let events = ctx.generate_final_events();
+        let delta = events.iter().find(|e| e.event == "message_delta").unwrap();
+        let usage = &delta.data["usage"];
+        assert_eq!(usage["input_tokens"], 100);
+        assert_eq!(usage["cache_read_input_tokens"], 800);
+        assert_eq!(usage["cache_creation_input_tokens"], 50);
+    }
+
+    #[test]
+    fn test_final_usage_without_metadata_keeps_legacy_shape() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 42, false, HashMap::new());
+        let _ = ctx.generate_initial_events();
+        let events = ctx.generate_final_events();
+        let delta = events.iter().find(|e| e.event == "message_delta").unwrap();
+        assert_eq!(delta.data["usage"]["input_tokens"], 42);
+        assert!(delta.data["usage"].get("cache_read_input_tokens").is_none());
+    }
+
+    #[test]
+    fn test_buffered_message_start_gets_cache_usage() {
+        let mut ctx = BufferedStreamContext::new("test-model", 1, false, HashMap::new());
+        ctx.process_and_buffer(&Event::Metadata(crate::kiro::model::events::MetadataEvent {
+            token_usage: Some(TokenUsage {
+                uncached_input_tokens: 10,
+                cache_read_input_tokens: 90,
+                cache_write_input_tokens: 0,
+                output_tokens: 5,
+            }),
+        }));
+        let events = ctx.finish_and_get_all_events();
+        let start = events.iter().find(|e| e.event == "message_start").unwrap();
+        let usage = &start.data["message"]["usage"];
+        assert_eq!(usage["input_tokens"], 10);
+        assert_eq!(usage["cache_read_input_tokens"], 90);
+        assert_eq!(usage["output_tokens"], 1);
     }
 
     #[test]

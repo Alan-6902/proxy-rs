@@ -307,11 +307,11 @@ pub async fn post_messages(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
-        model = %payload.model,
-        max_tokens = %payload.max_tokens,
-        stream = %payload.stream,
-        message_count = %payload.messages.len(),
-        "Received POST /v1/messages request"
+        "[API] Request for model: {}, stream: {}, messages: {}, max_tokens: {}",
+        payload.model,
+        payload.stream,
+        payload.messages.len(),
+        payload.max_tokens
     );
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
@@ -648,6 +648,8 @@ async fn handle_non_stream_request(
     let mut stop_reason = "end_turn".to_string();
     // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
+    // 上游 metadataEvent 给出的 token 分解（含 prompt cache 读写）
+    let mut token_usage = None;
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -716,6 +718,11 @@ async fn handle_non_stream_request(
                                 actual_input_tokens
                             );
                         }
+                        Event::Metadata(metadata) => {
+                            if let Some(usage) = metadata.token_usage {
+                                token_usage = Some(usage);
+                            }
+                        }
                         Event::Exception { exception_type, .. } => {
                             if exception_type == "ContentLengthExceededException" {
                                 stop_reason = "max_tokens".to_string();
@@ -766,6 +773,8 @@ async fn handle_non_stream_request(
 
     content.extend(tool_uses);
 
+    crate::kiro::model::events::log_cache_summary(model, token_usage.as_ref());
+
     // 估算输出 tokens
     let output_tokens = token::estimate_output_tokens(&content);
 
@@ -788,10 +797,11 @@ async fn handle_non_stream_request(
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": final_input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": super::stream::anthropic_usage_json(
+            token_usage.as_ref(),
+            final_input_tokens,
+            output_tokens
+        )
     });
 
     (StatusCode::OK, Json(response_body)).into_response()
@@ -871,11 +881,11 @@ pub async fn post_messages_cc(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
-        model = %payload.model,
-        max_tokens = %payload.max_tokens,
-        stream = %payload.stream,
-        message_count = %payload.messages.len(),
-        "Received POST /cc/v1/messages request"
+        "[API] Request for model: {}, stream: {}, messages: {}, max_tokens: {}",
+        payload.model,
+        payload.stream,
+        payload.messages.len(),
+        payload.max_tokens
     );
 
     // 检查 KiroProvider 是否可用

@@ -4358,18 +4358,20 @@ app.whenReady().then(async () => {
         kiroApiKey,
         credentialKind
       } = account.credentials || {}
-      const upstreamCredential = resolveUpstreamKiroCredential({
-        credentialKind,
-        accessToken,
-        kiroApiKey,
-        idp: provider || account.idp
-      })
       // 账号库模式：凭据以库为准（渲染层不再持有明文），先请 kiro-rs 确保新鲜
       const dbContext = await accountDbUpstreamContext(account.id)
       if (dbContext && 'error' in dbContext) {
         return { success: false, error: { message: dbContext.error } }
       }
-      const upstreamAuth = getUpstreamKiroAuth(dbContext?.credential ?? upstreamCredential)
+      const upstreamCredential =
+        dbContext?.credential ??
+        resolveUpstreamKiroCredential({
+          credentialKind,
+          accessToken,
+          kiroApiKey,
+          idp: provider || account.idp
+        })
+      const upstreamAuth = getUpstreamKiroAuth(upstreamCredential)
 
       // 账号库模式下凭据自带的出口代理（kiro-rs 侧配置）
       const boundProxyUrl = dbContext?.proxyUrl
@@ -4401,7 +4403,7 @@ app.whenReady().then(async () => {
                 }
               ),
           getUsageAndLimits(
-            dbContext?.credential ?? upstreamCredential,
+            upstreamCredential,
             idp,
             dbContext?.profileArn ?? (account.profileArn || profileArn),
             dbContext?.region ?? (apiRegion || region),
@@ -6696,14 +6698,15 @@ app.whenReady().then(async () => {
       accountId?: string
     ) => {
       try {
-        const credential =
-          typeof credentialInput === 'string'
-            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
-            : resolveUpstreamKiroCredential(credentialInput)
-        // 账号库模式：凭据不经渲染层，先请 kiro-rs 确保新鲜再从库里取
+        // 账号库模式：凭据不经渲染层（渲染层没有 token 明文），先请 kiro-rs 确保新鲜再从库里取
         const context = await accountDbUpstreamContext(accountId)
         if (context && 'error' in context)
           return { success: false, error: context.error, models: [] }
+        const credential =
+          context?.credential ??
+          (typeof credentialInput === 'string'
+            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+            : resolveUpstreamKiroCredential(credentialInput))
         const models = await withAccountDbRetry(
           accountId,
           (fresh) =>
@@ -6754,13 +6757,14 @@ app.whenReady().then(async () => {
       accountId?: string
     ) => {
       try {
-        const credential =
-          typeof credentialInput === 'string'
-            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
-            : resolveUpstreamKiroCredential(credentialInput)
         const context = await accountDbUpstreamContext(accountId)
         if (context && 'error' in context)
           return { success: false, error: context.error, plans: [] }
+        const credential =
+          context?.credential ??
+          (typeof credentialInput === 'string'
+            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+            : resolveUpstreamKiroCredential(credentialInput))
         const result = await withAccountDbRetry(
           accountId,
           (fresh) =>
@@ -6803,12 +6807,13 @@ app.whenReady().then(async () => {
       accountId?: string
     ) => {
       try {
-        const credential =
-          typeof credentialInput === 'string'
-            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
-            : resolveUpstreamKiroCredential(credentialInput)
         const context = await accountDbUpstreamContext(accountId)
         if (context && 'error' in context) return { success: false, error: context.error }
+        const credential =
+          context?.credential ??
+          (typeof credentialInput === 'string'
+            ? resolveUpstreamKiroCredential({ accessToken: credentialInput })
+            : resolveUpstreamKiroCredential(credentialInput))
         const result = await withAccountDbRetry(
           accountId,
           (fresh) =>

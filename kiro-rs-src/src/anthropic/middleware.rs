@@ -59,6 +59,27 @@ pub async fn auth_middleware(
     }
 }
 
+/// 请求访问日志：`[POST] /v1/messages 200 (3318ms)`
+///
+/// 流式请求的耗时是到响应头返回为止（首包时间），不含后续流式输出。
+pub async fn access_log_middleware(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path()).to_string();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed = started.elapsed().as_millis();
+    if status.is_server_error() {
+        tracing::error!("[{}] {} {} ({}ms)", method, path, status.as_u16(), elapsed);
+    } else if status.is_client_error() {
+        tracing::warn!("[{}] {} {} ({}ms)", method, path, status.as_u16(), elapsed);
+    } else {
+        tracing::info!("[{}] {} {} ({}ms)", method, path, status.as_u16(), elapsed);
+    }
+    response
+}
+
 /// CORS 中间件层
 ///
 /// **安全说明**：当前配置允许所有来源（Any），这是为了支持公开 API 服务。

@@ -8,7 +8,9 @@ import {
   ArrowDown,
   ChevronsDown,
   Bug,
-  X
+  X,
+  WrapText,
+  MoveHorizontal
 } from 'lucide-react'
 import { Button, Badge, Input, PageHeader } from '../ui'
 import { useTranslation } from '../../hooks/useTranslation'
@@ -23,6 +25,12 @@ interface LogEntry {
 }
 
 type LogLevel = 'ALL' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+
+/** 长消息显示方式：wrap 折行显示全文；scroll 保持单行，列表横向滚动 */
+type MessageLayout = 'wrap' | 'scroll'
+const MESSAGE_LAYOUTS: MessageLayout[] = ['wrap', 'scroll']
+/** 两个日志页共用同一偏好 */
+const MESSAGE_LAYOUT_STORAGE_KEY = 'logs_messageLayout'
 
 /* 级别标签配色：参考终端日志查看器，只让「级别」着色，正文保持中性。
  * 原先把整条 message 按级别染色，导致全是 INFO 时整屏发蓝、反而看不出重点。 */
@@ -59,11 +67,33 @@ const COL_LEVEL_PX = 44
 /** 来源列宽：实测最长分类名 MainPoolRefreshScheduler 需 173px，留 4px 余量 */
 const COL_CATEGORY_PX = 178
 const ROW_GRID_TEMPLATE = `${COL_TIME_PX}px ${COL_LEVEL_PX}px ${COL_CATEGORY_PX}px minmax(0, 1fr)`
+/** 横向滚动模式：消息列按内容撑开，由列表容器整体横向滚动 */
+const ROW_GRID_TEMPLATE_SCROLL = `${COL_TIME_PX}px ${COL_LEVEL_PX}px ${COL_CATEGORY_PX}px max-content`
 const ROW_GAP_PX = 10
 /** 展开的 data 区左缩进：与 message 列起点对齐 */
 const EXPANDED_INDENT_PX = COL_TIME_PX + COL_LEVEL_PX + COL_CATEGORY_PX + ROW_GAP_PX * 3
 const ROW_HEIGHT_PX = 20
 const ROW_HEIGHT_EXPANDED_PX = 148
+
+/* 终端样式（kiro-rs 页）：参考终端日志，一行 `[时间] [LEVEL] [Tag] 消息`，只给时间和级别上色 */
+const TERMINAL_TIME_COLOR = 'text-muted-foreground/70'
+const TERMINAL_LEVEL_COLORS: Record<string, string> = {
+  DEBUG: 'text-muted-foreground/70',
+  INFO: 'text-sky-600 dark:text-sky-400',
+  WARN: 'text-amber-600 dark:text-amber-400',
+  ERROR: 'text-red-600 dark:text-red-400'
+}
+/** 终端样式下展开的 data 区左缩进 */
+const TERMINAL_EXPANDED_INDENT_PX = 12
+
+/** 消息开头的 `[Tag]`（如 `[API]`、`[POST]`）；没有 Tag 的归到 TAG_NONE */
+const MESSAGE_TAG_PATTERN = /^\[([^\]\s]+)\]/
+const TAG_ALL = 'ALL'
+const TAG_NONE = '-'
+
+function messageTag(message: string): string {
+  return MESSAGE_TAG_PATTERN.exec(message)?.[1] ?? TAG_NONE
+}
 
 const LEVEL_BTN_ACTIVE: Record<string, string> = {
   ALL: 'bg-primary text-primary-foreground',
@@ -93,16 +123,21 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
   const [filter, setFilter] = useState('')
   const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL')
   const [categoryFilter, setCategoryFilter] = useState('all')
+  const [tagFilter, setTagFilter] = useState(TAG_ALL)
   const [timeRange, setTimeRange] = useState('all')
   // 显示数量默认 5K，用户改动后持久化到 localStorage（页面切换/重启后保留）
   const [displayLimit, setDisplayLimit] = useState<string>(() => {
     return localStorage.getItem(displayLimitKey) || '5000'
   })
   const [isAtBottom, setIsAtBottom] = useState(true)
+  const [messageLayout, setMessageLayout] = useState<MessageLayout>(() =>
+    localStorage.getItem(MESSAGE_LAYOUT_STORAGE_KEY) === 'scroll' ? 'scroll' : 'wrap'
+  )
   const [isLoading, setIsLoading] = useState(false)
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
   const [newLogCount, setNewLogCount] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
+  const headerRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevLogCount = useRef(0)
 
@@ -140,6 +175,14 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
     localStorage.setItem(displayLimitKey, displayLimit)
   }, [displayLimit, displayLimitKey])
 
+  useEffect(() => {
+    localStorage.setItem(MESSAGE_LAYOUT_STORAGE_KEY, messageLayout)
+    // 切回折行后容器不再横向滚动，列头平移要跟着复位
+    if (headerRef.current) {
+      headerRef.current.style.transform = `translateX(${-(containerRef.current?.scrollLeft ?? 0)}px)`
+    }
+  }, [messageLayout])
+
   // 智能滚动：用户在底部时自动跟随
   useEffect(() => {
     if (isAtBottom && containerRef.current) {
@@ -151,6 +194,7 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
   const handleScroll = useCallback(() => {
     const el = containerRef.current
     if (!el) return
+    if (headerRef.current) headerRef.current.style.transform = `translateX(${-el.scrollLeft}px)`
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
     setIsAtBottom(atBottom)
     if (atBottom) setNewLogCount(0)
@@ -189,6 +233,9 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
     URL.revokeObjectURL(url)
   }
 
+  // 固定分类（kiro-rs 页）按终端原样行显示，与 kiro-rs 自身输出一致
+  const terminal = Boolean(category)
+
   const categories = useMemo(() => Array.from(new Set(logs.map((l) => l.category))).sort(), [logs])
 
   const filteredLogs = useMemo(() => {
@@ -208,6 +255,7 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
       if (rangeMs > 0 && now - new Date(log.timestamp).getTime() > rangeMs) return false
       if (levelFilter !== 'ALL' && log.level !== levelFilter) return false
       if (categoryFilter !== 'all' && log.category !== categoryFilter) return false
+      if (terminal && tagFilter !== TAG_ALL && messageTag(log.message) !== tagFilter) return false
       if (lower) {
         return (
           log.message.toLowerCase().includes(lower) ||
@@ -222,7 +270,19 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
       if (limit > 0) result = result.slice(-limit)
     }
     return result
-  }, [logs, levelFilter, categoryFilter, timeRange, displayLimit, filter])
+  }, [logs, levelFilter, categoryFilter, tagFilter, terminal, timeRange, displayLimit, filter])
+
+  // Tag 按出现次数降序，无 Tag 的放最后
+  const tagCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const log of logs) {
+      const tag = messageTag(log.message)
+      counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+    return Array.from(counts.entries()).sort(([a, x], [b, y]) =>
+      a === TAG_NONE ? 1 : b === TAG_NONE ? -1 : y - x
+    )
+  }, [logs])
 
   const levelCounts = {
     ALL: logs.length,
@@ -363,6 +423,36 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
           <option value="100000">100K</option>
         </select>
 
+        {/* 长消息显示方式：折行 / 横向滚动 */}
+        <div
+          className="flex items-center gap-0.5 bg-muted/40 rounded-lg p-1"
+          role="radiogroup"
+          aria-label={isEn ? 'Long message display' : '长消息显示方式'}
+        >
+          {MESSAGE_LAYOUTS.map((layout) => {
+            const Icon = layout === 'wrap' ? WrapText : MoveHorizontal
+            const label =
+              layout === 'wrap' ? (isEn ? 'Wrap' : '折行') : isEn ? 'Scroll' : '横向滚动'
+            const active = messageLayout === layout
+            return (
+              <button
+                key={layout}
+                role="radio"
+                aria-checked={active}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  active
+                    ? LEVEL_BTN_ACTIVE.ALL
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+                onClick={() => setMessageLayout(layout)}
+              >
+                <Icon className="h-3.5 w-3.5" aria-hidden />
+                {label}
+              </button>
+            )
+          })}
+        </div>
+
         {/* 级别筛选 */}
         <div className="flex items-center gap-0.5 bg-muted/40 rounded-lg p-1 ml-auto">
           {(['ALL', 'DEBUG', 'INFO', 'WARN', 'ERROR'] as LogLevel[]).map((level) => (
@@ -382,6 +472,43 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
         </div>
       </div>
 
+      {/* Tag 筛选（kiro-rs 页）：按消息开头的 [Tag] 过滤，Tag 多时横向滚动 */}
+      {terminal && tagCounts.length > 0 && (
+        <div
+          className="flex items-center gap-0.5 bg-muted/40 rounded-lg p-1 overflow-x-auto shrink-0"
+          role="radiogroup"
+          aria-label={isEn ? 'Filter by tag' : '按 Tag 筛选'}
+        >
+          {[[TAG_ALL, logs.length] as const, ...tagCounts].map(([tag, count]) => {
+            const active = tagFilter === tag
+            return (
+              <button
+                key={tag}
+                role="radio"
+                aria-checked={active}
+                className={`shrink-0 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  active
+                    ? LEVEL_BTN_ACTIVE.ALL
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+                onClick={() => setTagFilter(tag)}
+              >
+                {tag === TAG_ALL
+                  ? isEn
+                    ? 'All tags'
+                    : '全部 Tag'
+                  : tag === TAG_NONE
+                    ? isEn
+                      ? 'No tag'
+                      : '无 Tag'
+                    : tag}
+                <span className="ml-1 opacity-70">{String(count)}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {/* 日志列表（虚拟滚动） */}
       <div className="flex-1 min-h-0 relative rounded-xl border border-border/70 bg-card/55 shadow-sm overflow-hidden flex flex-col">
         {filteredLogs.length === 0 ? (
@@ -396,18 +523,30 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
           </div>
         ) : (
           <>
-            {/* 列头：紧凑行没有留白余量，用一行表头替代每行的视觉分隔 */}
-            <div
-              className="grid shrink-0 border-b border-border/60 bg-foreground/[0.03] px-3 py-1.5 font-mono text-3xs uppercase tracking-wider text-muted-foreground/60"
-              style={{ gridTemplateColumns: ROW_GRID_TEMPLATE, columnGap: ROW_GAP_PX }}
-            >
-              <span>{isEn ? 'Time' : '时间'}</span>
-              <span>{isEn ? 'Lvl' : '级别'}</span>
-              <span>{isEn ? 'Source' : '来源'}</span>
-              <span>{isEn ? 'Message' : '消息'}</span>
-            </div>
+            {/* 列头：紧凑行没有留白余量，用一行表头替代每行的视觉分隔；终端样式不要列头。
+             * 横向滚动模式下列头在滚动容器外，由 handleScroll 按 scrollLeft 平移对齐 */}
+            {!terminal && (
+              <div className="shrink-0 overflow-hidden border-b border-border/60 bg-foreground/[0.03]">
+                <div
+                  ref={headerRef}
+                  className="grid px-3 py-1.5 font-mono text-3xs uppercase tracking-wider text-muted-foreground/60"
+                  style={{
+                    gridTemplateColumns:
+                      messageLayout === 'scroll' ? ROW_GRID_TEMPLATE_SCROLL : ROW_GRID_TEMPLATE,
+                    columnGap: ROW_GAP_PX
+                  }}
+                >
+                  <span>{isEn ? 'Time' : '时间'}</span>
+                  <span>{isEn ? 'Lvl' : '级别'}</span>
+                  <span>{isEn ? 'Source' : '来源'}</span>
+                  <span>{isEn ? 'Message' : '消息'}</span>
+                </div>
+              </div>
+            )}
             <VirtualLogList
               logs={filteredLogs}
+              terminal={terminal}
+              messageLayout={messageLayout}
               expandedIdx={expandedIdx}
               onToggleExpand={(idx) => setExpandedIdx(expandedIdx === idx ? null : idx)}
               containerRef={containerRef}
@@ -469,6 +608,8 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
 // 虚拟滚动日志列表 — 只渲染可视区域内的行
 function VirtualLogList({
   logs,
+  terminal,
+  messageLayout,
   expandedIdx,
   onToggleExpand,
   containerRef,
@@ -477,6 +618,8 @@ function VirtualLogList({
   formatTime
 }: {
   logs: LogEntry[]
+  terminal: boolean
+  messageLayout: MessageLayout
   expandedIdx: number | null
   onToggleExpand: (idx: number) => void
   containerRef: React.RefObject<HTMLDivElement | null>
@@ -484,12 +627,18 @@ function VirtualLogList({
   isAtBottom: boolean
   formatTime: (ts: string) => string
 }) {
+  const isScroll = messageLayout === 'scroll'
   const virtualizer = useVirtualizer({
     count: logs.length,
     getScrollElement: () => containerRef.current,
     estimateSize: (idx) => (expandedIdx === idx ? ROW_HEIGHT_EXPANDED_PX : ROW_HEIGHT_PX),
     overscan: 24
   })
+
+  // 切换显示方式后行高整体变化，丢弃已测量的缓存
+  useEffect(() => {
+    virtualizer.measure()
+  }, [messageLayout, virtualizer])
 
   // 自动滚到底
   useEffect(() => {
@@ -501,7 +650,9 @@ function VirtualLogList({
   return (
     <div
       ref={containerRef}
-      className="h-full overflow-y-auto font-mono text-2xs leading-none"
+      className={`h-full font-mono text-2xs leading-none ${
+        isScroll ? 'overflow-auto' : 'overflow-y-auto'
+      }`}
       onScroll={onScroll}
     >
       <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
@@ -520,6 +671,8 @@ function VirtualLogList({
                 top: 0,
                 left: 0,
                 width: '100%',
+                // 横向滚动：行按内容撑宽，撑出容器的部分由容器横向滚动
+                minWidth: isScroll ? 'max-content' : undefined,
                 transform: `translateY(${virtualRow.start}px)`
               }}
               className={`group cursor-pointer ${
@@ -531,41 +684,71 @@ function VirtualLogList({
               }`}
               onClick={() => onToggleExpand(idx)}
             >
-              <div
-                className="grid items-baseline px-3"
-                style={{
-                  gridTemplateColumns: ROW_GRID_TEMPLATE,
-                  columnGap: ROW_GAP_PX,
-                  height: ROW_HEIGHT_PX
-                }}
-              >
-                <span className="text-muted-foreground/55 tabular-nums select-all">
-                  {formatTime(log.timestamp)}
-                </span>
-                {/* 级别用文字而非圆点：4 个字母本身即是标签，比色点更易辨认且不占额外列 */}
-                <span className={`font-semibold ${LEVEL_LABEL_COLORS[log.level]}`}>
-                  {log.level}
-                </span>
-                {/* 分类完整显示（不再 96px 截断成 Backgroun…），超长才省略 */}
-                <span
-                  className={`truncate ${CATEGORY_COLORS[log.category] ?? CATEGORY_COLOR_FALLBACK}`}
-                  title={log.category}
-                >
-                  {log.category}
-                </span>
-                <span className="flex min-w-0 items-baseline gap-1">
-                  <span className={`truncate ${MESSAGE_COLORS[log.level]}`}>{log.message}</span>
+              {/* 行高只设下限：短消息仍是 20px 单行，折行模式下长消息撑高，行高由 measureElement 实测 */}
+              {terminal ? (
+                <div className="px-3 py-0.5" style={{ minHeight: ROW_HEIGHT_PX }}>
+                  <span
+                    className={`leading-4 ${
+                      isScroll ? 'whitespace-pre' : 'whitespace-pre-wrap break-all'
+                    } ${MESSAGE_COLORS[log.level]}`}
+                  >
+                    <span className={`tabular-nums ${TERMINAL_TIME_COLOR}`}>[{log.timestamp}]</span>{' '}
+                    <span className={TERMINAL_LEVEL_COLORS[log.level]}>[{log.level}]</span>{' '}
+                    {log.message}
+                  </span>
                   {hasData && (
-                    <span className="shrink-0 text-muted-foreground/40 group-hover:text-muted-foreground/80">
+                    <span className="ml-1 text-muted-foreground/40 group-hover:text-muted-foreground/80">
                       {isExpanded ? '▾' : '▸'}
                     </span>
                   )}
-                </span>
-              </div>
-              {isExpanded && hasData && (
+                </div>
+              ) : (
                 <div
-                  className="mb-1.5 mr-3 overflow-x-auto rounded-md border border-border/50 bg-foreground/[0.04] p-2.5"
-                  style={{ marginLeft: EXPANDED_INDENT_PX }}
+                  className="grid items-baseline px-3 py-0.5"
+                  style={{
+                    gridTemplateColumns: isScroll ? ROW_GRID_TEMPLATE_SCROLL : ROW_GRID_TEMPLATE,
+                    columnGap: ROW_GAP_PX,
+                    minHeight: ROW_HEIGHT_PX
+                  }}
+                >
+                  <span className="text-muted-foreground/55 tabular-nums select-all">
+                    {formatTime(log.timestamp)}
+                  </span>
+                  {/* 级别用文字而非圆点：4 个字母本身即是标签，比色点更易辨认且不占额外列 */}
+                  <span className={`font-semibold ${LEVEL_LABEL_COLORS[log.level]}`}>
+                    {log.level}
+                  </span>
+                  {/* 分类完整显示（不再 96px 截断成 Backgroun…），超长才省略 */}
+                  <span
+                    className={`truncate ${CATEGORY_COLORS[log.category] ?? CATEGORY_COLOR_FALLBACK}`}
+                    title={log.category}
+                  >
+                    {log.category}
+                  </span>
+                  <span className="flex min-w-0 items-baseline gap-1">
+                    {/* 不截断：折行模式 break-all 让超长 URL/参数串也能断开；横向滚动模式保持单行 */}
+                    <span
+                      className={`min-w-0 leading-4 ${
+                        isScroll ? 'whitespace-pre' : 'whitespace-pre-wrap break-all'
+                      } ${MESSAGE_COLORS[log.level]}`}
+                    >
+                      {log.message}
+                    </span>
+                    {hasData && (
+                      <span className="shrink-0 text-muted-foreground/40 group-hover:text-muted-foreground/80">
+                        {isExpanded ? '▾' : '▸'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+              {isExpanded && hasData && (
+                // contain:inline-size 让 data 区不参与行的 max-content 宽度计算，宽度跟随行
+                <div
+                  className="mb-1.5 mr-3 overflow-x-auto rounded-md border border-border/50 bg-foreground/[0.04] p-2.5 [contain:inline-size]"
+                  style={{
+                    marginLeft: terminal ? TERMINAL_EXPANDED_INDENT_PX : EXPANDED_INDENT_PX
+                  }}
                 >
                   <pre className="leading-4 whitespace-pre-wrap break-all text-muted-foreground">
                     {String(

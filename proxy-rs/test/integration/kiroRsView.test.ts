@@ -15,6 +15,18 @@ import { proxyLogStore } from '../../src/main/proxy/logger'
 const ADMIN_URL = 'http://127.0.0.1:12888/admin'
 
 describe('parseKiroRsLine', () => {
+  it('当前格式：去掉时间戳与级别，保留 [Tag] 消息', () => {
+    const line =
+      '[2026-09-10T09:36:01.649Z] \x1b[34m[INFO]\x1b[0m [POST] /v1/messages?beta=true 200 (3318ms)'
+    expect(parseKiroRsLine(line, 'stderr')).toEqual({
+      level: 'INFO',
+      message: '[POST] /v1/messages?beta=true 200 (3318ms)'
+    })
+    expect(
+      parseKiroRsLine('[2026-09-10T09:36:01.649Z] [WARN] [TokenManager] 凭据 #2 刷新失败', 'stdout')
+    ).toEqual({ level: 'WARN', message: '[TokenManager] 凭据 #2 刷新失败' })
+  })
+
   it('去掉颜色码与时间戳，按原级别记录，模块名去掉包前缀', () => {
     const line =
       '\x1b[2m2026-09-29T03:27:51.335845Z\x1b[0m \x1b[33m WARN\x1b[0m \x1b[2mkiro_rs::kiro::token_manager\x1b[0m\x1b[2m:\x1b[0m 凭据 #2 刷新失败'

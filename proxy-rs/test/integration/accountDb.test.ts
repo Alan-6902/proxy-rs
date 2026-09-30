@@ -194,6 +194,18 @@ describe('projection', () => {
     db.close()
   })
 
+  it('上游 nextDateReset 为 Unix 秒时按秒换算重置日期', () => {
+    const path = createDb()
+    seed(path, { uuid: 'a', refreshToken: 'rt', raw: { ...RAW_USAGE, nextDateReset: 1790812800 } })
+    const db = new AccountDb(path)
+    const account = toAccount(db.listRows()[0])
+    const usage = account.usage as { nextResetDate?: string }
+    const subscription = account.subscription as { expiresAt?: number }
+    expect(usage.nextResetDate).toBe('2026-10-01T00:00:00.000Z')
+    expect(subscription.expiresAt).toBe(1790812800000)
+    db.close()
+  })
+
   it('禁用原因映射为卡片状态；API Key 账号标记 credentialKind', () => {
     const path = createDb()
     seed(path, {
@@ -207,6 +219,19 @@ describe('projection', () => {
     const [bad, key] = db.listRows().map(toAccount)
     expect(bad.status).toBe('expired')
     expect((key.credentials as { credentialKind: string }).credentialKind).toBe('kiro_api_key')
+    db.close()
+  })
+
+  it('反代禁用只对号池内账号显示；移出号池后不再标错误', () => {
+    const path = createDb()
+    seed(path, { uuid: 'in', refreshToken: 'rt', inPool: true, enabled: false })
+    seed(path, { uuid: 'out', refreshToken: 'rt', inPool: false, enabled: false })
+    const db = new AccountDb(path)
+    const [inPool, outPool] = db.listRows().map(toAccount)
+    expect(inPool.status).toBe('error')
+    expect(inPool.lastError).toBe('反代已禁用：Manual')
+    expect(outPool.status).toBe('active')
+    expect(outPool.lastError).toBeUndefined()
     db.close()
   })
 

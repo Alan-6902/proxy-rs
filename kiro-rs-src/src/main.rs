@@ -30,6 +30,7 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .event_format(common::log_format::ProxyLogFormat)
         .init();
 
     // 加载配置

@@ -22,6 +22,8 @@
     "build:mac:current": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac",
     "dist:mac": "bash scripts/build-dist-mac.sh",
     "dist:current": "bash scripts/build-dist-current-mac.sh",
+    "install:current": "node scripts/install-current-mac.mjs",
+    "deploy:current": "npm run dist:current && npm run install:current",
     "build:linux": "electron-vite build && electron-builder --linux",
     "test:unit": "vitest run",
     "build:kiro-rs": "bash scripts/build-kiro-rs.sh"

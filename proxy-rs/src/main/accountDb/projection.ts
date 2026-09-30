@@ -68,7 +68,10 @@ function statusOf(row: AccountDbRow): { status: string; lastError?: string } {
     if (row.disabledReason === 'InvalidRefreshToken') {
       return { status: 'expired', lastError: 'Refresh Token 已失效，需要重新登录' }
     }
-    return { status: 'error', lastError: `反代已禁用：${row.disabledReason ?? 'Manual'}` }
+    // 禁用是号池内的调度状态：移出号池后不再用它给卡片标错误
+    if (row.inPool) {
+      return { status: 'error', lastError: `反代已禁用：${row.disabledReason ?? 'Manual'}` }
+    }
   }
   if (row.status === 'needs_review') {
     return { status: 'error', lastError: row.lastError ?? '需要人工确认' }

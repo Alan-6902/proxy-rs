@@ -142,6 +142,10 @@ pub fn print_event_verbose(event: &Event) {
             println!("\n[事件] ContextUsage");
             println!("  context_usage_percentage: {}", e.context_usage_percentage);
         }
+        Event::Metadata(e) => {
+            println!("\n[事件] Metadata");
+            println!("  token_usage: {:?}", e.token_usage);
+        }
         Event::Unknown { event_type, payload } => {
             println!("\n[事件] Unknown");
             println!("  event_type: {:?}", event_type);
@@ -187,6 +191,9 @@ pub fn print_event(event: &Event) {
         }
         Event::ContextUsage(e) => {
             println!("\n[上下文使用率] {}", e);
+        }
+        Event::Metadata(e) => {
+            println!("\n[元数据] {:?}", e.token_usage);
         }
         Event::Unknown { event_type, .. } => {
             println!("\n[未知事件] {}", event_type);

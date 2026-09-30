@@ -2,7 +2,7 @@
  * kiro-rs 在 App 里的两个入口：日志页与内嵌的 Admin 页面。
  *
  * - 日志：kiro-rs 的 stdout / stderr 逐行转进 App 日志存储，分类固定为 kiro-rs。
- *   这里去掉终端颜色码和 Rust 自带的时间戳，按原级别（INFO / WARN / ERROR）落库，
+ *   这里去掉终端颜色码和 kiro-rs 自带的时间戳，按原级别（INFO / WARN / ERROR）落库，
  *   这样日志页能按级别筛选，WARN / ERROR 也会着色。
  * - Admin：渲染进程用 <webview> 嵌入 kiro-rs 自带的 /admin 页面。这里负责两件事：
  *   只允许加载本机 kiro-rs 的 /admin（其它地址一律拦下，外链交给系统浏览器），
@@ -30,8 +30,14 @@ export interface ParsedKiroRsLine {
 // 终端颜色码（ESC [ ... m）
 // eslint-disable-next-line no-control-regex
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g
-// tracing 默认格式：2026-09-29T03:27:51.335845Z  INFO kiro_rs::kiro::token_manager: 消息
+// kiro-rs 格式（kiro-rs-src/src/common/log_format.rs）：[2026-09-10T09:35:58.332Z] [INFO] [API] 消息
+const KIRO_RS_LINE = /^\[[^\]]+\]\s+\[(TRACE|DEBUG|INFO|WARN|ERROR)\]\s?(.*)$/
+// 旧版 kiro-rs 的 tracing 默认格式：2026-09-29T03:27:51.335845Z  INFO kiro_rs::kiro::token_manager: 消息
 const TRACING_LINE = /^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+([\w:]+):\s?(.*)$/
+
+function toLevel(rawLevel: string): KiroRsLogLevel {
+  return rawLevel === 'ERROR' ? 'ERROR' : rawLevel === 'WARN' ? 'WARN' : 'INFO'
+}
 
 /**
  * 解析一行 kiro-rs 输出。认不出格式的行（panic、第三方库直接打印）按原样保留，
@@ -39,16 +45,19 @@ const TRACING_LINE = /^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+([\w:]+):\s?(.*)$/
  */
 export function parseKiroRsLine(line: string, stream: 'stdout' | 'stderr'): ParsedKiroRsLine {
   const plain = line.replace(ANSI_PATTERN, '').trimEnd()
-  const match = TRACING_LINE.exec(plain)
-  if (!match) {
+  const current = KIRO_RS_LINE.exec(plain)
+  if (current) {
+    const [, rawLevel, text] = current
+    return { level: toLevel(rawLevel), message: text }
+  }
+  const legacy = TRACING_LINE.exec(plain)
+  if (!legacy) {
     return { level: stream === 'stderr' ? 'WARN' : 'INFO', message: plain }
   }
-  const [, rawLevel, target, text] = match
-  const level: KiroRsLogLevel =
-    rawLevel === 'ERROR' ? 'ERROR' : rawLevel === 'WARN' ? 'WARN' : 'INFO'
+  const [, rawLevel, target, text] = legacy
   // 模块路径去掉包名前缀，kiro_rs::kiro::token_manager → kiro::token_manager
   const shortTarget = target.replace(/^kiro_rs::?/, '') || 'main'
-  return { level, message: `${shortTarget}: ${text}` }
+  return { level: toLevel(rawLevel), message: `${shortTarget}: ${text}` }
 }
 
 /** 把一行 kiro-rs 输出按原级别写进 App 日志（经 console 拦截器落库） */

@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model_catalog::{self, CatalogSnapshot, ListModelsHttpError};
 use crate::kiro::token_manager::{AdoptOutcome, MultiTokenManager, UsageLimitsHttpError};
 
 use super::error::AdminServiceError;
@@ -16,8 +17,8 @@ use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdoptCredentialRequest, AdoptCredentialResponse,
     BalanceResponse, CredentialStatusItem, CredentialsStatusResponse, EnsureFreshRequest,
     EnsureFreshResponse, ImportAccountRequest, ImportAccountResponse, LoadBalancingModeResponse,
-    SetExternalRefreshRequest, SetExternalRefreshResponse, SetLoadBalancingModeRequest,
-    SetProxyRequest, StoreInfoResponse,
+    ModelCatalogResponse, SetExternalRefreshRequest, SetExternalRefreshResponse,
+    SetLoadBalancingModeRequest, SetProxyRequest, StoreInfoResponse,
 };
 use crate::kiro::account_store::NewAccountMeta;
 
@@ -216,6 +217,64 @@ impl AdminService {
             usage_percentage,
             next_reset_at: usage.next_date_reset,
         })
+    }
+
+
+    /// 当前模型目录（即 `/v1/models` 的输出）
+    pub fn model_catalog(&self) -> ModelCatalogResponse {
+        let snapshot = model_catalog::snapshot();
+        ModelCatalogResponse {
+            fetched_at: snapshot.as_ref().map(|s| s.fetched_at),
+            credential_ids: snapshot
+                .as_ref()
+                .map(|s| s.credential_ids.clone())
+                .unwrap_or_default(),
+            upstream_count: snapshot.as_ref().map_or(0, |s| s.models.len()),
+            models: model_catalog::exposed_models(),
+        }
+    }
+
+    /// 用选定账号从 Kiro 拉取模型目录并替换当前目录
+    ///
+    /// 任一账号失败就整体放弃、保留旧目录，避免少一个账号的模型而漏报。
+    pub async fn refresh_model_catalog(
+        &self,
+        credential_ids: Vec<u64>,
+    ) -> Result<ModelCatalogResponse, AdminServiceError> {
+        let mut ids = credential_ids;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "至少选择一个账号".to_string(),
+            ));
+        }
+
+        let mut merged = Vec::new();
+        for &id in &ids {
+            let models = self
+                .token_manager
+                .list_available_models_for(id)
+                .await
+                .map_err(|e| {
+                    if e.is::<ListModelsHttpError>() {
+                        AdminServiceError::UpstreamError(format!("凭据 #{}: {}", id, e))
+                    } else {
+                        self.classify_balance_error(e, id)
+                    }
+                })?;
+            tracing::info!("凭据 #{} 返回 {} 个模型", id, models.len());
+            model_catalog::merge_models(&mut merged, models);
+        }
+
+        model_catalog::replace(CatalogSnapshot {
+            fetched_at: Utc::now().timestamp(),
+            credential_ids: ids,
+            models: merged,
+        })
+        .map_err(|e| AdminServiceError::InternalError(format!("保存模型目录失败: {}", e)))?;
+
+        Ok(self.model_catalog())
     }
 
     /// 添加新凭据

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::kiro::model_catalog;
 use crate::kiro::model::requests::conversation::{
     AssistantMessage, ConversationState, CurrentMessage, HistoryAssistantMessage,
     HistoryUserMessage, KiroImage, Message, UserInputMessage, UserInputMessageContext, UserMessage,
@@ -76,8 +77,12 @@ Never ask the user whether to switch approaches. \
 Complete all chunked operations without commentary.";
 
 /// 模型映射：将 Anthropic / OpenAI 模型名映射到 Kiro 模型 ID
-/// 严格对照版本号
+/// 严格对照版本号；手动刷新过的模型目录优先，下面的规则只兜底旧写法
 pub fn map_model(model: &str) -> Option<String> {
+    if let Some(id) = model_catalog::resolve_model_id(model) {
+        return Some(id);
+    }
+
     let model_lower = model.to_lowercase();
 
     // GPT-5.6（Kiro 2026-07-14 起支持）：sol / terra / luna
@@ -139,7 +144,11 @@ pub fn map_model(model: &str) -> Option<String> {
 /// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 / Opus 5.5 / Fable 5.1 同 1M
 /// GPT-5.6（sol/terra/luna）在 Kiro 侧为 272K（非 OpenAI API 的 1.05M）
 pub fn get_context_window_size(model: &str) -> i32 {
-    match map_model(model) {
+    let mapped = map_model(model);
+    if let Some(window) = mapped.as_deref().and_then(model_catalog::context_window) {
+        return window;
+    }
+    match mapped {
         Some(mapped) if mapped.starts_with("gpt-5.6-") => 272_000,
         Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-opus-5" || mapped == "claude-opus-5.5" || mapped == "claude-fable-5.1" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
         _ => 200_000,

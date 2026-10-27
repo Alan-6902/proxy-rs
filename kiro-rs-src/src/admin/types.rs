@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::kiro::model_catalog::ExposedModel;
+
 // ============ 凭据状态 ============
 
 /// 所有凭据状态响应
@@ -443,4 +445,27 @@ pub struct StoreInfoResponse {
     pub path: Option<String>,
     /// 由 kiro-cli 刷新的账号（kiro-rs 不刷新它）
     pub external_refresh_credential_id: Option<u64>,
+}
+
+// ============ 模型目录 ============
+
+/// POST /models/refresh
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshModelCatalogRequest {
+    /// 用哪些账号拉取（结果取并集）
+    pub credential_ids: Vec<u64>,
+}
+
+/// GET /models、POST /models/refresh
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogResponse {
+    /// 最近一次刷新时间（Unix 秒）；None 表示从未刷新，models 为兜底目录
+    pub fetched_at: Option<i64>,
+    pub credential_ids: Vec<u64>,
+    /// 上游返回的模型总数（多账号去重后）
+    pub upstream_count: usize,
+    /// `/v1/models` 实际输出
+    pub models: Vec<ExposedModel>,
 }

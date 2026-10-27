@@ -57,6 +57,25 @@ export interface BalanceResponse {
   nextResetAt: number | null
 }
 
+// /v1/models 输出的单个模型
+export interface CatalogModel {
+  id: string
+  kiroModelId: string
+  displayName: string
+  ownedBy: string
+  created: number
+  contextWindow: number
+  maxTokens: number
+}
+
+// 模型目录：fetchedAt 为空表示从未刷新，models 是兜底目录
+export interface ModelCatalogResponse {
+  fetchedAt: number | null
+  credentialIds: number[]
+  upstreamCount: number
+  models: CatalogModel[]
+}
+
 // 成功响应
 export interface SuccessResponse {
   success: boolean

@@ -5,6 +5,7 @@ import {
   Database,
   FileUp,
   Gauge,
+  Layers,
   LogOut,
   Moon,
   Plus,
@@ -27,6 +28,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
+import { ModelCatalogDialog } from '@/components/model-catalog-dialog'
 import { useCredentials, useDeleteCredential, useResetFailure, useSetDisabled, useLoadBalancingMode, useSetLoadBalancingMode, useStoreInfo } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
@@ -42,6 +44,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
+  const [modelCatalogDialogOpen, setModelCatalogDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
@@ -630,6 +633,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 <span className="hidden md:inline">{showAllAccounts ? '全部账号' : '仅号池'}</span>
               </Button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setModelCatalogDialogOpen(true)}
+              title="从 Kiro 同步模型目录（/v1/models）"
+              className="h-9 gap-2 rounded-xl bg-card/70 px-2.5 shadow-sm sm:px-3"
+            >
+              <Layers className="h-4 w-4 text-primary" />
+              <span className="hidden md:inline">模型目录</span>
+            </Button>
             <Button variant="ghost" size="icon" onClick={toggleDarkMode} className="h-9 w-9 rounded-xl" aria-label="切换深浅色主题" title="切换深浅色主题">
               {darkMode ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
             </Button>
@@ -803,6 +816,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <KamImportDialog
         open={kamImportDialogOpen}
         onOpenChange={setKamImportDialogOpen}
+      />
+
+      {/* 模型目录对话框 */}
+      <ModelCatalogDialog
+        open={modelCatalogDialogOpen}
+        onOpenChange={setModelCatalogDialogOpen}
       />
 
       {/* 批量验活对话框 */}

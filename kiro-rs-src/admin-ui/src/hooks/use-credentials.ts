@@ -12,6 +12,8 @@ import {
   setCredentialInPool,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  getModelCatalog,
+  refreshModelCatalog,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -120,6 +122,26 @@ export function useDeleteCredential() {
       deleteCredential(id, purge ?? false),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 当前模型目录
+export function useModelCatalog(enabled: boolean) {
+  return useQuery({
+    queryKey: ['model-catalog'],
+    queryFn: getModelCatalog,
+    enabled,
+  })
+}
+
+// 用选定账号刷新模型目录
+export function useRefreshModelCatalog() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (credentialIds: number[]) => refreshModelCatalog(credentialIds),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['model-catalog'], data)
     },
   })
 }

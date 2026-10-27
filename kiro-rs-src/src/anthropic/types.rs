@@ -48,7 +48,10 @@ pub struct Model {
     pub display_name: String,
     #[serde(rename = "type")]
     pub model_type: String,
+    /// 最大输出 token
     pub max_tokens: i32,
+    /// 上下文窗口（最大输入 token）
+    pub context_window: i32,
 }
 
 /// 模型列表响应

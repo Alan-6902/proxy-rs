@@ -9,7 +9,8 @@ use super::{
     handlers::{
         add_credential, adopt_account_credential, delete_credential, ensure_credential_fresh,
         force_refresh_token, get_all_credentials, get_credential_balance, get_load_balancing_mode,
-        get_store_info, import_account, reset_failure_count, set_credential_disabled,
+        get_model_catalog, get_store_info, import_account, refresh_model_catalog,
+        reset_failure_count, set_credential_disabled,
         set_credential_in_pool, set_credential_priority, set_credential_proxy,
         set_external_refresh_account, set_load_balancing_mode,
     },
@@ -34,6 +35,8 @@ use super::{
 /// - `POST /accounts/adopt` - 收编 kiro-cli 自行刷新的凭据（账号库模式）
 /// - `PUT /accounts/external-refresh` - 指定由 kiro-cli 刷新的账号（账号库模式）
 /// - `GET /store/info` - 账号库信息
+/// - `GET /models` - 当前模型目录（即 /v1/models 输出）
+/// - `POST /models/refresh` - 用选定账号从 Kiro 拉取模型目录
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 ///
@@ -66,6 +69,8 @@ pub fn create_admin_router(state: AdminState) -> Router {
             put(set_external_refresh_account),
         )
         .route("/store/info", get(get_store_info))
+        .route("/models", get(get_model_catalog))
+        .route("/models/refresh", post(refresh_model_catalog))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

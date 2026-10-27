@@ -23,6 +23,7 @@ use crate::kiro::account_store::{
 };
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model_catalog::{KiroModelInfo, ListModelsHttpError, list_available_models};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -377,6 +378,18 @@ impl fmt::Display for UsageLimitsHttpError {
 
 impl std::error::Error for UsageLimitsHttpError {}
 
+/// codewhispererruntime 非流式接口的 (User-Agent, x-amz-user-agent)
+pub(crate) fn runtime_user_agents(credentials: &KiroCredentials, config: &Config) -> (String, String) {
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+    let kiro_version = &config.kiro_version;
+    let user_agent = format!(
+        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+        config.system_version, config.node_version, kiro_version, machine_id
+    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
+    (user_agent, amz_user_agent)
+}
+
 /// 获取使用额度信息
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
@@ -389,10 +402,6 @@ pub(crate) async fn get_usage_limits(
     // 优先级：凭据.api_region > config.api_region > config.region
     let region = credentials.effective_api_region(config);
     let host = format!("q.{}.amazonaws.com", region);
-    let machine_id = machine_id::generate_from_credentials(credentials, config);
-    let kiro_version = &config.kiro_version;
-    let os_name = &config.system_version;
-    let node_version = &config.node_version;
 
     // 构建 URL
     let mut url = format!(
@@ -405,12 +414,7 @@ pub(crate) async fn get_usage_limits(
         url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
     }
 
-    // 构建 User-Agent headers
-    let user_agent = format!(
-        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
-        os_name, node_version, kiro_version, machine_id
-    );
-    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
+    let (user_agent, amz_user_agent) = runtime_user_agents(credentials, config);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
@@ -2122,6 +2126,35 @@ impl MultiTokenManager {
         // 持久化更改
         self.persist_state_or_credentials(id)?;
         Ok(())
+    }
+
+    /// 用指定凭据拉取 Kiro 模型目录（Admin 手动刷新用）
+    ///
+    /// 401 时刷新 token 重试一次；外部刷新账号不由 kiro-rs 刷新，直接返回错误。
+    pub async fn list_available_models_for(&self, id: u64) -> anyhow::Result<Vec<KiroModelInfo>> {
+        let ctx = self.try_ensure_token(id, &self.entry_credentials(id)?).await?;
+        let proxy = ctx.credentials.effective_proxy(self.proxy.as_ref());
+        match list_available_models(&ctx.credentials, &self.config, &ctx.token, proxy.as_ref())
+            .await
+        {
+            Err(error)
+                if !ctx.credentials.is_api_key_credential()
+                    && !self.is_external_refresh(id)
+                    && error
+                        .downcast_ref::<ListModelsHttpError>()
+                        .is_some_and(|error| error.status == 401) =>
+            {
+                self.refresh_token_if_current(id, Some(&ctx.token)).await?;
+                let current = self.entry_credentials(id)?;
+                let token = current
+                    .access_token
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?;
+                let proxy = current.effective_proxy(self.proxy.as_ref());
+                list_available_models(&current, &self.config, &token, proxy.as_ref()).await
+            }
+            result => result,
+        }
     }
 
     /// 获取指定凭据的使用额度（Admin API）

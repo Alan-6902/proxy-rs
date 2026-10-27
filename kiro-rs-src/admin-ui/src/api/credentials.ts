@@ -9,6 +9,7 @@ import type {
   AddCredentialRequest,
   AddCredentialResponse,
   StoreInfoResponse,
+  ModelCatalogResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -122,6 +123,18 @@ export async function deleteCredential(
   const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`, {
     params: purge ? { purge: true } : undefined,
   })
+  return data
+}
+
+// 当前模型目录（即 /v1/models 的输出）
+export async function getModelCatalog(): Promise<ModelCatalogResponse> {
+  const { data } = await api.get<ModelCatalogResponse>('/models')
+  return data
+}
+
+// 用选定账号从 Kiro 拉取模型目录（多账号取并集）
+export async function refreshModelCatalog(credentialIds: number[]): Promise<ModelCatalogResponse> {
+  const { data } = await api.post<ModelCatalogResponse>('/models/refresh', { credentialIds })
   return data
 }
 

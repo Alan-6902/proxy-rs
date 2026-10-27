@@ -10,9 +10,10 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, AdoptCredentialRequest, BalanceQuery, DeleteCredentialQuery,
-        EnsureFreshRequest, ImportAccountRequest, ListCredentialsQuery, SetDisabledRequest,
-        SetExternalRefreshRequest, SetInPoolRequest, SetLoadBalancingModeRequest,
-        SetPriorityRequest, SetProxyRequest, SuccessResponse,
+        EnsureFreshRequest, ImportAccountRequest, ListCredentialsQuery,
+        RefreshModelCatalogRequest, SetDisabledRequest, SetExternalRefreshRequest,
+        SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest,
+        SuccessResponse,
     },
 };
 
@@ -83,6 +84,29 @@ pub async fn get_credential_balance(
     Query(query): Query<BalanceQuery>,
 ) -> impl IntoResponse {
     match state.service.get_balance(id, query.fresh).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+
+/// GET /api/admin/models
+/// 当前模型目录（即 /v1/models 的输出）
+pub async fn get_model_catalog(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.model_catalog())
+}
+
+/// POST /api/admin/models/refresh
+/// 用选定账号从 Kiro 拉取模型目录
+pub async fn refresh_model_catalog(
+    State(state): State<AdminState>,
+    Json(payload): Json<RefreshModelCatalogRequest>,
+) -> impl IntoResponse {
+    match state
+        .service
+        .refresh_model_catalog(payload.credential_ids)
+        .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

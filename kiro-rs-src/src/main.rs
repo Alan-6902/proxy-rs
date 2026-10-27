@@ -14,6 +14,7 @@ use clap::Parser;
 use kiro::account_store::{self, AccountStore};
 use kiro::endpoint::{AmazonQEndpoint, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
+use kiro::model_catalog;
 use kiro::provider::KiroProvider;
 use kiro::token_manager::MultiTokenManager;
 use model::arg::Args;
@@ -270,6 +271,14 @@ async fn main() {
         proxy_config.clone(),
         endpoints,
         config.default_endpoint.clone(),
+    );
+
+    // 模型目录与 config.json 同目录，Admin 手动刷新后落盘
+    model_catalog::init(
+        config
+            .config_path()
+            .and_then(|p| p.parent())
+            .map(|d| d.join(model_catalog::CATALOG_FILE_NAME)),
     );
 
     // 初始化 count_tokens 配置

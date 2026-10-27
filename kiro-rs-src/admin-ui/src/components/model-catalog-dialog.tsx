@@ -10,7 +10,12 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import { useCredentials, useModelCatalog, useRefreshModelCatalog } from '@/hooks/use-credentials'
+import {
+  useCredentials,
+  useModelCatalog,
+  useRefreshModelCatalog,
+  useSetEnabledModels,
+} from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 
 interface ModelCatalogDialogProps {
@@ -31,25 +36,45 @@ export function ModelCatalogDialog({ open, onOpenChange }: ModelCatalogDialogPro
   const { data: credentialsData } = useCredentials(true)
   const { data: catalog, isLoading } = useModelCatalog(open)
   const refresh = useRefreshModelCatalog()
+  const saveEnabled = useSetEnabledModels()
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [enabledFamilies, setEnabledFamilies] = useState<Set<string>>(new Set())
 
-  // 打开时默认勾选上次刷新用的账号
+  // 打开或目录变化时，回填上次用的账号与已勾选的模型
   useEffect(() => {
-    if (open && catalog) setSelected(new Set(catalog.credentialIds))
+    if (open && catalog) {
+      setSelected(new Set(catalog.credentialIds))
+      setEnabledFamilies(new Set(catalog.models.filter((m) => m.enabled).map((m) => m.family)))
+    }
   }, [open, catalog])
 
-  const toggle = (id: number) => {
-    setSelected((prev) => {
+  const toggle = <T,>(setter: React.Dispatch<React.SetStateAction<Set<T>>>, value: T) => {
+    setter((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(value)) next.delete(value)
+      else next.add(value)
       return next
+    })
+  }
+
+  const synced = Boolean(catalog?.fetchedAt)
+  const enabledChanged =
+    catalog !== undefined &&
+    catalog.models.some((m) => m.enabled !== enabledFamilies.has(m.family))
+
+  const handleSaveEnabled = () => {
+    saveEnabled.mutate([...enabledFamilies], {
+      onSuccess: () => toast.success(`/v1/models 现在输出 ${enabledFamilies.size} 个模型`),
+      onError: (error) => toast.error(`保存失败：${extractErrorMessage(error)}`),
     })
   }
 
   const handleRefresh = () => {
     refresh.mutate([...selected], {
-      onSuccess: (data) => toast.success(`已同步 ${data.upstreamCount} 个模型，对外提供 ${data.models.length} 个`),
+      onSuccess: (data) =>
+        toast.success(
+          `已同步 ${data.upstreamCount} 个模型，/v1/models 输出 ${data.models.filter((m) => m.enabled).length} 个`
+        ),
       onError: (error) => toast.error(`同步失败：${extractErrorMessage(error)}`),
     })
   }
@@ -76,7 +101,7 @@ export function ModelCatalogDialog({ open, onOpenChange }: ModelCatalogDialogPro
                 key={c.id}
                 className="flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs"
               >
-                <Checkbox checked={selected.has(c.id)} onCheckedChange={() => toggle(c.id)} />
+                <Checkbox checked={selected.has(c.id)} onCheckedChange={() => toggle(setSelected, c.id)} />
                 <span className="font-medium">#{c.id}</span>
                 <span className="text-muted-foreground">{c.email || c.authMethod || ''}</span>
                 {c.disabled && <span className="text-destructive">已禁用</span>}
@@ -95,28 +120,54 @@ export function ModelCatalogDialog({ open, onOpenChange }: ModelCatalogDialogPro
         </div>
 
         <div className="space-y-2 border-t pt-3">
-          <div className="text-sm font-medium">/v1/models 输出（每系列一个：上下文最大、版本最新）</div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-medium">
+              勾选的模型出现在 /v1/models（每系列一个：上下文最大、版本最新）
+            </div>
+            <Button
+              onClick={handleSaveEnabled}
+              disabled={!synced || !enabledChanged || enabledFamilies.size === 0 || saveEnabled.isPending}
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0 px-2.5 text-xs"
+            >
+              {saveEnabled.isPending ? '保存中...' : `保存勾选（${enabledFamilies.size}）`}
+            </Button>
+          </div>
+          {!synced && (
+            <div className="text-xs text-muted-foreground">同步后才能勾选</div>
+          )}
           {isLoading ? (
             <div className="py-4 text-center text-sm text-muted-foreground">加载中...</div>
           ) : (
-            <table className="w-full text-xs">
-              <thead className="text-left text-muted-foreground">
-                <tr>
-                  <th className="py-1 font-medium">模型 ID</th>
-                  <th className="py-1 font-medium">上下文</th>
-                  <th className="py-1 font-medium">最大输出</th>
-                </tr>
-              </thead>
-              <tbody className="font-mono">
-                {catalog?.models.map((m) => (
-                  <tr key={m.id} className="border-t border-border/50">
-                    <td className="py-1">{m.id}</td>
-                    <td className="py-1">{formatTokens(m.contextWindow)}</td>
-                    <td className="py-1">{formatTokens(m.maxTokens)}</td>
+            <div className="max-h-[45vh] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="text-left text-muted-foreground">
+                  <tr>
+                    <th className="w-6 py-1" />
+                    <th className="py-1 font-medium">模型 ID</th>
+                    <th className="py-1 font-medium">上下文</th>
+                    <th className="py-1 font-medium">最大输出</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="font-mono">
+                  {catalog?.models.map((m) => (
+                    <tr key={m.id} className="border-t border-border/50">
+                      <td className="py-1">
+                        <Checkbox
+                          checked={enabledFamilies.has(m.family)}
+                          disabled={!synced}
+                          onCheckedChange={() => toggle(setEnabledFamilies, m.family)}
+                        />
+                      </td>
+                      <td className="py-1">{m.id}</td>
+                      <td className="py-1">{formatTokens(m.contextWindow)}</td>
+                      <td className="py-1">{formatTokens(m.maxTokens)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </DialogContent>

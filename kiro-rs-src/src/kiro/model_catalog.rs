@@ -100,6 +100,10 @@ pub struct CatalogSnapshot {
     pub credential_ids: Vec<u64>,
     /// 各账号目录的并集
     pub models: Vec<KiroModelInfo>,
+    /// `/v1/models` 只输出这些系列；None 表示未勾选过，全部输出。
+    /// 按系列记录，新版本替换旧版时勾选状态不丢
+    #[serde(default)]
+    pub enabled_families: Option<Vec<String>>,
 }
 
 /// 对外暴露的模型
@@ -107,6 +111,8 @@ pub struct CatalogSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ExposedModel {
     pub id: String,
+    pub family: String,
+    pub enabled: bool,
     pub kiro_model_id: String,
     pub display_name: String,
     pub owned_by: String,
@@ -165,17 +171,47 @@ pub fn snapshot() -> Option<CatalogSnapshot> {
     STORE.get().and_then(|s| s.snapshot.read().clone())
 }
 
-/// 替换目录：先落盘再生效，落盘失败则保持旧目录
-pub fn replace(snapshot: CatalogSnapshot) -> anyhow::Result<()> {
-    let store = STORE
+fn store() -> anyhow::Result<&'static CatalogStore> {
+    STORE
         .get()
-        .ok_or_else(|| anyhow::anyhow!("模型目录未初始化"))?;
+        .ok_or_else(|| anyhow::anyhow!("模型目录未初始化"))
+}
+
+fn persist(store: &CatalogStore, snapshot: &CatalogSnapshot) -> anyhow::Result<()> {
     if let Some(path) = &store.path {
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&snapshot)?)?;
+        std::fs::write(&tmp, serde_json::to_vec_pretty(snapshot)?)?;
         std::fs::rename(&tmp, path)?;
     }
+    Ok(())
+}
+
+/// 替换目录：先落盘再生效，落盘失败则保持旧目录
+pub fn replace(snapshot: CatalogSnapshot) -> anyhow::Result<()> {
+    let store = store()?;
+    persist(store, &snapshot)?;
     *store.snapshot.write() = Some(snapshot);
+    Ok(())
+}
+
+/// 设置 `/v1/models` 输出哪些系列；系列必须来自当前目录
+pub fn set_enabled_families(families: Vec<String>) -> anyhow::Result<()> {
+    let store = store()?;
+    let mut guard = store.snapshot.write();
+    let snapshot = guard
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("尚未从 Kiro 同步模型目录"))?;
+    let known: Vec<String> = select_latest_per_family(&snapshot.models)
+        .into_iter()
+        .map(|(family, _)| family)
+        .collect();
+    if let Some(unknown) = families.iter().find(|f| !known.contains(f)) {
+        anyhow::bail!("目录中没有该模型系列: {}", unknown);
+    }
+    let mut updated = snapshot.clone();
+    updated.enabled_families = Some(families);
+    persist(store, &updated)?;
+    *snapshot = updated;
     Ok(())
 }
 
@@ -217,12 +253,17 @@ pub fn context_window(kiro_model_id: &str) -> Option<i32> {
         .filter(|&w| w > 0)
 }
 
-/// `/v1/models` 输出：最近一次刷新的目录，没有则用兜底目录
+/// 每系列一个的完整候选（含勾选状态）：最近一次刷新的目录，没有则用兜底目录
 pub fn exposed_models() -> Vec<ExposedModel> {
     match snapshot() {
-        Some(s) => build_exposed(&s.models, s.fetched_at),
-        None => build_exposed(&fallback_models(), 0),
+        Some(s) => build_exposed(&s.models, s.fetched_at, s.enabled_families.as_deref()),
+        None => build_exposed(&fallback_models(), 0, None),
     }
+}
+
+/// `/v1/models` 输出：只含勾选的系列
+pub fn enabled_models() -> Vec<ExposedModel> {
+    exposed_models().into_iter().filter(|m| m.enabled).collect()
 }
 
 fn fallback_models() -> Vec<KiroModelInfo> {
@@ -240,10 +281,14 @@ fn fallback_models() -> Vec<KiroModelInfo> {
         .collect()
 }
 
-fn build_exposed(models: &[KiroModelInfo], created: i64) -> Vec<ExposedModel> {
+fn build_exposed(
+    models: &[KiroModelInfo],
+    created: i64,
+    enabled_families: Option<&[String]>,
+) -> Vec<ExposedModel> {
     select_latest_per_family(models)
         .into_iter()
-        .map(|m| {
+        .map(|(family, m)| {
             let name = m.model_name.clone().unwrap_or_else(|| m.model_id.clone());
             let is_claude = m.model_id.starts_with(CLAUDE_PREFIX);
             ExposedModel {
@@ -252,6 +297,8 @@ fn build_exposed(models: &[KiroModelInfo], created: i64) -> Vec<ExposedModel> {
                 } else {
                     m.model_id.clone()
                 },
+                enabled: enabled_families.is_none_or(|f| f.contains(&family)),
+                family,
                 kiro_model_id: m.model_id.clone(),
                 display_name: if is_claude {
                     format!("{} (Thinking)", name)
@@ -304,8 +351,8 @@ fn family_and_version(model_id: &str) -> (String, Vec<u64>) {
     (family.join("-"), version)
 }
 
-/// 每个系列只留一个：上下文最大的优先，同容量取版本最新的
-fn select_latest_per_family(models: &[KiroModelInfo]) -> Vec<&KiroModelInfo> {
+/// 每个系列只留一个：上下文最大的优先，同容量取版本最新的，返回 (系列, 模型)
+fn select_latest_per_family(models: &[KiroModelInfo]) -> Vec<(String, &KiroModelInfo)> {
     let mut best: Vec<(String, Vec<u64>, &KiroModelInfo)> = Vec::new();
     for model in models {
         let (family, version) = family_and_version(&model.model_id);
@@ -319,7 +366,7 @@ fn select_latest_per_family(models: &[KiroModelInfo]) -> Vec<&KiroModelInfo> {
             None => best.push((family, version, model)),
         }
     }
-    best.into_iter().map(|(_, _, m)| m).collect()
+    best.into_iter().map(|(family, _, m)| (family, m)).collect()
 }
 
 /// 调 `ListAvailableModels` 拉取该凭据可见的全部模型（自动翻页）
@@ -399,7 +446,23 @@ mod tests {
     }
 
     fn selected_ids(models: &[KiroModelInfo]) -> Vec<String> {
-        build_exposed(models, 0).into_iter().map(|m| m.id).collect()
+        build_exposed(models, 0, None).into_iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn enabled_families_survive_version_upgrade() {
+        let enabled = vec!["claude-opus".to_string()];
+        let models = vec![
+            model("claude-opus-5.6", 1_000_000),
+            model("claude-sonnet-5.5", 1_000_000),
+        ];
+        let exposed = build_exposed(&models, 0, Some(&enabled));
+        let flags: Vec<(&str, bool)> = exposed.iter().map(|m| (m.id.as_str(), m.enabled)).collect();
+        assert_eq!(
+            flags,
+            vec![("claude-opus-5.6-thinking", true), ("claude-sonnet-5.5-thinking", false)]
+        );
+        assert!(build_exposed(&models, 0, None).iter().all(|m| m.enabled));
     }
 
     #[test]

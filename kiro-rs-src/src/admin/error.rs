@@ -20,6 +20,9 @@ pub enum AdminServiceError {
 
     /// 凭据无效（验证失败）
     InvalidCredential(String),
+
+    /// 请求参数不合法
+    InvalidRequest(String),
 }
 
 impl fmt::Display for AdminServiceError {
@@ -31,6 +34,7 @@ impl fmt::Display for AdminServiceError {
             AdminServiceError::UpstreamError(msg) => write!(f, "上游服务错误: {}", msg),
             AdminServiceError::InternalError(msg) => write!(f, "内部错误: {}", msg),
             AdminServiceError::InvalidCredential(msg) => write!(f, "凭据无效: {}", msg),
+            AdminServiceError::InvalidRequest(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -44,7 +48,9 @@ impl AdminServiceError {
             AdminServiceError::NotFound { .. } => StatusCode::NOT_FOUND,
             AdminServiceError::UpstreamError(_) => StatusCode::BAD_GATEWAY,
             AdminServiceError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AdminServiceError::InvalidCredential(_) => StatusCode::BAD_REQUEST,
+            AdminServiceError::InvalidCredential(_) | AdminServiceError::InvalidRequest(_) => {
+                StatusCode::BAD_REQUEST
+            }
         }
     }
 
@@ -56,7 +62,7 @@ impl AdminServiceError {
             AdminServiceError::InternalError(_) => {
                 AdminErrorResponse::internal_error(self.to_string())
             }
-            AdminServiceError::InvalidCredential(_) => {
+            AdminServiceError::InvalidCredential(_) | AdminServiceError::InvalidRequest(_) => {
                 AdminErrorResponse::invalid_request(self.to_string())
             }
         }

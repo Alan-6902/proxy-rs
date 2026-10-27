@@ -57,9 +57,11 @@ export interface BalanceResponse {
   nextResetAt: number | null
 }
 
-// /v1/models 输出的单个模型
+// 模型目录里每系列一个的候选；enabled 为 true 才出现在 /v1/models
 export interface CatalogModel {
   id: string
+  family: string
+  enabled: boolean
   kiroModelId: string
   displayName: string
   ownedBy: string

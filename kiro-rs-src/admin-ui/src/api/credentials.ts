@@ -138,6 +138,12 @@ export async function refreshModelCatalog(credentialIds: number[]): Promise<Mode
   return data
 }
 
+// 设置 /v1/models 只输出哪些模型系列
+export async function setEnabledModels(families: string[]): Promise<ModelCatalogResponse> {
+  const { data } = await api.put<ModelCatalogResponse>('/models/enabled', { families })
+  return data
+}
+
 // 获取负载均衡模式
 export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.get<{ mode: 'priority' | 'balanced' }>('/config/load-balancing')

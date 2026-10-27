@@ -457,7 +457,15 @@ pub struct RefreshModelCatalogRequest {
     pub credential_ids: Vec<u64>,
 }
 
-/// GET /models、POST /models/refresh
+/// PUT /models/enabled
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetEnabledModelsRequest {
+    /// `/v1/models` 只输出这些系列（取自 GET /models 的 family）
+    pub families: Vec<String>,
+}
+
+/// GET /models、POST /models/refresh、PUT /models/enabled
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalogResponse {
@@ -466,6 +474,6 @@ pub struct ModelCatalogResponse {
     pub credential_ids: Vec<u64>,
     /// 上游返回的模型总数（多账号去重后）
     pub upstream_count: usize,
-    /// `/v1/models` 实际输出
+    /// 每系列一个的候选，`enabled` 为 true 的才出现在 `/v1/models`
     pub models: Vec<ExposedModel>,
 }

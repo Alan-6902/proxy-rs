@@ -11,7 +11,8 @@ use super::{
     types::{
         AddCredentialRequest, AdoptCredentialRequest, BalanceQuery, DeleteCredentialQuery,
         EnsureFreshRequest, ImportAccountRequest, ListCredentialsQuery,
-        RefreshModelCatalogRequest, SetDisabledRequest, SetExternalRefreshRequest,
+        RefreshModelCatalogRequest, SetDisabledRequest, SetEnabledModelsRequest,
+        SetExternalRefreshRequest,
         SetInPoolRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyRequest,
         SuccessResponse,
     },
@@ -107,6 +108,19 @@ pub async fn refresh_model_catalog(
         .refresh_model_catalog(payload.credential_ids)
         .await
     {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+
+/// PUT /api/admin/models/enabled
+/// 设置 /v1/models 只输出哪些模型系列
+pub async fn set_enabled_models(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetEnabledModelsRequest>,
+) -> impl IntoResponse {
+    match state.service.set_enabled_model_families(payload.families) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

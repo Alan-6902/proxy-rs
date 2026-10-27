@@ -70,11 +70,11 @@ fn map_provider_error(err: Error) -> Response {
 
 /// GET /v1/models
 ///
-/// 返回最近一次在 Admin 手动刷新的 Kiro 模型目录（每系列只留一个）
+/// 返回最近一次在 Admin 手动刷新的 Kiro 模型目录（每系列只留一个，只含勾选的系列）
 pub async fn get_models() -> impl IntoResponse {
     tracing::info!("Received GET /v1/models request");
 
-    let models = model_catalog::exposed_models()
+    let models = model_catalog::enabled_models()
         .into_iter()
         .map(|m| Model {
             id: m.id,

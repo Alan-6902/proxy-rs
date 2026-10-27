@@ -245,7 +245,7 @@ impl AdminService {
         ids.sort_unstable();
         ids.dedup();
         if ids.is_empty() {
-            return Err(AdminServiceError::InvalidCredential(
+            return Err(AdminServiceError::InvalidRequest(
                 "至少选择一个账号".to_string(),
             ));
         }
@@ -271,9 +271,25 @@ impl AdminService {
             fetched_at: Utc::now().timestamp(),
             credential_ids: ids,
             models: merged,
+            enabled_families: model_catalog::snapshot().and_then(|s| s.enabled_families),
         })
         .map_err(|e| AdminServiceError::InternalError(format!("保存模型目录失败: {}", e)))?;
 
+        Ok(self.model_catalog())
+    }
+
+    /// 设置 `/v1/models` 只输出哪些模型系列
+    pub fn set_enabled_model_families(
+        &self,
+        families: Vec<String>,
+    ) -> Result<ModelCatalogResponse, AdminServiceError> {
+        if families.is_empty() {
+            return Err(AdminServiceError::InvalidRequest(
+                "至少勾选一个模型".to_string(),
+            ));
+        }
+        model_catalog::set_enabled_families(families)
+            .map_err(|e| AdminServiceError::InvalidRequest(e.to_string()))?;
         Ok(self.model_catalog())
     }
 

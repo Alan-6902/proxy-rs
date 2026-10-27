@@ -14,6 +14,7 @@ import {
   setLoadBalancingMode,
   getModelCatalog,
   refreshModelCatalog,
+  setEnabledModels,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -140,6 +141,17 @@ export function useRefreshModelCatalog() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (credentialIds: number[]) => refreshModelCatalog(credentialIds),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['model-catalog'], data)
+    },
+  })
+}
+
+// 保存 /v1/models 勾选的模型系列
+export function useSetEnabledModels() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (families: string[]) => setEnabledModels(families),
     onSuccess: (data) => {
       queryClient.setQueryData(['model-catalog'], data)
     },

@@ -18,15 +18,17 @@
     "postinstall": "node scripts/verify-native-deps.mjs",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
-    "build:mac": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac",
-    "build:mac:current": "bash scripts/build-kiro-rs.sh && electron-vite build && electron-builder --mac",
+    "build:mac": "bash scripts/build-kiro-rs.sh && electron-vite build && npm run build:serena-native && electron-builder --mac",
+    "build:mac:current": "bash scripts/build-kiro-rs.sh && electron-vite build && npm run build:serena-native && electron-builder --mac",
     "dist:mac": "bash scripts/build-dist-mac.sh",
     "dist:current": "bash scripts/build-dist-current-mac.sh",
     "install:current": "node scripts/install-current-mac.mjs",
     "deploy:current": "npm run dist:current && npm run install:current",
     "build:linux": "electron-vite build && electron-builder --linux",
     "test:unit": "vitest run",
-    "build:kiro-rs": "bash scripts/build-kiro-rs.sh"
+    "build:kiro-rs": "bash scripts/build-kiro-rs.sh",
+    "build:serena-native": "esbuild scripts/serena-native.ts --bundle --platform=node --format=cjs --target=node20 --log-level=warning --outfile=out/serena-native/serena-native.cjs",
+    "install:serena-native": "npm run build:serena-native && mkdir -p ~/.local/share/serena-native/tools && install -m 700 out/serena-native/serena-native.cjs ~/.local/share/serena-native/tools/serena-native.cjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
@@ -42,10 +44,12 @@
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.555.0",
     "nodemailer": "9.0.4",
+    "smol-toml": "^1.9.1",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.17",
     "undici": "^7.19.2",
     "uuid": "^13.0.0",
+    "yaml": "^2.9.1",
     "zustand": "^5.0.9"
   },
   "devDependencies": {
@@ -62,6 +66,7 @@
     "electron": "^38.1.2",
     "electron-builder": "^25.1.8",
     "electron-vite": "^4.0.1",
+    "esbuild": "^0.25.12",
     "eslint": "^9.36.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",

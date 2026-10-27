@@ -7,6 +7,7 @@ import {
   ChevronRight,
   ScrollText,
   Stethoscope,
+  Network,
   Archive,
   GripVertical,
   ListChecks,
@@ -28,6 +29,7 @@ export type PageType =
   | 'grok'
   | 'tasks'
   | 'diagnose'
+  | 'serena'
   | 'configSync'
   | 'kiroAdmin'
   | 'kiroLogs'
@@ -49,6 +51,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'grok', labelKey: 'nav.grok', icon: Bot },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
+  { id: 'serena', labelKey: 'nav.serena', icon: Network },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'kiroAdmin', labelKey: 'nav.kiroAdmin', icon: LayoutDashboard },
   { id: 'kiroLogs', labelKey: 'nav.kiroLogs', icon: Terminal },

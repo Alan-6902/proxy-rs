@@ -2,7 +2,10 @@
  * English translations
  */
 
+import { serenaEn } from './serena'
+
 const en = {
+  serena: serenaEn,
   // Common
   common: {
     confirm: 'Confirm',
@@ -48,6 +51,7 @@ const en = {
     grok: 'Grok Accounts',
     tasks: 'Tasks',
     diagnose: 'Diagnostics',
+    serena: 'Serena',
     configSync: 'Config Sync',
     kiroAdmin: 'Proxy Admin',
     kiroLogs: 'Proxy Logs',

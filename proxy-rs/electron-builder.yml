@@ -14,6 +14,8 @@ files:
   - '!node_modules/better-sqlite3/{deps,src}/**'
   - '!node_modules/better-sqlite3/binding.gyp'
   - '!node_modules/better-sqlite3/prebuilds/{win32,linux,linuxmusl}-*.node'
+  # Serena CLI 作为 extraResources 单独随包，不重复打进 asar
+  - '!out/serena-native/**'
 asarUnpack:
   - resources/**
   # 共享账号库驱动（Node-API 预编译包，Electron 直接加载，见改造方案 §0.8）
@@ -44,6 +46,9 @@ mac:
   extraResources:
     - from: 'build/kiro-rs/kiro-rs'
       to: 'kiro-rs'
+    # App 启动时同步到 ~/.local/share/serena-native/tools；由 npm run build:serena-native 生成
+    - from: 'out/serena-native/serena-native.cjs'
+      to: 'serena-native.cjs'
   identity: null # 签名由 afterPack 使用系统 codesign 生成本地 ad-hoc 签名
   # 使用无空格的包名作为本地产物文件名前缀，保证各平台命名一致。
   artifactName: ${name}-${version}-${arch}-mac.${ext}

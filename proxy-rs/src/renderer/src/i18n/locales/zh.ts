@@ -2,7 +2,10 @@
  * 中文翻译
  */
 
+import { serenaZh } from './serena'
+
 const zh = {
+  serena: serenaZh,
   // 通用
   common: {
     confirm: '确认',
@@ -48,6 +51,7 @@ const zh = {
     grok: 'Grok 账号',
     tasks: '任务管理',
     diagnose: '一键诊断',
+    serena: 'Serena',
     configSync: '配置同步',
     kiroAdmin: '反代管理',
     kiroLogs: '反代日志',

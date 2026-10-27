@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { SerenaPage } from './components/pages/SerenaPage'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal } from 'lucide-react'
 import { useTranslation } from './hooks/useTranslation'
@@ -285,6 +286,8 @@ function App(): React.JSX.Element {
         return <TaskManagerPage />
       case 'diagnose':
         return <DiagnosePage />
+      case 'serena':
+        return <SerenaPage />
       case 'configSync':
         return <ConfigSyncPage />
       case 'kiroAdmin':

@@ -1,4 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
+import { registerSerenaIpcHandlers } from './serena/ipc-handlers'
 import {
   buildKiroCredentialRefreshSingleflightKey,
   KiroCredentialRefreshSingleflight,
@@ -3156,6 +3157,8 @@ app.whenReady().then(async () => {
   ipcMain.on('close-incognito-browser', () => {
     closePrivateBrowserWindow()
   })
+
+  registerSerenaIpcHandlers(() => mainWindow)
 
   // ============ KSK Provider 自动拉取与本机 Admin 同步 IPC ============
   registerKskAutomationIpcHandlers({

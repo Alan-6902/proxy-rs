@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { SERENA_CHANNEL, type SerenaApi } from '../shared/serena'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { IpcResult } from '../shared/ipcResult'
 import type {
@@ -48,6 +49,15 @@ interface AccountDbStatusView {
 }
 
 const api = {
+  serena: {
+    snapshot: () => ipcRenderer.invoke(SERENA_CHANNEL.snapshot),
+    previewLanguages: (id, languages) =>
+      ipcRenderer.invoke(SERENA_CHANNEL.previewLanguages, id, languages),
+    previewNative: (id, action) => ipcRenderer.invoke(SERENA_CHANNEL.previewNative, id, action),
+    chooseProject: () => ipcRenderer.invoke(SERENA_CHANNEL.chooseProject),
+    execute: (id) => ipcRenderer.invoke(SERENA_CHANNEL.execute, id),
+    setExempt: (id, exempt) => ipcRenderer.invoke(SERENA_CHANNEL.setExempt, id, exempt)
+  } satisfies SerenaApi,
   // 打开外部链接
   openExternal: (url: string): void => {
     ipcRenderer.send('open-external', url)

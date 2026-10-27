@@ -1,15 +1,7 @@
 {
   "mcpServers": {
     "serena": {
-      "command": "/Users/ma/.local/bin/serena-guard",
-      "args": [
-        "serve",
-        "--client=cursor"
-      ],
-      "env": {
-        "SERENA_WORKSPACE_ROOT": "${workspaceFolder}",
-        "WORKSPACE_FOLDER_PATHS": "${workspaceFolder}"
-      }
+      "url": "http://127.0.0.1:39101/mcp"
     }
   }
 }

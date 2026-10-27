@@ -112,7 +112,8 @@ export function installCurrentMac({
           throw error
         }
         // open 成功只表示系统接受启动请求，不代表业务健康检查通过。
-        checked(run, '/usr/bin/open', ['-a', destination])
+        // 不用 -a：它按 bundle id 解析，可能拉起 dist/ 里同 id 的打包副本。
+        checked(run, '/usr/bin/open', [destination])
         completed = true
         log('已安装到 Applications，完整包校验通过，已请求启动。')
       } finally {

@@ -1,4 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type { SerenaApi } from '../shared/serena'
 import type { IpcResult } from '../shared/ipcResult'
 import type {
   KskAutomationStatusEvent,
@@ -151,6 +152,7 @@ type UpstreamKiroCredentialInput =
     }
 
 interface KiroApi {
+  serena: SerenaApi
   openExternal: (url: string) => void
   openIncognitoBrowser: (url: string) => void
   closeIncognitoBrowser: () => void

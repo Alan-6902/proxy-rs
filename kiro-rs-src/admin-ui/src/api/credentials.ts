@@ -10,6 +10,10 @@ import type {
   AddCredentialResponse,
   StoreInfoResponse,
   ModelCatalogResponse,
+  AgAccount,
+  AgAccountsResponse,
+  AgOAuthStart,
+  AgOAuthStatus,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -153,5 +157,39 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+// === Antigravity 账号池 ===
+
+export async function getAgAccounts(): Promise<AgAccountsResponse> {
+  const { data } = await api.get<AgAccountsResponse>('/antigravity/accounts')
+  return data
+}
+
+// 开始 Google 登录：后端在本机回环地址监听回调，返回需要在浏览器打开的授权地址
+export async function startAgOAuth(): Promise<AgOAuthStart> {
+  const { data } = await api.post<AgOAuthStart>('/antigravity/oauth/start')
+  return data
+}
+
+export async function getAgOAuthStatus(sessionId: string): Promise<AgOAuthStatus> {
+  const { data } = await api.get<AgOAuthStatus>(`/antigravity/oauth/${sessionId}`)
+  return data
+}
+
+// 刷新 token、projectId 与额度
+export async function refreshAgAccount(id: number): Promise<AgAccount> {
+  const { data } = await api.post<AgAccount>(`/antigravity/accounts/${id}/refresh`)
+  return data
+}
+
+export async function setAgAccountDisabled(id: number, disabled: boolean): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/antigravity/accounts/${id}/disabled`, { disabled })
+  return data
+}
+
+export async function deleteAgAccount(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/antigravity/accounts/${id}`)
   return data
 }

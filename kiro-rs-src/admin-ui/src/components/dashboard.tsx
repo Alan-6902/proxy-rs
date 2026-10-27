@@ -12,6 +12,7 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  Sparkles,
   Sun,
   Trash2,
   Upload,
@@ -29,6 +30,7 @@ import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { ModelCatalogDialog } from '@/components/model-catalog-dialog'
+import { AntigravityDialog } from '@/components/antigravity-dialog'
 import { useCredentials, useDeleteCredential, useResetFailure, useSetDisabled, useLoadBalancingMode, useSetLoadBalancingMode, useStoreInfo } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
@@ -45,6 +47,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
   const [modelCatalogDialogOpen, setModelCatalogDialogOpen] = useState(false)
+  const [antigravityDialogOpen, setAntigravityDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
@@ -643,6 +646,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
               <Layers className="h-4 w-4 text-primary" />
               <span className="hidden md:inline">模型目录</span>
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setAntigravityDialogOpen(true)}
+              title="Antigravity 账号池（/ag/v1）"
+              className="h-9 gap-2 rounded-xl bg-card/70 px-2.5 shadow-sm sm:px-3"
+            >
+              <Sparkles className="h-4 w-4 text-primary" />
+              <span className="hidden md:inline">Antigravity</span>
+            </Button>
             <Button variant="ghost" size="icon" onClick={toggleDarkMode} className="h-9 w-9 rounded-xl" aria-label="切换深浅色主题" title="切换深浅色主题">
               {darkMode ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
             </Button>
@@ -822,6 +835,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <ModelCatalogDialog
         open={modelCatalogDialogOpen}
         onOpenChange={setModelCatalogDialogOpen}
+      />
+
+      {/* Antigravity 账号池对话框 */}
+      <AntigravityDialog
+        open={antigravityDialogOpen}
+        onOpenChange={setAntigravityDialogOpen}
       />
 
       {/* 批量验活对话框 */}

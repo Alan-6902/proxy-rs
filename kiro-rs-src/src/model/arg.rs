@@ -24,6 +24,11 @@ pub struct Args {
     #[arg(long, requires = "account_db", conflicts_with = "init_account_db")]
     pub migrate_from_json: bool,
 
+    /// Antigravity 账号库路径（SQLite，不存在时新建）。未指定时取 --account-db 同目录的
+    /// antigravity.sqlite3；两者都没有则不启用 /ag/v1
+    #[arg(long)]
+    pub antigravity_db: Option<String>,
+
     /// 覆盖配置文件中的监听地址
     #[arg(long)]
     pub host: Option<String>,

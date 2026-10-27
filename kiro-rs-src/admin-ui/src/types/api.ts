@@ -125,3 +125,42 @@ export interface AddCredentialResponse {
   credentialId: number
   email?: string
 }
+
+// === Antigravity 账号池（/ag/v1） ===
+
+export interface AgQuotaModel {
+  id: string
+  displayName: string | null
+  remainingFraction: number
+  resetTime: string | null
+}
+
+export interface AgAccount {
+  id: number
+  email: string
+  name: string | null
+  projectId: string | null
+  tier: string | null
+  disabled: boolean
+  expiresAtMs: number | null
+  quota: { models: AgQuotaModel[] } | null
+  quotaUpdatedMs: number | null
+  lastError: string | null
+  lastUsedMs: number | null
+}
+
+export interface AgAccountsResponse {
+  accounts: AgAccount[]
+  dbPath: string
+}
+
+export interface AgOAuthStart {
+  sessionId: string
+  authUrl: string
+}
+
+export interface AgOAuthStatus {
+  status: 'pending' | 'success' | 'error'
+  email?: string
+  error?: string
+}

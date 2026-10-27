@@ -15,6 +15,10 @@ import {
   getModelCatalog,
   refreshModelCatalog,
   setEnabledModels,
+  getAgAccounts,
+  refreshAgAccount,
+  setAgAccountDisabled,
+  deleteAgAccount,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -174,5 +178,40 @@ export function useSetLoadBalancingMode() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
     },
+  })
+}
+
+// === Antigravity 账号池 ===
+
+export function useAgAccounts(enabled: boolean) {
+  return useQuery({
+    queryKey: ['ag-accounts'],
+    queryFn: getAgAccounts,
+    enabled,
+    retry: false,
+  })
+}
+
+export function useRefreshAgAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: refreshAgAccount,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
+  })
+}
+
+export function useSetAgAccountDisabled() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, disabled }: { id: number; disabled: boolean }) => setAgAccountDisabled(id, disabled),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
+  })
+}
+
+export function useDeleteAgAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: deleteAgAccount,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
   })
 }

@@ -26,8 +26,9 @@ mod converter;
 mod handlers;
 mod middleware;
 mod router;
-mod stream;
+pub(crate) mod stream;
 pub mod types;
 mod websearch;
 
+pub(crate) use middleware::{access_log_middleware, cors_layer};
 pub use router::create_router_with_provider;

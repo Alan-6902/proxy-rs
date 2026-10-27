@@ -1,6 +1,7 @@
 mod admin;
 mod admin_ui;
 mod anthropic;
+mod antigravity;
 mod common;
 mod http_client;
 mod kiro;
@@ -286,16 +287,46 @@ async fn main() {
         api_url: config.count_tokens_api_url.clone(),
         api_key: config.count_tokens_api_key.clone(),
         auth_type: config.count_tokens_auth_type.clone(),
-        proxy: proxy_config,
+        proxy: proxy_config.clone(),
         tls_backend: config.tls_backend,
     });
 
+    // Antigravity 账号库：显式指定，或跟随共享账号库放在同目录
+    let antigravity_db = args.antigravity_db.clone().map(std::path::PathBuf::from).or_else(|| {
+        args.account_db.as_deref().and_then(|db| {
+            std::path::Path::new(db)
+                .parent()
+                .map(|d| d.join(antigravity::DEFAULT_DB_FILE_NAME))
+        })
+    });
+    let antigravity_provider = antigravity_db.map(|path| {
+        let store = antigravity::AgStore::open_or_create(&path).unwrap_or_else(|e| {
+            tracing::error!("打开 Antigravity 账号库失败: {}", e);
+            std::process::exit(1);
+        });
+        tracing::info!("Antigravity 账号库: {}", path.display());
+        Arc::new(
+            antigravity::AntigravityProvider::new(
+                Arc::new(store),
+                proxy_config.as_ref(),
+                config.tls_backend,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("创建 Antigravity Provider 失败: {}", e);
+                std::process::exit(1);
+            }),
+        )
+    });
+
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
-    let anthropic_app = anthropic::create_router_with_provider(
+    let mut anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
     );
+    if let Some(provider) = &antigravity_provider {
+        anthropic_app = anthropic_app.merge(antigravity::create_router(&api_key, provider.clone()));
+    }
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
     // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
@@ -313,7 +344,13 @@ async fn main() {
             let admin_service =
                 admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
             let admin_state = admin::AdminState::new(admin_key, admin_service);
-            let admin_app = admin::create_admin_router(admin_state);
+            let mut admin_app = admin::create_admin_router(admin_state);
+            if let Some(provider) = &antigravity_provider {
+                admin_app = admin_app.nest(
+                    "/antigravity",
+                    antigravity::create_admin_router(admin_key.as_str(), provider.clone()),
+                );
+            }
 
             // 创建 Admin UI 路由
             let admin_ui_app = admin_ui::create_admin_ui_router();
@@ -336,6 +373,11 @@ async fn main() {
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");
     tracing::info!("  POST /v1/messages/count_tokens");
+    if antigravity_provider.is_some() {
+        tracing::info!("  GET  /ag/v1/models");
+        tracing::info!("  POST /ag/v1/messages");
+        tracing::info!("  POST /ag/v1/messages/count_tokens");
+    }
     if admin_key_valid {
         tracing::info!("Admin API:");
         tracing::info!("  GET  /api/admin/credentials");

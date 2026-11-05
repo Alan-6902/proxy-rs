@@ -11,7 +11,9 @@ use crate::http_client::ProxyConfig;
 use crate::model::config::Config;
 
 /// Kiro OAuth 凭证
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// `Debug` 为手写脱敏实现：token / secret / 代理密码只输出是否存在，避免进日志。
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct KiroCredentials {
     /// 凭据唯一标识符（自增 ID）
@@ -113,6 +115,45 @@ pub struct KiroCredentials {
     /// 端点名必须在启动时注册的端点 registry 中存在。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+}
+
+impl std::fmt::Debug for KiroCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        /// 敏感字段只显示是否存在
+        fn secret(v: &Option<String>) -> &'static str {
+            match v {
+                Some(_) => "<redacted>",
+                None => "None",
+            }
+        }
+        f.debug_struct("KiroCredentials")
+            .field("id", &self.id)
+            .field("credential_identity", &self.credential_identity)
+            .field("access_token", &secret(&self.access_token))
+            .field("refresh_token", &secret(&self.refresh_token))
+            .field("profile_arn", &self.profile_arn)
+            .field("expires_at", &self.expires_at)
+            .field("auth_method", &self.auth_method)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &secret(&self.client_secret))
+            .field("priority", &self.priority)
+            .field("region", &self.region)
+            .field("auth_region", &self.auth_region)
+            .field("api_region", &self.api_region)
+            .field("machine_id", &self.machine_id)
+            .field("email", &self.email)
+            .field("subscription_title", &self.subscription_title)
+            .field(
+                "proxy_url",
+                &self.proxy_url.as_deref().map(crate::http_client::redact_url_userinfo),
+            )
+            .field("proxy_username", &self.proxy_username)
+            .field("proxy_password", &secret(&self.proxy_password))
+            .field("disabled", &self.disabled)
+            .field("kiro_api_key", &secret(&self.kiro_api_key))
+            .field("endpoint", &self.endpoint)
+            .finish()
+    }
 }
 
 /// 判断是否为零（用于跳过序列化）
@@ -293,6 +334,33 @@ impl KiroCredentials {
 mod tests {
     use super::*;
     use crate::model::config::Config;
+
+    #[test]
+    fn test_debug_output_redacts_secrets() {
+        let cred = KiroCredentials {
+            access_token: Some("secret-access".into()),
+            refresh_token: Some("secret-refresh".into()),
+            client_secret: Some("secret-client".into()),
+            kiro_api_key: Some("ksk_secret".into()),
+            proxy_url: Some("http://u:secret-proxy@127.0.0.1:7890".into()),
+            proxy_password: Some("secret-proxy-pw".into()),
+            email: Some("someone@example.com".into()),
+            ..Default::default()
+        };
+        let out = format!("{:?}", cred);
+        for leaked in [
+            "secret-access",
+            "secret-refresh",
+            "secret-client",
+            "ksk_secret",
+            "secret-proxy",
+        ] {
+            assert!(!out.contains(leaked), "Debug 输出泄露了 {leaked}: {out}");
+        }
+        // 非敏感字段仍可用于排查
+        assert!(out.contains("someone@example.com"));
+        assert!(out.contains("<redacted>"));
+    }
 
     #[test]
     fn test_from_json() {

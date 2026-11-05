@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 构建 kiro-rs 并放到 build/kiro-rs/kiro-rs，供 electron-builder 的 extraResources 打进 App。
-# kiro-rs 由 proxy-rs 作为子进程拉起（改造方案 D1），只需本机架构。
+# 构建 Kiro 与 Antigravity 两个独立反代，供 electron-builder 打进 App。
+# 两个进程分别由 proxy-rs 托管，只需本机架构。
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,9 +10,11 @@ readonly OUT_DIR="$PROJECT_ROOT/build/kiro-rs"
 
 # rust-embed 编译期需要 admin-ui/dist
 (cd "$KIRO_RS_DIR/admin-ui" && pnpm install --frozen-lockfile && pnpm build)
-(cd "$KIRO_RS_DIR" && cargo build --release --no-default-features)
+(cd "$KIRO_RS_DIR" && cargo build --release --no-default-features --bins)
 
 /bin/mkdir -p "$OUT_DIR"
-/bin/cp "$KIRO_RS_DIR/target/release/kiro-rs" "$OUT_DIR/kiro-rs"
-/bin/chmod 755 "$OUT_DIR/kiro-rs"
-echo "kiro-rs 已构建：$OUT_DIR/kiro-rs"
+for binary in kiro-rs antigravity-rs; do
+  /bin/cp "$KIRO_RS_DIR/target/release/$binary" "$OUT_DIR/$binary"
+  /bin/chmod 755 "$OUT_DIR/$binary"
+  echo "$binary 已构建：$OUT_DIR/$binary"
+done

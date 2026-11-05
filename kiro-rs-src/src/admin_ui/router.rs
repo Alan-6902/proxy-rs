@@ -21,6 +21,13 @@ pub fn create_admin_ui_router() -> Router {
         .route("/{*file}", get(static_handler))
 }
 
+/// AG 监听的管理根始终进入独立页面，资源路径仍沿用 /admin/assets。
+pub fn create_antigravity_admin_ui_router() -> Router {
+    Router::new()
+        .route("/", get(|| async { axum::response::Redirect::temporary("/admin/antigravity") }))
+        .route("/{*file}", get(static_handler))
+}
+
 /// 处理首页请求
 async fn index_handler() -> impl IntoResponse {
     serve_index()

@@ -12,6 +12,8 @@ import type {
   ModelCatalogResponse,
   AgAccount,
   AgAccountsResponse,
+  AgModelCatalogResponse,
+  AgModelScanResponse,
   AgOAuthStart,
   AgOAuthStatus,
 } from '@/types/api'
@@ -167,6 +169,23 @@ export async function getAgAccounts(): Promise<AgAccountsResponse> {
   return data
 }
 
+
+export async function getAgModelCatalog(): Promise<AgModelCatalogResponse> {
+  const { data } = await api.get<AgModelCatalogResponse>('/antigravity/models')
+  return data
+}
+
+// 逐个刷新启用账号的模型列表；只在用户手动点「扫描账号」时调用
+export async function scanAgModels(): Promise<AgModelScanResponse> {
+  const { data } = await api.post<AgModelScanResponse>('/antigravity/models/scan')
+  return data
+}
+
+export async function setAgEnabledModels(enabledModelIds: string[]): Promise<AgModelCatalogResponse> {
+  const { data } = await api.put<AgModelCatalogResponse>('/antigravity/models', { enabledModelIds })
+  return data
+}
+
 // 开始 Google 登录：后端在本机回环地址监听回调，返回需要在浏览器打开的授权地址
 export async function startAgOAuth(): Promise<AgOAuthStart> {
   const { data } = await api.post<AgOAuthStart>('/antigravity/oauth/start')
@@ -186,6 +205,11 @@ export async function refreshAgAccount(id: number): Promise<AgAccount> {
 
 export async function setAgAccountDisabled(id: number, disabled: boolean): Promise<SuccessResponse> {
   const { data } = await api.post<SuccessResponse>(`/antigravity/accounts/${id}/disabled`, { disabled })
+  return data
+}
+
+export async function resetAgAccountFailures(id: number): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/antigravity/accounts/${id}/reset`)
   return data
 }
 

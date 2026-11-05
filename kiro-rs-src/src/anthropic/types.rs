@@ -5,9 +5,11 @@ use std::collections::HashMap;
 
 // === 错误响应 ===
 
-/// API 错误响应
+/// API 错误响应（Anthropic 格式：`{"type":"error","error":{...}}`）
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
+    #[serde(rename = "type")]
+    pub response_type: &'static str,
     pub error: ErrorDetail,
 }
 
@@ -23,6 +25,7 @@ impl ErrorResponse {
     /// 创建新的错误响应
     pub fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
+            response_type: "error",
             error: ErrorDetail {
                 error_type: error_type.into(),
                 message: message.into(),
@@ -50,8 +53,12 @@ pub struct Model {
     pub model_type: String,
     /// 最大输出 token
     pub max_tokens: i32,
+    /// OpenAI / OpenRouter 兼容的最大输出字段（供 Magpie 等客户端读取）
+    pub max_completion_tokens: i32,
     /// 上下文窗口（最大输入 token）
     pub context_window: i32,
+    /// OpenRouter / Magpie 兼容的上下文长度字段
+    pub context_length: i32,
 }
 
 /// 模型列表响应

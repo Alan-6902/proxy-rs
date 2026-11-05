@@ -104,7 +104,10 @@ pub fn map_model(model: &str) -> Option<String> {
     }
 
     if model_lower.contains("sonnet") {
-        if model_lower.contains("sonnet-5") {
+        // 5-5 必须先判，否则会被下面的 sonnet-5 前缀吞掉降级成 Sonnet 5
+        if model_lower.contains("sonnet-5-5") || model_lower.contains("sonnet-5.5") {
+            Some("claude-sonnet-5.5".to_string())
+        } else if model_lower.contains("sonnet-5") {
             Some("claude-sonnet-5".to_string())
         } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
@@ -141,7 +144,7 @@ pub fn map_model(model: &str) -> Option<String> {
 ///
 /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
 /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
-/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 / Opus 5.5 / Fable 5.1 同 1M
+/// Sonnet 5 / Sonnet 5.5 / Opus 4.7 / 4.8 / Opus 5 / Opus 5.5 / Fable 5.1 同 1M
 /// GPT-5.6（sol/terra/luna）在 Kiro 侧为 272K（非 OpenAI API 的 1.05M）
 pub fn get_context_window_size(model: &str) -> i32 {
     let mapped = map_model(model);
@@ -150,7 +153,7 @@ pub fn get_context_window_size(model: &str) -> i32 {
     }
     match mapped {
         Some(mapped) if mapped.starts_with("gpt-5.6-") => 272_000,
-        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-opus-5" || mapped == "claude-opus-5.5" || mapped == "claude-fable-5.1" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
+        Some(mapped) if mapped == "claude-sonnet-5.5" || mapped == "claude-sonnet-5" || mapped == "claude-opus-5" || mapped == "claude-opus-5.5" || mapped == "claude-fable-5.1" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
         _ => 200_000,
     }
 }
@@ -331,8 +334,8 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     let last_message = messages.last().unwrap();
     let (text_content, images, tool_results) = process_message_content(&last_message.content)?;
 
-    // 6. 转换工具定义（超长名称自动缩短并记录映射）
-    let mut tool_name_map = HashMap::new();
+    // 6. 为声明和历史统一分配工具名称，再转换工具定义
+    let mut tool_name_map = build_tool_name_map(req, messages);
     let mut tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
@@ -395,7 +398,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     if !tool_name_map.is_empty() {
         tracing::info!(
-            "工具名称映射: {} 个超长名称已缩短",
+            "工具名称映射: {} 个名称已重新分配",
             tool_name_map.len()
         );
     }
@@ -437,12 +440,19 @@ fn process_message_content(
                             if let Some(source) = block.source {
                                 if let Some(format) = get_image_format(&source.media_type) {
                                     images.push(KiroImage::from_base64(format, source.data));
+                                } else {
+                                    tracing::warn!(
+                                        "图片格式 {} 不受支持，已忽略",
+                                        source.media_type
+                                    );
                                 }
                             }
                         }
                         "tool_result" => {
                             if let Some(tool_use_id) = block.tool_use_id {
-                                let result_content = extract_tool_result_content(&block.content);
+                                let (result_content, result_images) =
+                                    extract_tool_result_content(&block.content);
+                                images.extend(result_images);
                                 let is_error = block.is_error.unwrap_or(false);
 
                                 let mut result = if is_error {
@@ -459,8 +469,15 @@ fn process_message_content(
                         "tool_use" => {
                             // tool_use 在 assistant 消息中处理，这里忽略
                         }
-                        _ => {}
+                        other => {
+                            // document / redacted_thinking 等 Kiro 不支持的块：不再无声丢弃
+                            tracing::warn!("用户消息中的内容块类型 {} 不受支持，已忽略", other);
+                        }
                     }
+                } else {
+                    // 例如 source.type=url 的图片（缺 media_type/data）会反序列化失败
+                    let block_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                    tracing::warn!("无法解析的内容块（type={}），已忽略", block_type);
                 }
             }
         }
@@ -481,21 +498,34 @@ fn get_image_format(media_type: &str) -> Option<String> {
     }
 }
 
-/// 提取工具结果内容
-fn extract_tool_result_content(content: &Option<serde_json::Value>) -> String {
+/// 提取工具结果内容：文本拼接返回，夹带的 image 块（如读图片文件、截图类工具）一并返回，
+/// 否则图片会被静默丢弃
+fn extract_tool_result_content(content: &Option<serde_json::Value>) -> (String, Vec<KiroImage>) {
     match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::String(s)) => (s.clone(), Vec::new()),
         Some(serde_json::Value::Array(arr)) => {
             let mut parts = Vec::new();
+            let mut images = Vec::new();
             for item in arr {
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                if item.get("type").and_then(|v| v.as_str()) == Some("image") {
+                    let source = item.get("source");
+                    let media_type = source
+                        .and_then(|s| s.get("media_type"))
+                        .and_then(|v| v.as_str());
+                    let data = source.and_then(|s| s.get("data")).and_then(|v| v.as_str());
+                    if let (Some(format), Some(data)) =
+                        (media_type.and_then(get_image_format), data)
+                    {
+                        images.push(KiroImage::from_base64(format, data));
+                    }
+                } else if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
                     parts.push(text.to_string());
                 }
             }
-            parts.join("\n")
+            (parts.join("\n"), images)
         }
-        Some(v) => v.to_string(),
-        None => String::new(),
+        Some(v) => (v.to_string(), Vec::new()),
+        None => (String::new(), Vec::new()),
     }
 }
 
@@ -630,15 +660,202 @@ fn shorten_tool_name(name: &str) -> String {
     let hash_suffix = &hash_hex[..8];
     // 54 prefix + 1 underscore + 8 hash = 63
     let prefix_max = TOOL_NAME_MAX_LEN - 1 - 8;
-    let prefix = match name.char_indices().nth(prefix_max) {
-        Some((idx, _)) => &name[..idx],
-        None => name,
-    };
+    let mut prefix_end = name.len().min(prefix_max);
+    while !name.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let prefix = &name[..prefix_end];
     format!("{}_{}", prefix, hash_suffix)
 }
 
-/// 如果名称超长则缩短，并记录映射（short → original）
+/// 仅记录最终请求的工具结构，避免泄露消息、参数、schema 文案、名称或 ID 原值。
+pub(crate) fn summarize_tool_structure(body: &str) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    fn fingerprint(value: &str) -> String {
+        let digest = Sha256::digest(value.as_bytes());
+        hex::encode(&digest[..8])
+    }
+    fn name_summary(name: &str) -> Value {
+        json!({
+            "hash": fingerprint(name),
+            "bytes": name.len(),
+            "within_length_limit": !name.is_empty() && name.len() <= TOOL_NAME_MAX_LEN,
+            "ascii_identifier": !name.is_empty() && name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+            }),
+        })
+    }
+
+    let Ok(request) = serde_json::from_str::<Value>(body) else {
+        return json!({"valid_json": false});
+    };
+    let Some(state) = request.get("conversationState") else {
+        return json!({"valid_json": true, "conversation_state_present": false});
+    };
+    let mut messages: Vec<&Value> = state
+        .get("history")
+        .and_then(Value::as_array)
+        .map(|history| history.iter().collect())
+        .unwrap_or_default();
+    if let Some(current) = state.get("currentMessage") {
+        messages.push(current);
+    }
+    let mut declarations = Vec::new();
+    let mut declared_names = BTreeMap::<String, usize>::new();
+    let mut uses = Vec::new();
+    let mut use_ids = BTreeMap::<String, usize>::new();
+    let mut result_ids = BTreeMap::<String, usize>::new();
+    let mut results = Vec::new();
+    for message in messages {
+        if let Some(context) = message.pointer("/userInputMessage/userInputMessageContext") {
+            if let Some(tools) = context.get("tools").and_then(Value::as_array) {
+                for tool in tools {
+                    let specification = &tool["toolSpecification"];
+                    let name = specification["name"].as_str().unwrap_or("");
+                    *declared_names.entry(name.to_lowercase()).or_default() += 1;
+                    let schema_type = match specification
+                        .pointer("/inputSchema/json/type")
+                        .and_then(Value::as_str)
+                    {
+                        Some("object") => "object",
+                        Some("array") => "array",
+                        Some("string") => "string",
+                        Some("number") => "number",
+                        Some("integer") => "integer",
+                        Some("boolean") => "boolean",
+                        Some("null") => "null",
+                        _ => "missing_or_invalid",
+                    };
+                    let description = specification["description"].as_str().unwrap_or("");
+                    declarations.push(json!({
+                        "name": name_summary(name),
+                        "schema_root_type": schema_type,
+                        "description_bytes": description.len(),
+                        "description_empty": description.trim().is_empty(),
+                    }));
+                }
+            }
+            if let Some(tool_results) = context.get("toolResults").and_then(Value::as_array) {
+                for result in tool_results {
+                    let id = result["toolUseId"].as_str().unwrap_or("");
+                    *result_ids.entry(id.to_string()).or_default() += 1;
+                    results.push(json!({"id_hash": fingerprint(id), "id_empty": id.is_empty()}));
+                }
+            }
+        }
+        if let Some(tool_uses) = message
+            .pointer("/assistantResponseMessage/toolUses")
+            .and_then(Value::as_array)
+        {
+            for tool_use in tool_uses {
+                let id = tool_use["toolUseId"].as_str().unwrap_or("");
+                let name = tool_use["name"].as_str().unwrap_or("");
+                *use_ids.entry(id.to_string()).or_default() += 1;
+                uses.push((
+                    name.to_lowercase(),
+                    json!({
+                        "id_hash": fingerprint(id),
+                        "id_empty": id.is_empty(),
+                        "name": name_summary(name),
+                        "input_is_object": tool_use.get("input").is_some_and(Value::is_object),
+                    }),
+                ));
+            }
+        }
+    }
+    let calls: Vec<_> = uses
+        .into_iter()
+        .map(|(name, mut summary)| {
+            summary["declared"] = json!(declared_names.contains_key(&name));
+            summary
+        })
+        .collect();
+    let duplicate_names: Vec<_> = declared_names
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(name, count)| json!({"casefold_hash": fingerprint(name), "count": count}))
+        .collect();
+    let pairing_anomalies: Vec<_> = use_ids
+        .keys()
+        .chain(result_ids.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|id| {
+            let use_count = use_ids.get(id).copied().unwrap_or_default();
+            let result_count = result_ids.get(id).copied().unwrap_or_default();
+            (use_count != 1 || result_count != 1 || id.is_empty()).then(
+                || json!({"id_hash": fingerprint(id), "uses": use_count, "results": result_count}),
+            )
+        })
+        .collect();
+    json!({
+        "valid_json": true,
+        "conversation_state_present": true,
+        "declarations": declarations,
+        "casefold_duplicate_names": duplicate_names,
+        "calls": calls,
+        "results": results,
+        "pairing_anomalies": pairing_anomalies,
+    })
+}
+
+/// 预先分配声明和历史中的全部名称，避免短名、哈希名及大小写碰撞。
+fn build_tool_name_map(
+    req: &MessagesRequest,
+    messages: &[super::types::Message],
+) -> HashMap<String, String> {
+    use std::collections::{BTreeSet, HashSet};
+
+    let mut names = BTreeSet::new();
+    if let Some(tools) = &req.tools {
+        names.extend(tools.iter().map(|tool| tool.name.clone()));
+    }
+    for message in messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+    {
+        if let Some(blocks) = message.content.as_array() {
+            for block in blocks {
+                if block.get("type").and_then(|value| value.as_str()) == Some("tool_use") {
+                    if let Some(name) = block.get("name").and_then(|value| value.as_str()) {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 原始短名也必须预留，不能让先处理的长名占用后续工具的名称。
+    let reserved: HashSet<_> = names
+        .iter()
+        .filter(|name| name.len() <= TOOL_NAME_MAX_LEN)
+        .map(|name| name.to_lowercase())
+        .collect();
+    let mut used = HashSet::new();
+    let mut mapping = HashMap::new();
+    for name in names {
+        if name.len() <= TOOL_NAME_MAX_LEN && used.insert(name.to_lowercase()) {
+            continue;
+        }
+        let mut short = shorten_tool_name(&name);
+        let mut attempt = 0;
+        while reserved.contains(&short.to_lowercase()) || used.contains(&short.to_lowercase()) {
+            attempt += 1;
+            short = shorten_tool_name(&format!("{name}_{attempt}"));
+        }
+        used.insert(short.to_lowercase());
+        mapping.insert(short, name);
+    }
+    mapping
+}
+
+/// 复用请求级名称映射；独立转换时仍支持缩短超长名称。
 fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
+    if let Some((mapped, _)) = tool_name_map.iter().find(|(_, original)| original.as_str() == name) {
+        return mapped.clone();
+    }
     if name.len() <= TOOL_NAME_MAX_LEN {
         return name.to_string();
     }
@@ -656,7 +873,12 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut Ha
     tools
         .iter()
         .map(|t| {
-            let mut description = t.description.clone();
+            // Kiro 会以 Invalid tool use format 拒绝空描述；客户端允许省略此字段。
+            let mut description = if t.description.trim().is_empty() {
+                format!("Tool: {}", t.name)
+            } else {
+                t.description.clone()
+            };
 
             // 对 Write/Edit 工具追加自定义描述后缀
             let suffix = match t.name.as_str() {
@@ -1065,6 +1287,49 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_sonnet_5_5() {
+        for name in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            "claude-sonnet-5-5-thinking",
+            "claude-sonnet-5.5-20260928",
+        ] {
+            assert_eq!(
+                map_model(name),
+                Some("claude-sonnet-5.5".to_string()),
+                "{name} 应映射到 claude-sonnet-5.5"
+            );
+        }
+        assert_eq!(get_context_window_size("claude-sonnet-5-5"), 1_000_000);
+        // sonnet-5 不应被 5.5 分支吞掉
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tool_result_keeps_images() {
+        let content = serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": [
+                {"type": "text", "text": "截图如下"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+            ]
+        }]);
+        let (_text, images, tool_results) = process_message_content(&content).unwrap();
+        assert_eq!(images.len(), 1, "tool_result 内的图片应被保留");
+        assert_eq!(tool_results.len(), 1);
+
+        // 纯字符串 content 不产生图片
+        let (text, imgs) =
+            extract_tool_result_content(&Some(serde_json::Value::String("ok".into())));
+        assert_eq!(text, "ok");
+        assert!(imgs.is_empty());
+    }
+
+    #[test]
     fn test_map_model_opus_5() {
         assert_eq!(
             map_model("claude-opus-5"),
@@ -1239,6 +1504,180 @@ mod tests {
         let result = map_tool_name(long_name, &mut map);
         assert!(result.len() <= TOOL_NAME_MAX_LEN);
         assert_eq!(map.get(&result), Some(&long_name.to_string()));
+    }
+
+    #[test]
+    fn test_tool_structure_summary_redacts_values_and_finds_anomalies() {
+        let body = serde_json::json!({"conversationState": {
+            "history": [{"assistantResponseMessage": {
+                "content": "secret-message",
+                "toolUses": [
+                    {"toolUseId": "secret-call", "name": "SecretTool", "input": {"value": "secret-input"}},
+                    {"toolUseId": "orphan-call", "name": "undeclared-tool", "input": []}
+                ]
+            }}],
+            "currentMessage": {"userInputMessage": {"userInputMessageContext": {
+                "tools": [
+                    {"toolSpecification": {"name": "SecretTool", "description": "secret-description", "inputSchema": {"json": {"type": "object", "description": "secret-schema"}}}},
+                    {"toolSpecification": {"name": "secrettool", "inputSchema": {"json": {"type": "secret-schema-type"}}}},
+                    {"toolSpecification": {"name": "bad.name", "inputSchema": {"json": {"type": "object"}}}},
+                    {"toolSpecification": {"name": "x".repeat(TOOL_NAME_MAX_LEN + 1)}}
+                ],
+                "toolResults": [{"toolUseId": "secret-call", "content": [{"text": "secret-output"}]}]
+            }}}
+        }});
+        let summary = summarize_tool_structure(&body.to_string());
+        assert_eq!(summary["declarations"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            summary["casefold_duplicate_names"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            summary["declarations"][1]["schema_root_type"],
+            "missing_or_invalid"
+        );
+        assert_eq!(
+            summary["declarations"][2]["name"]["ascii_identifier"],
+            false
+        );
+        assert_eq!(
+            summary["declarations"][3]["name"]["within_length_limit"],
+            false
+        );
+        assert_eq!(summary["calls"][0]["declared"], true);
+        assert_eq!(summary["calls"][1]["declared"], false);
+        assert_eq!(summary["calls"][1]["input_is_object"], false);
+        assert_eq!(summary["pairing_anomalies"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            summary["calls"][0]["id_hash"],
+            summary["results"][0]["id_hash"]
+        );
+        let serialized = summary.to_string();
+        for sensitive in [
+            "secret",
+            "SecretTool",
+            "orphan-call",
+            "undeclared-tool",
+            "bad.name",
+        ] {
+            assert!(!serialized.contains(sensitive));
+        }
+        assert_eq!(summarize_tool_structure("not-json")["valid_json"], false);
+    }
+
+    #[test]
+    fn test_tool_name_collisions_preserve_history_and_reverse_mapping() {
+        let long_name = "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
+        let short_collision = shorten_tool_name(long_name);
+        for names in [
+            vec![long_name.to_string(), short_collision.clone()],
+            vec![short_collision.clone(), long_name.to_string()],
+            vec!["Read".to_string(), "read".to_string()],
+        ] {
+            let mut req = make_request(
+                None,
+                vec![
+                    user_msg("调用工具"),
+                    super::super::types::Message {
+                        role: "assistant".to_string(),
+                        content: serde_json::json!(names.iter().enumerate().map(|(i, name)| {
+                            serde_json::json!({"type": "tool_use", "id": format!("call_{i}"), "name": name, "input": {}})
+                        }).collect::<Vec<_>>()),
+                    },
+                    super::super::types::Message {
+                        role: "user".to_string(),
+                        content: serde_json::json!([
+                            {"type": "tool_result", "tool_use_id": "call_0", "content": "完成"},
+                            {"type": "tool_result", "tool_use_id": "call_1", "content": "完成"}
+                        ]),
+                    },
+                ],
+            );
+            req.tools = Some(
+                names
+                    .iter()
+                    .map(|name| super::super::types::Tool {
+                        name: name.clone(),
+                        description: "测试工具".to_string(),
+                        input_schema: HashMap::from([(
+                            "type".to_string(),
+                            serde_json::json!("object"),
+                        )]),
+                        tool_type: None,
+                        max_uses: None,
+                    })
+                    .collect(),
+            );
+            let result = convert_request(&req).unwrap();
+            let context = &result
+                .conversation_state
+                .current_message
+                .user_input_message
+                .user_input_message_context;
+            assert_eq!(context.tools.len(), 2);
+            let emitted: Vec<_> = context
+                .tools
+                .iter()
+                .map(|tool| tool.tool_specification.name.as_str())
+                .collect();
+            assert_ne!(emitted[0].to_lowercase(), emitted[1].to_lowercase());
+            for (emitted_name, original_name) in emitted.iter().zip(&names) {
+                assert!(emitted_name.len() <= TOOL_NAME_MAX_LEN);
+                assert_eq!(
+                    result
+                        .tool_name_map
+                        .get(*emitted_name)
+                        .map(String::as_str)
+                        .unwrap_or(emitted_name),
+                    original_name,
+                );
+            }
+            let history_names: Vec<_> = result
+                .conversation_state
+                .history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Assistant(message) => {
+                        message.assistant_response_message.tool_uses.as_ref()
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .map(|tool_use| tool_use.name.as_str())
+                .collect();
+            assert_eq!(history_names, emitted);
+            assert_eq!(context.tool_results.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_shorten_tool_name_respects_utf8_byte_limit() {
+        let name = "工具".repeat(30);
+        let shortened = shorten_tool_name(&name);
+        assert!(shortened.len() <= TOOL_NAME_MAX_LEN);
+        assert_eq!(shortened, shorten_tool_name(&name));
+    }
+
+    #[test]
+    fn test_empty_tool_descriptions_are_filled_before_upstream() {
+        for description in ["", " \n\t", "已有描述"] {
+            let tools = Some(vec![super::super::types::Tool {
+                name: "probe".to_owned(),
+                description: description.to_owned(),
+                input_schema: HashMap::from([("type".to_owned(), serde_json::json!("object"))]),
+                tool_type: None,
+                max_uses: None,
+            }]);
+            let converted = convert_tools(&tools, &mut HashMap::new());
+            let emitted = &converted[0].tool_specification.description;
+            assert!(!emitted.trim().is_empty(), "上游不接受空工具描述");
+            if !description.trim().is_empty() {
+                assert_eq!(emitted, description);
+            }
+        }
     }
 
     #[test]

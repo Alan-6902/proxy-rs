@@ -7,24 +7,6 @@ import type {
   KskAutomationTaskView
 } from '../shared/kskAutomation'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
-import type {
-  CursorAccount,
-  CursorAutoRefreshSettings,
-  CursorCockpitImportSummary,
-  CursorCredentialImportSummary,
-  CursorInjectOptions,
-  CursorInjectResult,
-  CursorOAuthStartResult,
-  CursorRefreshAllSummary
-} from '../shared/cursorAccounts'
-import type {
-  GrokAccountView,
-  GrokRelayInstallProgress,
-  GrokRelayInstallResult,
-  GrokRelayStatus,
-  GrokRemoveResult,
-  GrokSwitchResult
-} from '../shared/grokAccounts'
 
 interface AccountData {
   accounts: Record<string, unknown>
@@ -45,6 +27,7 @@ interface AccountData {
   autoSwitchInterval?: number
   theme?: string
   darkMode?: boolean
+  sidebarCollapsedOnStart?: boolean
   language?: 'auto' | 'en' | 'zh'
 }
 
@@ -157,8 +140,6 @@ interface KiroApi {
   openIncognitoBrowser: (url: string) => void
   closeIncognitoBrowser: () => void
   getAppVersion: () => Promise<string>
-  onAuthCallback: (callback: (data: { code: string; state: string }) => void) => () => void
-
   // 账号管理
   loadAccounts: () => Promise<AccountData | null>
   accountDbDelete: (
@@ -211,9 +192,6 @@ interface KiroApi {
     syncInfo?: boolean,
     refreshManaged?: boolean
   ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundRefreshProgress: (
-    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
-  ) => () => void
   onBackgroundRefreshResult: (
     callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
   ) => () => void
@@ -242,9 +220,6 @@ interface KiroApi {
     }>,
     concurrency?: number
   ) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
-  onBackgroundCheckProgress: (
-    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
-  ) => () => void
   onBackgroundCheckResult: (
     callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
   ) => () => void
@@ -490,11 +465,11 @@ interface KiroApi {
   onKiroCliAccountChanged: (callback: (data: { accountId: string | null }) => void) => () => void
 
   // 内嵌 kiro-rs Admin 页面
-  kiroAdminView: () => Promise<{
+  kiroAdminView: (provider?: 'kiro' | 'antigravity') => Promise<{
     enabled: boolean
     url?: string
     partition: string
-    kiroRsState?: string
+    serviceState?: string
     detail?: string
   }>
   onAccountDbStatus: (
@@ -631,9 +606,6 @@ interface KiroApi {
     }[]
   ) => void
 
-  // 刷新托盘菜单
-  refreshTrayMenu: () => void
-
   // 更新托盘语言
   updateTrayLanguage: (language: 'en' | 'zh') => void
 
@@ -651,18 +623,6 @@ interface KiroApi {
     action: 'minimize' | 'quit' | 'cancel',
     rememberChoice: boolean
   ) => void
-
-  // 诊断：通用 HTTP 探测
-  diagnoseHttpProbe: (params: {
-    url: string
-    method?: 'GET' | 'HEAD'
-    timeoutMs?: number
-  }) => Promise<{
-    success: boolean
-    latencyMs?: number
-    status?: number
-    error?: string
-  }>
 
   // 一键诊断
   diagnoseRun: (params: {
@@ -744,51 +704,6 @@ interface KiroApi {
   ) => Promise<IpcResult<LocalAdminPushResult>>
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void) => () => void
   onKskAutomationAccountsChanged: (callback: () => void) => () => void
-  cursorAccountsList: () => Promise<IpcResult<CursorAccount[]>>
-  cursorAccountsCurrentId: () => Promise<IpcResult<string | null>>
-  cursorAccountsRemove: (ids: string[]) => Promise<IpcResult<void>>
-  cursorAccountsImportJson: (json: string, tags?: string[]) => Promise<IpcResult<CursorAccount[]>>
-  cursorAccountsImportLocal: (tags?: string[]) => Promise<IpcResult<CursorAccount>>
-  cursorAccountsImportCockpit: (tags?: string[]) => Promise<IpcResult<CursorCockpitImportSummary>>
-  cursorAccountsAddToken: (
-    input: string,
-    tags?: string[]
-  ) => Promise<IpcResult<CursorCredentialImportSummary>>
-  cursorAccountsExport: (ids: string[]) => Promise<IpcResult<string>>
-  cursorAccountsRefresh: (id: string) => Promise<IpcResult<CursorAccount>>
-  cursorAccountsRefreshAll: () => Promise<IpcResult<CursorRefreshAllSummary>>
-  cursorAccountsUpdateTags: (id: string, tags: string[]) => Promise<IpcResult<CursorAccount>>
-  cursorAccountsInject: (
-    id: string,
-    options?: CursorInjectOptions
-  ) => Promise<IpcResult<CursorInjectResult>>
-  cursorAccountsOAuthStart: () => Promise<IpcResult<CursorOAuthStartResult>>
-  cursorAccountsOAuthComplete: (
-    loginId: string,
-    tags?: string[]
-  ) => Promise<IpcResult<CursorAccount>>
-  cursorAccountsOAuthCancel: (loginId?: string) => Promise<IpcResult<null>>
-  cursorAccountsRevealStore: () => Promise<IpcResult<string>>
-  cursorAccountsGetSettings: () => Promise<IpcResult<CursorAutoRefreshSettings>>
-  cursorAccountsUpdateSettings: (
-    patch: Partial<CursorAutoRefreshSettings>
-  ) => Promise<IpcResult<CursorAutoRefreshSettings>>
-  onCursorAccountsChanged: (callback: () => void) => () => void
-  grokAccountsList: () => Promise<IpcResult<GrokAccountView[]>>
-  grokAccountsCurrentScope: () => Promise<IpcResult<string | null>>
-  grokAccountsSwitch: (
-    scope: string,
-    options?: { closeGrok?: boolean }
-  ) => Promise<IpcResult<GrokSwitchResult>>
-  grokAccountsRemove: (
-    scope: string,
-    options?: { closeGrok?: boolean }
-  ) => Promise<IpcResult<GrokRemoveResult>>
-  grokAccountsSyncRelay: (scope: string) => Promise<IpcResult<GrokRelayStatus>>
-  grokAccountsRelayStatus: () => Promise<IpcResult<GrokRelayStatus>>
-  grokAccountsEnsureRelayRoute: (scope: string) => Promise<IpcResult<GrokRelayInstallResult>>
-  onGrokRelayInstallProgress: (callback: (progress: GrokRelayInstallProgress) => void) => () => void
-  onGrokAccountsChanged: (callback: () => void) => () => void
 }
 
 declare global {

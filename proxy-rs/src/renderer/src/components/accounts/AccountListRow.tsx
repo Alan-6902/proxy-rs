@@ -1,5 +1,6 @@
 import { memo, useState, useMemo, useCallback } from 'react'
 import { useAccountsStore } from '@/store/accounts'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useAccountActions } from '@/hooks/useAccountActions'
 import { Badge, Button, askConfirm } from '../ui'
@@ -80,7 +81,19 @@ function AccountListRowComponent({
     privacyMode,
     usagePrecision,
     updateAccountStatus
-  } = useAccountsStore()
+  } = useAccountsStore(
+    useShallow((s) => ({
+      removeAccount: s.removeAccount,
+      checkAccountStatus: s.checkAccountStatus,
+      refreshAccountToken: s.refreshAccountToken,
+      toggleSelection: s.toggleSelection,
+      maskEmail: s.maskEmail,
+      maskNickname: s.maskNickname,
+      privacyMode: s.privacyMode,
+      usagePrecision: s.usagePrecision,
+      updateAccountStatus: s.updateAccountStatus
+    }))
+  )
 
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'

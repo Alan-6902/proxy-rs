@@ -57,6 +57,35 @@ fn map_provider_error(err: Error) -> Response {
         )
             .into_response();
     }
+    // 请求体错误属于调用方请求；保留上游原因，避免被网关当成服务故障。
+    if let Some(upstream) = err.downcast_ref::<crate::kiro::provider::UpstreamApiError>() {
+        if upstream.status == reqwest::StatusCode::BAD_REQUEST {
+            let message = match &upstream.code {
+                Some(code) => format!("{} ({})", upstream.message, code),
+                None => upstream.message.clone(),
+            };
+            tracing::warn!(status = %upstream.status, code = ?upstream.code, "上游拒绝请求体");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "type": "error",
+                    "error": { "type": "invalid_request_error", "message": message }
+                })),
+            ).into_response();
+        }
+        // 重试耗尽后仍是上游限流：按 Anthropic 语义返回 429，客户端会自行退避
+        if upstream.status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!("上游持续限流，重试已耗尽");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse::new(
+                    "rate_limit_error",
+                    format!("上游限流: {}", upstream.message),
+                )),
+            )
+                .into_response();
+        }
+    }
     tracing::error!("Kiro API 调用失败: {}", err);
     (
         StatusCode::BAD_GATEWAY,
@@ -84,7 +113,9 @@ pub async fn get_models() -> impl IntoResponse {
             display_name: m.display_name,
             model_type: "chat".to_string(),
             max_tokens: m.max_tokens,
+            max_completion_tokens: m.max_tokens,
             context_window: m.context_window,
+            context_length: m.context_window,
         })
         .collect();
 
@@ -445,6 +476,8 @@ async fn handle_non_stream_request(
     let mut context_input_tokens: Option<i32> = None;
     // 上游 metadataEvent 给出的 token 分解（含 prompt cache 读写）
     let mut token_usage = None;
+    // 上游在响应中途报的错误
+    let mut upstream_error: Option<String> = None;
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -518,10 +551,20 @@ async fn handle_non_stream_request(
                                 token_usage = Some(usage);
                             }
                         }
-                        Event::Exception { exception_type, .. } => {
+                        Event::Exception { exception_type, message } => {
                             if exception_type == "ContentLengthExceededException" {
                                 stop_reason = "max_tokens".to_string();
+                            } else {
+                                tracing::warn!("收到异常事件: {} - {}", exception_type, message);
+                                upstream_error.get_or_insert_with(|| {
+                                    format!("{exception_type}: {message}")
+                                });
                             }
+                        }
+                        Event::Error { error_code, error_message } => {
+                            tracing::error!("收到错误事件: {} - {}", error_code, error_message);
+                            upstream_error
+                                .get_or_insert_with(|| format!("{error_code}: {error_message}"));
                         }
                         _ => {}
                     }
@@ -531,6 +574,15 @@ async fn handle_non_stream_request(
                 tracing::warn!("解码事件失败: {}", e);
             }
         }
+    }
+
+    // 上游中途报错：返回错误，不把半截内容当成功响应
+    if let Some(message) = upstream_error {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new("api_error", format!("上游返回错误: {message}"))),
+        )
+            .into_response();
     }
 
     // 确定 stop_reason
@@ -616,7 +668,8 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
     let is_adaptive_thinking = (model_lower.contains("opus")
         && (model_lower.contains("4-6") || model_lower.contains("4.6")))
         || model_lower.contains("sonnet-5")
-        || model_lower.contains("opus-5");
+        || model_lower.contains("opus-5")
+        || model_lower.contains("fable");
 
     let thinking_type = if is_adaptive_thinking {
         "adaptive"
@@ -925,4 +978,54 @@ fn create_buffered_sse_stream(
         },
     )
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kiro::provider::tests::mock_upstream;
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_upstream_bad_request_reaches_all_message_handlers() {
+        let upstream = mock_upstream().await;
+        let provider = &upstream.provider;
+        for mode in 0..3 {
+            let response = match mode {
+                0 => handle_non_stream_request(provider.clone(), r#"{"reject":true}"#, "claude-sonnet-4.5", 1, false, HashMap::new()).await,
+                1 => handle_stream_request(provider.clone(), r#"{"reject":true}"#, "claude-sonnet-4.5", 1, false, HashMap::new()).await,
+                _ => handle_stream_request_buffered(provider.clone(), r#"{"reject":true}"#, "claude-sonnet-4.5", 1, false, HashMap::new()).await,
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "处理模式 {mode}");
+            let body = response_json(response).await;
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert!(body["error"]["message"].as_str().unwrap().contains("Invalid tool use format."));
+            assert!(body["error"]["message"].as_str().unwrap().contains("REQUEST_BODY_INVALID"));
+        }
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 3);
+        let snapshot = provider.token_manager().snapshot();
+        assert_eq!(snapshot.entries[0].failure_count, 0);
+        assert!(!snapshot.entries[0].disabled);
+        assert!(provider.call_api_stream_tracked("{}").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_existing_error_categories_are_preserved() {
+        for (message, expected_status, expected_type) in [
+            ("CONTENT_LENGTH_EXCEEDS_THRESHOLD", StatusCode::BAD_REQUEST, "invalid_request_error"),
+            ("Input is too long", StatusCode::BAD_REQUEST, "invalid_request_error"),
+            ("connection failed", StatusCode::BAD_GATEWAY, "api_error"),
+        ] {
+            let response = map_provider_error(anyhow::anyhow!(message));
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(response_json(response).await["error"]["type"], expected_type);
+        }
+    }
 }

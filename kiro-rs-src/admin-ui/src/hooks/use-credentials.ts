@@ -18,6 +18,7 @@ import {
   getAgAccounts,
   refreshAgAccount,
   setAgAccountDisabled,
+  resetAgAccountFailures,
   deleteAgAccount,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
@@ -183,12 +184,17 @@ export function useSetLoadBalancingMode() {
 
 // === Antigravity 账号池 ===
 
+/** 账号列表自动重取间隔 */
+const AG_ACCOUNTS_REFETCH_MS = 60_000
+
 export function useAgAccounts(enabled: boolean) {
   return useQuery({
     queryKey: ['ag-accounts'],
     queryFn: getAgAccounts,
     enabled,
     retry: false,
+    // 后端定时拉额度，前端跟着定时重取列表才能看到
+    refetchInterval: AG_ACCOUNTS_REFETCH_MS,
   })
 }
 
@@ -204,6 +210,14 @@ export function useSetAgAccountDisabled() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ id, disabled }: { id: number; disabled: boolean }) => setAgAccountDisabled(id, disabled),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
+  })
+}
+
+export function useResetAgAccountFailures() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: resetAgAccountFailures,
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
   })
 }

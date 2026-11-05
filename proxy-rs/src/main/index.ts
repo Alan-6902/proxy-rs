@@ -115,12 +115,6 @@ import { LOCAL_ADMIN_PROBE_VERDICT, type LocalAdminPushCandidate } from '../shar
 import { resolveSubscriptionTypeFromTitle } from '../shared/subscriptionType'
 import { fetchLocalAdminUsage } from './adminManaged/adminBalanceClient'
 import {
-  registerCursorAccountsIpcHandlers,
-  sendCursorAccountsChanged
-} from './cursorAccounts/ipc-handlers'
-import { registerGrokAccountsIpcHandlers } from './grokAccounts/ipc-handlers'
-import { CursorAutoRefreshScheduler } from './cursorAccounts/refreshScheduler'
-import {
   LocalNotificationService,
   LocalNoticeKind,
   type LocalNoticeLanguage
@@ -128,7 +122,6 @@ import {
 import {
   createTray,
   destroyTray,
-  updateTrayMenu,
   updateCurrentAccount,
   updateAccountList,
   setTrayTooltip,
@@ -1233,6 +1226,7 @@ let store: {
 let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
+import { ANTIGRAVITY_ADMIN_PARTITION, ANTIGRAVITY_ADMIN_PATH } from '../shared/antigravity'
 import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
 import { withoutSecrets, type AccountLike } from './accountDb/projection'
 import {
@@ -1254,6 +1248,9 @@ import {
   ensureFreshAccountDbCredential,
   isAccountDbMode,
   loadAccountDbConfig,
+  antigravityAdminTarget,
+  startManagedAntigravity,
+  stopManagedAntigravity,
   startAccountDbBackups,
   startAccountDbWatcher,
   startManagedKiroRs,
@@ -2971,7 +2968,10 @@ function createWindow(): void {
       webviewTag: true
     }
   })
-  installAdminWebviewGuards(mainWindow.webContents, { resolve: resolveKiroAdminView })
+  installAdminWebviewGuards(mainWindow.webContents, {
+    resolve: resolveKiroAdminView,
+    resolveAntigravity: resolveAntigravityAdminView
+  })
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
     const action = resolveWindowZoomAction(input)
@@ -2989,6 +2989,8 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => {
     // 设置带版本号的标题（HTML 加载后会覆盖初始标题）
     mainWindow?.setTitle(`${APP_NAME} v${app.getVersion()}`)
+    // 每次启动都以最大化窗口打开
+    mainWindow?.maximize()
     mainWindow?.show()
   })
 
@@ -3171,23 +3173,6 @@ app.whenReady().then(async () => {
     console.warn('[KskAutomation] Failed to start:', err)
   })
 
-  // ============ Cursor 账号管理（多账号、切号、用量）IPC ============
-  const cursorAutoRefreshScheduler = new CursorAutoRefreshScheduler({
-    onRefreshed: () => sendCursorAccountsChanged(() => mainWindow)
-  })
-  registerCursorAccountsIpcHandlers({
-    getMainWindow: () => mainWindow,
-    getScheduler: () => cursorAutoRefreshScheduler
-  })
-  void cursorAutoRefreshScheduler.start().catch((err) => {
-    console.warn('[CursorAutoRefresh] Failed to start:', err)
-  })
-
-  // ============ Grok Bot 账号管理（切号 + 同步 relay）IPC ============
-  registerGrokAccountsIpcHandlers({
-    getMainWindow: () => mainWindow
-  })
-
   // ============ 托盘相关 IPC ============
 
   // IPC: 获取托盘设置
@@ -3262,11 +3247,6 @@ app.whenReady().then(async () => {
   ipcMain.on('update-tray-account-list', (_event, accounts: typeof allAccounts) => {
     allAccounts = accounts
     updateAccountList(accounts)
-  })
-
-  // IPC: 刷新托盘菜单
-  ipcMain.on('refresh-tray-menu', () => {
-    updateTrayMenu()
   })
 
   // IPC: 更新托盘语言
@@ -3376,51 +3356,6 @@ app.whenReady().then(async () => {
       )
 
       return { results }
-    }
-  )
-
-  // ============ 通用 HTTP 诊断探测 ============
-  /**
-   * 使用应用代理设置发起一次 GET/HEAD 请求，返回延迟、状态码、错误信息。
-   * 用于"一键诊断"面板中检测 Kiro API / 邮箱服务 / 公网连通性。
-   */
-  ipcMain.handle(
-    'diagnose:http-probe',
-    async (
-      _event,
-      params: {
-        url: string
-        method?: 'GET' | 'HEAD'
-        timeoutMs?: number
-      }
-    ) => {
-      const { url, method = 'GET', timeoutMs = 5000 } = params || {}
-      if (!url) return { success: false, error: 'Missing url' }
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      const start = Date.now()
-      try {
-        const resp = await fetchWithAppProxy(url, {
-          method,
-          signal: controller.signal,
-          headers: { 'User-Agent': DIAGNOSE_USER_AGENT }
-        })
-        const latencyMs = Date.now() - start
-        return { success: resp.ok, latencyMs, status: resp.status }
-      } catch (err) {
-        const isAbort = controller.signal.aborted
-        return {
-          success: false,
-          latencyMs: Date.now() - start,
-          error: isAbort
-            ? `Timeout (${timeoutMs}ms)`
-            : err instanceof Error
-              ? err.message
-              : String(err)
-        }
-      } finally {
-        clearTimeout(timer)
-      }
     }
   )
 
@@ -3695,15 +3630,16 @@ app.whenReady().then(async () => {
   ipcMain.handle('kiro-cli-current-account', () => ({ accountId: currentKiroCliAccountId() }))
 
   // IPC: 内嵌 Admin 页面的地址（Key 由主进程在页面里注入，不下发给渲染进程）
-  ipcMain.handle('kiro-admin-view', () => {
+  ipcMain.handle('kiro-admin-view', (_event, provider?: unknown) => {
+    const antigravity = provider === 'antigravity'
     const status = accountDbStatus()
-    const view = resolveKiroAdminView()
+    const view = antigravity ? resolveAntigravityAdminView() : resolveKiroAdminView()
     return {
       enabled: status.enabled,
       url: view?.adminUiUrl,
-      partition: KIRO_ADMIN_PARTITION,
-      kiroRsState: status.kiroRsState,
-      detail: status.kiroRsDetail ?? accountDbStartupError ?? undefined
+      partition: antigravity ? ANTIGRAVITY_ADMIN_PARTITION : KIRO_ADMIN_PARTITION,
+      serviceState: antigravity ? status.antigravityState : status.kiroRsState,
+      detail: (antigravity ? status.antigravityDetail : status.kiroRsDetail) ?? accountDbStartupError ?? undefined
     }
   })
 
@@ -5110,14 +5046,6 @@ app.whenReady().then(async () => {
         })
       )
 
-      // 通知进度
-      mainWindow?.webContents.send('background-refresh-progress', {
-        completed,
-        total: accounts.length,
-        success,
-        failed
-      })
-
       // 批次间延迟，让主进程有喘息时间
       if (i + concurrency < accounts.length) {
         await new Promise((resolve) => setTimeout(resolve, 100))
@@ -5555,14 +5483,6 @@ app.whenReady().then(async () => {
             }
           })
         )
-
-        // 通知进度
-        mainWindow?.webContents.send('background-check-progress', {
-          completed,
-          total: accounts.length,
-          success,
-          failed
-        })
 
         // 批次间延迟
         if (i + concurrency < accounts.length) {
@@ -7102,6 +7022,15 @@ function resolveKiroAdminView(): { adminUiUrl: string; adminApiKey: string } | n
   return { adminUiUrl: adminUiUrlFromApiBase(target.baseUrl), adminApiKey: target.adminApiKey }
 }
 
+function resolveAntigravityAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
+  const target = antigravityAdminTarget()
+  if (!target) return null
+  const url = new URL(target.baseUrl)
+  url.pathname = ANTIGRAVITY_ADMIN_PATH
+  url.search = ''
+  return { adminUiUrl: url.href, adminApiKey: target.adminApiKey }
+}
+
 /** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
 async function startAccountDbServices(): Promise<void> {
   startAccountDbWatcher(() => {
@@ -7115,6 +7044,18 @@ async function startAccountDbServices(): Promise<void> {
   }, KIRO_CLI_RENEWAL_INTERVAL_MS)
   const config = loadAccountDbConfig(app.getPath('userData'))
   if (!config) return
+  const antigravityStart = startManagedAntigravity({
+    binary: config.antigravityRs?.binary ?? (app.isPackaged
+      ? join(process.resourcesPath, 'antigravity-rs')
+      : join(app.getAppPath(), '..', 'kiro-rs-src', 'target', 'release', 'antigravity-rs')),
+    onLog: (line, stream) => logKiroRsLine(line, stream, 'antigravity-rs'),
+    onStateChange: (state, detail) => {
+      console.log(`[antigravity-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
+      sendRendererEvent('account-db-status', accountDbStatus())
+    }
+  }).catch((error) => {
+    console.error('[antigravity-rs] 启动失败：', error instanceof Error ? error.message : error)
+  })
   try {
     await startManagedKiroRs({
       binary: resolveKiroRsBinary(config),
@@ -7130,12 +7071,20 @@ async function startAccountDbServices(): Promise<void> {
   } catch (error) {
     console.error('[kiro-rs] 启动失败：', error instanceof Error ? error.message : error)
   }
+  await antigravityStart
 }
 
 // 应用退出前注销 URI 协议处理器并保存数据
+/** 退出兜底超时：覆盖保存 + 反代 SIGTERM 宽限 3s + SIGKILL 回收 */
+const EXIT_FORCE_QUIT_MS = 6_000
+
+// 退出收尾只跑一次。不能复用 isQuitting：托盘「退出」等入口会先置 isQuitting 再 app.quit()，
+// 复用会让收尾（保存、停反代）被整个跳过
+let exitCleanupStarted = false
+
 app.on('will-quit', async (event) => {
-  // 防止重复处理
-  if (isQuitting) return
+  if (exitCleanupStarted) return
+  exitCleanupStarted = true
 
   // 停止主进程池 token 刷新调度器
   stopMainPoolTokenRefresh()
@@ -7148,18 +7097,23 @@ app.on('will-quit', async (event) => {
     accountDbCliTimer = null
   }
 
-  // 防止应用立即退出，先保存数据
+  // 接管退出：先停反代子进程（与保存并行），全部收尾后再 app.exit
+  event.preventDefault()
+  isQuitting = true
+
+  // 兜底强制退出：需大于子进程 SIGTERM 宽限（3s）+ SIGKILL 回收，避免反代成孤儿进程
+  const forceQuitTimer = setTimeout(() => {
+    console.log('[Exit] Force quit due to timeout')
+    unregisterProtocol()
+    app.exit(0)
+  }, EXIT_FORCE_QUIT_MS)
+
+  // 分别停止两个反代进程，等待它们写完统计
+  const stopProxies = Promise.all([stopManagedKiroRs(), stopManagedAntigravity()]).catch(
+    (error) => console.error('[Exit] 停止反代进程失败：', error)
+  )
+
   if (lastSavedData && store) {
-    event.preventDefault()
-    isQuitting = true
-
-    // 设置超时，确保 3 秒后强制退出（防止关机阻塞）
-    const forceQuitTimer = setTimeout(() => {
-      console.log('[Exit] Force quit due to timeout')
-      unregisterProtocol()
-      app.exit(0)
-    }, 3000)
-
     try {
       await accountStoreCoordinator.runExclusive(async () => {
         console.log('[Exit] Saving data before quit...')
@@ -7179,18 +7133,12 @@ app.on('will-quit', async (event) => {
     } catch (error) {
       console.error('[Exit] Failed to save data:', error)
     }
-    // kiro-rs 与 proxy 同生共死：先让它把统计写完再退出
-    await stopManagedKiroRs().catch((error) =>
-      console.error('[Exit] Failed to stop kiro-rs:', error)
-    )
-
-    clearTimeout(forceQuitTimer)
-    unregisterProtocol()
-    app.exit(0)
-  } else {
-    void stopManagedKiroRs()
-    unregisterProtocol()
   }
+  await stopProxies
+
+  clearTimeout(forceQuitTimer)
+  unregisterProtocol()
+  app.exit(0)
 })
 
 // In this file you can include the rest of your app's specific main process

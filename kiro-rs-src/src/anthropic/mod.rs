@@ -30,5 +30,6 @@ pub(crate) mod stream;
 pub mod types;
 mod websearch;
 
+pub(crate) use converter::summarize_tool_structure;
 pub(crate) use middleware::{access_log_middleware, cors_layer};
 pub use router::create_router_with_provider;

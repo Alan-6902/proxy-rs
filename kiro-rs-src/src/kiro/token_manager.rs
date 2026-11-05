@@ -19,7 +19,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::account_store::{
-    AccountStore, NewAccountMeta, StoredCounters, UsageWrite, ms_to_rfc3339, rfc3339_to_ms,
+    AccountStore, CredentialVersionConflict, NewAccountMeta, StoredCounters, UsageWrite,
+    ms_to_rfc3339, rfc3339_to_ms,
 };
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -29,6 +30,11 @@ use crate::kiro::model::token_refresh::{
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::model::config::Config;
+
+/// 刷新结果落库的额外重试次数（AccountStore 内部已对 BUSY 重试过一轮）
+const ROTATED_SAVE_RETRIES: usize = 3;
+/// 刷新结果落库重试的基础退避（按次数线性增加）
+const ROTATED_SAVE_RETRY_DELAY: StdDuration = StdDuration::from_millis(500);
 
 /// 检查 Token 是否在指定时间内过期
 pub(crate) fn is_token_expiring_within(
@@ -652,8 +658,8 @@ pub struct MultiTokenManager {
     entries: Mutex<Vec<CredentialEntry>>,
     /// 当前活动凭据 ID
     current_id: Mutex<u64>,
-    /// Token 刷新锁，确保同一时间只有一个刷新操作
-    refresh_lock: TokioMutex<()>,
+    /// 按凭据分的刷新锁：同一凭据同一时间只有一个刷新，不同凭据互不阻塞
+    refresh_locks: Mutex<HashMap<u64, Arc<TokioMutex<()>>>>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
     /// 是否为多凭据格式（数组格式才回写）
@@ -839,7 +845,7 @@ impl MultiTokenManager {
             proxy,
             entries: Mutex::new(entries),
             current_id: Mutex::new(initial_id),
-            refresh_lock: TokioMutex::new(()),
+            refresh_locks: Mutex::new(HashMap::new()),
             credentials_path,
             is_multiple_format,
             load_balancing_mode: Mutex::new(load_balancing_mode),
@@ -941,7 +947,7 @@ impl MultiTokenManager {
             proxy,
             entries: Mutex::new(entries),
             current_id: Mutex::new(initial_id),
-            refresh_lock: TokioMutex::new(()),
+            refresh_locks: Mutex::new(HashMap::new()),
             credentials_path: None,
             is_multiple_format: true,
             load_balancing_mode: Mutex::new(load_balancing_mode),
@@ -1000,9 +1006,87 @@ impl MultiTokenManager {
         store.set_enabled_state(id, reason, failures, refresh_failures)
     }
 
+    /// 写入轮换后的凭据；BUSY 等瞬态失败时退避重试，版本冲突立即返回
+    async fn save_rotated_with_retry(
+        &self,
+        store: &Arc<AccountStore>,
+        id: u64,
+        base_version: Option<i64>,
+        creds: &KiroCredentials,
+    ) -> anyhow::Result<i64> {
+        let mut attempt = 0;
+        loop {
+            let (s, c) = (store.clone(), creds.clone());
+            let result =
+                tokio::task::spawn_blocking(move || s.save_rotated_credentials(id, base_version, &c))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("落库任务异常: {e}"))
+                    .and_then(|r| r);
+            match result {
+                Err(e)
+                    if attempt < ROTATED_SAVE_RETRIES
+                        && e.downcast_ref::<CredentialVersionConflict>().is_none() =>
+                {
+                    attempt += 1;
+                    tracing::warn!("凭据 #{} 刷新结果落库失败，第 {} 次重试: {}", id, attempt, e);
+                    tokio::time::sleep(ROTATED_SAVE_RETRY_DELAY * attempt as u32).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// 按落库结果更新内存（库模式）。
+    ///
+    /// 上游已轮换、旧 refresh token 已作废，所以除版本冲突外，落库失败也必须把新凭据
+    /// 留在内存里：后续请求和下次刷新都用新 token，版本号不变，下次刷新会再次落库。
+    fn apply_rotated_save(
+        &self,
+        store: &AccountStore,
+        id: u64,
+        new_creds: KiroCredentials,
+        saved: anyhow::Result<i64>,
+    ) -> anyhow::Result<KiroCredentials> {
+        let version = match saved {
+            Ok(version) => Some(version),
+            Err(e) if e.downcast_ref::<CredentialVersionConflict>().is_some() => {
+                // 别的写入者（收编 / 重新登录）已换上更新的凭据：以那份为准
+                tracing::warn!("凭据 #{} 刷新期间已被替换，改用最新凭据: {}", id, e);
+                if let Err(e) = store.end_refresh(id) {
+                    tracing::warn!("凭据 #{} 清除刷新标记失败: {}", id, e);
+                }
+                return self.entry_credentials(id);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "凭据 #{} 刷新结果落库失败，暂存内存（重启前需成功落库一次）: {}",
+                    id,
+                    e
+                );
+                if let Err(e) = store.end_refresh(id) {
+                    tracing::warn!("凭据 #{} 清除刷新标记失败: {}", id, e);
+                }
+                None
+            }
+        };
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.credentials = new_creds.clone();
+            if let Some(version) = version {
+                entry.credential_version = version;
+            }
+        }
+        Ok(new_creds)
+    }
+
+    /// 取某凭据的刷新锁（不存在则创建）
+    fn refresh_lock_for(&self, id: u64) -> Arc<TokioMutex<()>> {
+        self.refresh_locks.lock().entry(id).or_default().clone()
+    }
+
     /// 执行一次上游刷新并落盘（库模式按版本条件写）。
     ///
-    /// 调用方必须已持有 `refresh_lock`。库模式下先写在途标记再发请求，
+    /// 调用方必须已持有该凭据的 `refresh_lock_for(id)`。库模式下先写在途标记再发请求，
     /// 事务不跨网络；失败时清掉在途标记。
     async fn refresh_and_store(
         &self,
@@ -1035,13 +1119,10 @@ impl MultiTokenManager {
         };
 
         if let Some(store) = &self.store {
-            // 上游已轮换：这一步必须成功，否则新 refresh token 会丢
-            let version = store.save_rotated_credentials(id, base_version, &new_creds)?;
-            let mut entries = self.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.credentials = new_creds.clone();
-                entry.credential_version = version;
-            }
+            let saved = self
+                .save_rotated_with_retry(store, id, base_version, &new_creds)
+                .await;
+            return self.apply_rotated_save(store, id, new_creds, saved);
         } else {
             {
                 let mut entries = self.entries.lock();
@@ -1433,8 +1514,9 @@ impl MultiTokenManager {
         let needs_refresh = is_token_expired(credentials) || is_token_expiring_soon(credentials);
 
         let creds = if needs_refresh {
-            // 获取刷新锁，确保同一时间只有一个刷新操作
-            let _guard = self.refresh_lock.lock().await;
+            // 获取该凭据的刷新锁，确保同一凭据同一时间只有一个刷新操作
+            let lock = self.refresh_lock_for(id);
+            let _guard = lock.lock().await;
 
             // 第二次检查：获取锁后重新读取凭据，因为其他请求可能已经完成刷新
             let current_creds = {
@@ -2234,7 +2316,8 @@ impl MultiTokenManager {
                 is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
             if needs_refresh {
-                let _guard = self.refresh_lock.lock().await;
+                let lock = self.refresh_lock_for(id);
+                let _guard = lock.lock().await;
                 let current_creds = {
                     let entries = self.entries.lock();
                     entries
@@ -2620,7 +2703,8 @@ impl MultiTokenManager {
         id: u64,
         expected_access_token: Option<&str>,
     ) -> anyhow::Result<()> {
-        let _guard = self.refresh_lock.lock().await;
+        let lock = self.refresh_lock_for(id);
+        let _guard = lock.lock().await;
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2705,7 +2789,8 @@ impl MultiTokenManager {
         expected_version: Option<i64>,
         force: bool,
     ) -> anyhow::Result<i64> {
-        let _guard = self.refresh_lock.lock().await;
+        let lock = self.refresh_lock_for(id);
+        let _guard = lock.lock().await;
         let (credentials, version) = {
             let entries = self.entries.lock();
             let e = entries
@@ -2916,12 +3001,16 @@ impl MultiTokenManager {
             .filter(|v| !v.is_empty())
             .ok_or_else(|| anyhow::anyhow!("上游未返回 userId，无法确认是哪个账号"))?;
 
-        // 与自身刷新互斥：等锁期间库里可能已刷新或已收编，持锁后再判断一次
-        let _guard = self.refresh_lock.lock().await;
+        // 与该账号的自身刷新互斥：等锁期间库里可能已刷新或已收编，持锁后再判断一次
+        let Some(target_id) = store.find_by_upstream_identity(&user_id)? else {
+            return Ok(AdoptOutcome::NotFound);
+        };
+        let lock = self.refresh_lock_for(target_id);
+        let _guard = lock.lock().await;
         self.adopt_with_identity(&cred, &user_id)
     }
 
-    /// 收编的同步部分（已确认上游身份，调用方持有 refresh_lock）
+    /// 收编的同步部分（已确认上游身份，调用方持有目标账号的刷新锁）
     fn adopt_with_identity(
         &self,
         cred: &KiroCredentials,
@@ -3852,7 +3941,8 @@ mod tests {
     async fn test_forced_refresh_reuses_rotation_while_waiting_for_lock() {
         let manager = manager_with_two_live_creds(false);
         let id = manager.entries.lock()[0].id;
-        let guard = manager.refresh_lock.lock().await;
+        let lock = manager.refresh_lock_for(id);
+        let guard = lock.lock().await;
         let refresh = manager.force_refresh_token_for(id);
         tokio::pin!(refresh);
         assert!(futures::poll!(refresh.as_mut()).is_pending());
@@ -3895,7 +3985,8 @@ mod tests {
     async fn test_forced_refresh_rechecks_deleted_credential_after_lock() {
         let manager = manager_with_two_live_creds(false);
         let id = manager.entries.lock()[0].id;
-        let guard = manager.refresh_lock.lock().await;
+        let lock = manager.refresh_lock_for(id);
+        let guard = lock.lock().await;
         let refresh = manager.force_refresh_token_for(id);
         tokio::pin!(refresh);
         assert!(futures::poll!(refresh.as_mut()).is_pending());
@@ -4333,6 +4424,65 @@ mod tests {
             auth_method: Some("social".into()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn db_rotated_save_failure_keeps_new_token_in_memory() {
+        let (m, store, _) = db_manager();
+        let id = m
+            .import_credential(live_oauth("rt-old"), NewAccountMeta::default())
+            .unwrap()
+            .id;
+        let version_before = m.credential_version_of(id);
+        store.begin_refresh(id).unwrap();
+
+        // 模拟：上游已轮换，但落库在重试后仍失败（如长时间 BUSY）
+        let rotated = live_oauth("rt-new");
+        let got = m
+            .apply_rotated_save(&store, id, rotated, Err(anyhow::anyhow!("database is locked")))
+            .unwrap();
+        assert_eq!(got.refresh_token.as_deref(), Some("rt-new"));
+        // 内存必须拿着新 refresh token，否则下次刷新会用已作废的旧 token
+        assert_eq!(
+            m.entry_credentials(id).unwrap().refresh_token.as_deref(),
+            Some("rt-new")
+        );
+        // 版本号不变：下次刷新以同一 base_version 再落库
+        assert_eq!(m.credential_version_of(id), version_before);
+    }
+
+    #[tokio::test]
+    async fn db_rotated_save_conflict_uses_latest_credentials() {
+        let (m, store, _) = db_manager();
+        let id = m
+            .import_credential(live_oauth("rt-old"), NewAccountMeta::default())
+            .unwrap()
+            .id;
+        let got = m
+            .apply_rotated_save(
+                &store,
+                id,
+                live_oauth("rt-stale-rotation"),
+                Err(CredentialVersionConflict { id }.into()),
+            )
+            .unwrap();
+        // 版本冲突：库里已有别的写入者换上的凭据，不能用本次结果覆盖
+        assert_eq!(got.refresh_token.as_deref(), Some("rt-old"));
+    }
+
+    #[tokio::test]
+    async fn refresh_locks_are_per_credential() {
+        let manager = manager_with_two_live_creds(false);
+        let (a, b) = {
+            let entries = manager.entries.lock();
+            (entries[0].id, entries[1].id)
+        };
+        let lock_a = manager.refresh_lock_for(a);
+        let _held = lock_a.lock().await;
+        // 凭据 A 正在刷新时，凭据 B 的刷新锁仍可立即拿到
+        assert!(manager.refresh_lock_for(b).try_lock().is_ok());
+        // 同一凭据拿到的是同一把锁
+        assert!(manager.refresh_lock_for(a).try_lock().is_err());
     }
 
     #[tokio::test]

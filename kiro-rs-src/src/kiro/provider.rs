@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::http_client::{ProxyConfig, build_client};
+use crate::http_client::{ProxyConfig, build_streaming_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -24,6 +24,52 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 9;
+
+/// 上游响应的读空闲超时：两次数据间隔超过这么久才判定断流
+///
+/// 不设总超时，长时间生成的流不会被截断；上游每 ~25s 内总会有事件或心跳。
+const UPSTREAM_READ_IDLE_SECS: u64 = 300;
+
+/// 发送失败是否可安全重试：只有确定请求没送达上游时才重试，
+/// 否则（如读超时、连接中途断开）上游可能已开始处理，重发会重复扣额度。
+fn is_safe_to_retry_send(err: &reqwest::Error) -> bool {
+    err.is_connect()
+}
+
+/// 上游 HTTP 错误；通过 anyhow 传递时仍保留状态和服务端错误字段。
+#[derive(Debug)]
+pub(crate) struct UpstreamApiError {
+    pub status: reqwest::StatusCode,
+    pub code: Option<String>,
+    pub message: String,
+    body: String,
+}
+
+impl UpstreamApiError {
+    fn new(status: reqwest::StatusCode, body: String) -> Self {
+        let payload = serde_json::from_str::<serde_json::Value>(&body).ok();
+        let code = payload.as_ref().and_then(|value| {
+            ["reason", "code", "__type"]
+                .iter()
+                .find_map(|key| value.get(key).and_then(|v| v.as_str()))
+                .map(str::to_owned)
+        });
+        let message = payload
+            .as_ref()
+            .and_then(|value| value.get("message").and_then(|v| v.as_str()))
+            .unwrap_or(&body)
+            .to_owned();
+        Self { status, code, message, body }
+    }
+}
+
+impl std::fmt::Display for UpstreamApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "上游 API 请求失败: {} {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for UpstreamApiError {}
 
 /// Kiro API Provider
 ///
@@ -67,7 +113,8 @@ impl KiroProvider {
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
         let initial_client =
-            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
+            build_streaming_client(proxy.as_ref(), UPSTREAM_READ_IDLE_SECS, tls_backend)
+                .expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -88,7 +135,8 @@ impl KiroProvider {
         if let Some(client) = cache.get(&effective) {
             return Ok(client.clone());
         }
-        let client = build_client(effective.as_ref(), 720, self.tls_backend)?;
+        let client =
+            build_streaming_client(effective.as_ref(), UPSTREAM_READ_IDLE_SECS, self.tls_backend)?;
         cache.insert(effective, client.clone());
         Ok(client)
     }
@@ -176,10 +224,8 @@ impl KiroProvider {
             // MCP 调用（WebSearch 等工具）不涉及模型选择，无需按模型过滤凭据
             let ctx = match self.token_manager.acquire_context(None).await {
                 Ok(c) => c,
-                Err(e) => {
-                    last_error = Some(e);
-                    continue;
-                }
+                // 拿不到凭据（全部禁用 / 刷新失败）时立即重试也拿不到，直接返回
+                Err(e) => return Err(e),
             };
 
             let config = self.token_manager.config();
@@ -222,6 +268,10 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
+                    if !is_safe_to_retry_send(&e) {
+                        // 请求可能已送达上游：不重发，避免重复执行与扣额度
+                        return Err(e.into());
+                    }
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -245,15 +295,16 @@ impl KiroProvider {
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
                 if !has_available {
-                    anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
+                    return Err(anyhow::Error::new(UpstreamApiError::new(status, body))
+                        .context("所有凭据已用尽"));
                 }
-                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 continue;
             }
 
             // 400 Bad Request
             if status.as_u16() == 400 {
-                anyhow::bail!("MCP 请求失败: {} {}", status, body);
+                return Err(UpstreamApiError::new(status, body).into());
             }
 
             // 401/403 凭据问题
@@ -276,9 +327,10 @@ impl KiroProvider {
 
                 let has_available = self.token_manager.report_failure(ctx.id);
                 if !has_available {
-                    anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
+                    return Err(anyhow::Error::new(UpstreamApiError::new(status, body))
+                        .context("所有凭据已用尽"));
                 }
-                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 continue;
             }
 
@@ -291,7 +343,7 @@ impl KiroProvider {
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 if attempt + 1 < max_retries {
                     sleep(Self::retry_delay(attempt)).await;
                 }
@@ -300,11 +352,11 @@ impl KiroProvider {
 
             // 其他 4xx
             if status.is_client_error() {
-                anyhow::bail!("MCP 请求失败: {} {}", status, body);
+                return Err(UpstreamApiError::new(status, body).into());
             }
 
             // 兜底
-            last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+            last_error = Some(UpstreamApiError::new(status, body).into());
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
             }
@@ -360,10 +412,8 @@ impl KiroProvider {
                 .await
             {
                 Ok(c) => c,
-                Err(e) => {
-                    last_error = Some(e);
-                    continue;
-                }
+                // 拿不到凭据（全部禁用 / 刷新失败）时立即重试也拿不到，直接返回
+                Err(e) => return Err(e),
             };
             tracing::info!(
                 "[Account] Using account: {} (#{}, {}/{}, attempt: {}/{})",
@@ -397,12 +447,12 @@ impl KiroProvider {
             };
 
             let url = endpoint.api_url(&rctx);
-            let body = endpoint.transform_api_body(request_body, &rctx);
+            let outbound_body = bytes::Bytes::from(endpoint.transform_api_body(request_body, &rctx));
 
             let base = self
                 .client_for(&ctx.credentials)?
                 .post(&url)
-                .body(body)
+                .body(outbound_body.clone())
                 .header("content-type", "application/json")
                 .header("Connection", "close");
             let request = endpoint.decorate_api(base, &rctx);
@@ -417,6 +467,10 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
+                    if !is_safe_to_retry_send(&e) {
+                        // 请求可能已送达上游（读超时 / 中途断连）：不重发，避免重复扣额度
+                        return Err(e.into());
+                    }
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
                     // 但计入端点失败：连接不通时换主机有可能恢复
@@ -467,26 +521,22 @@ impl KiroProvider {
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
                 if !has_available {
-                    anyhow::bail!(
-                        "{} API 请求失败（所有凭据已用尽）: {} {}",
-                        api_type,
-                        status,
-                        body
-                    );
+                    return Err(anyhow::Error::new(UpstreamApiError::new(status, body))
+                        .context("所有凭据已用尽"));
                 }
 
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 continue;
             }
 
-            // 400 Bad Request - 请求问题，重试/切换凭据无意义
-            if status.as_u16() == 400 {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+            // 400 Bad Request - 请求问题，重试/切换凭据无意义。
+            // 检查的是端点加工后的实际发送体；只记录脱敏结构，不输出用户内容或凭据。
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                if let Ok(outbound_json) = std::str::from_utf8(&outbound_body) {
+                    let structure = crate::anthropic::summarize_tool_structure(outbound_json);
+                    tracing::warn!(endpoint = endpoint.name(), tool_structure = %structure, "上游拒绝请求：最终工具结构摘要");
+                }
+                return Err(UpstreamApiError::new(status, body).into());
             }
 
             // 401/403 - 更可能是凭据/权限问题：计入失败并允许故障转移
@@ -517,20 +567,11 @@ impl KiroProvider {
 
                 let has_available = self.token_manager.report_failure(ctx.id);
                 if !has_available {
-                    anyhow::bail!(
-                        "{} API 请求失败（所有凭据已用尽）: {} {}",
-                        api_type,
-                        status,
-                        body
-                    );
+                    return Err(anyhow::Error::new(UpstreamApiError::new(status, body))
+                        .context("所有凭据已用尽"));
                 }
 
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 continue;
             }
 
@@ -564,12 +605,7 @@ impl KiroProvider {
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(UpstreamApiError::new(status, body).into());
                 // 刚切换端点时无需退避：换主机后立即重试才是降级的意义
                 if attempt + 1 < max_retries && !switched {
                     sleep(Self::retry_delay(attempt)).await;
@@ -579,7 +615,7 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(UpstreamApiError::new(status, body).into());
             }
 
             // 兜底：当作可重试的瞬态错误处理（不切换凭据）
@@ -590,12 +626,7 @@ impl KiroProvider {
                 status,
                 body
             );
-            last_error = Some(anyhow::anyhow!(
-                "{} API 请求失败: {} {}",
-                api_type,
-                status,
-                body
-            ));
+            last_error = Some(UpstreamApiError::new(status, body).into());
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
             }
@@ -657,7 +688,7 @@ impl KiroProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME;
     use crate::kiro::endpoint::{AmazonQEndpoint, IdeEndpoint};
@@ -788,5 +819,90 @@ mod tests {
         );
         // 非法 JSON
         assert!(KiroProvider::extract_session_hint_from_request("not-json").is_none());
+    }
+
+    /// 本机模拟上游，不读取或写入真实账号数据。
+    pub(crate) struct MockUpstream {
+        pub provider: Arc<KiroProvider>,
+        pub calls: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockUpstream {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    struct MockEndpoint(String);
+
+    impl KiroEndpoint for MockEndpoint {
+        fn name(&self) -> &'static str { "mock" }
+        fn api_url(&self, _: &RequestContext<'_>) -> String { self.0.clone() }
+        fn mcp_url(&self, _: &RequestContext<'_>) -> String { self.0.clone() }
+        fn decorate_api(&self, req: reqwest::RequestBuilder, _: &RequestContext<'_>) -> reqwest::RequestBuilder { req }
+        fn decorate_mcp(&self, req: reqwest::RequestBuilder, _: &RequestContext<'_>) -> reqwest::RequestBuilder { req }
+        fn transform_api_body(&self, body: &str, _: &RequestContext<'_>) -> String { body.to_owned() }
+    }
+
+    pub(crate) async fn mock_upstream() -> MockUpstream {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let app = Router::new().route("/", post(move |Json(body): Json<serde_json::Value>| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                if body["reject"] == true {
+                    (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "message": "Invalid tool use format.",
+                        "reason": "REQUEST_BODY_INVALID"
+                    })))
+                } else {
+                    (axum::http::StatusCode::OK, Json(serde_json::json!({})))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let credentials = KiroCredentials {
+            access_token: Some("mock-token".to_owned()),
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+            proxy_url: Some("direct".to_owned()),
+            ..Default::default()
+        };
+        let manager = MultiTokenManager::new(Config::default(), vec![credentials], None, None, false).unwrap();
+        let endpoints: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::from([
+            ("mock".to_owned(), Arc::new(MockEndpoint(url)) as Arc<dyn KiroEndpoint>)
+        ]);
+        let provider = Arc::new(KiroProvider::with_proxy(Arc::new(manager), None, endpoints, "mock".to_owned()));
+        MockUpstream { provider, calls, task }
+    }
+
+    #[tokio::test]
+    async fn test_upstream_bad_request_preserves_details_without_penalizing_credential() {
+        use std::sync::atomic::Ordering;
+        let upstream = mock_upstream().await;
+        let provider = &upstream.provider;
+        let id = provider.token_manager().snapshot().entries[0].id;
+        provider.token_manager().report_failure(id);
+        for is_stream in [false, true] {
+            let err = provider.call_api_with_retry(r#"{"reject":true}"#, is_stream).await.unwrap_err();
+            let upstream_err = err.downcast_ref::<UpstreamApiError>().expect("必须保留结构化上游错误");
+            assert_eq!(upstream_err.status, reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(upstream_err.code.as_deref(), Some("REQUEST_BODY_INVALID"));
+            assert_eq!(upstream_err.message, "Invalid tool use format.");
+        }
+        let err = provider.call_mcp(r#"{"reject":true}"#).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<UpstreamApiError>().unwrap().status, reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 3, "请求错误不应重试");
+        let snapshot = provider.token_manager().snapshot();
+        assert_eq!(snapshot.entries[0].failure_count, 1);
+        assert!(!snapshot.entries[0].disabled);
+        assert_eq!(snapshot.available, 1);
+        assert!(provider.call_api_tracked("{}").await.is_ok(), "同一凭据仍能处理后续正常请求");
     }
 }

@@ -10,6 +10,7 @@
  */
 
 import { shell, type WebContents } from 'electron'
+import { ANTIGRAVITY_ADMIN_PARTITION } from '../../shared/antigravity'
 
 /** 日志存储里 kiro-rs 的分类名；日志页按它过滤 */
 export const KIRO_RS_LOG_CATEGORY = 'kiro-rs'
@@ -61,10 +62,14 @@ export function parseKiroRsLine(line: string, stream: 'stdout' | 'stderr'): Pars
 }
 
 /** 把一行 kiro-rs 输出按原级别写进 App 日志（经 console 拦截器落库） */
-export function logKiroRsLine(line: string, stream: 'stdout' | 'stderr'): void {
+export function logKiroRsLine(
+  line: string,
+  stream: 'stdout' | 'stderr',
+  category: 'kiro-rs' | 'antigravity-rs' = KIRO_RS_LOG_CATEGORY
+): void {
   const { level, message } = parseKiroRsLine(line, stream)
   if (!message) return
-  const text = `[${KIRO_RS_LOG_CATEGORY}] ${message}`
+  const text = `[${category}] ${message}`
   if (level === 'ERROR') console.error(text)
   else if (level === 'WARN') console.warn(text)
   else console.log(text)
@@ -93,6 +98,7 @@ export function isAllowedAdminUrl(url: string, adminUiUrl: string): boolean {
 export interface AdminViewDeps {
   /** 当前 Admin 连接信息；kiro-rs 未就绪时为 null */
   resolve: () => { adminUiUrl: string; adminApiKey: string } | null
+  resolveAntigravity?: () => { adminUiUrl: string; adminApiKey: string } | null
 }
 
 /**
@@ -100,13 +106,14 @@ export interface AdminViewDeps {
  */
 export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps): void {
   host.on('will-attach-webview', (event, webPreferences, params) => {
-    const target = deps.resolve()
-    // 只放行本机 kiro-rs 的 Admin 页面，且不给它任何 preload / Node 能力
-    if (
-      !target ||
-      !isAllowedAdminUrl(params.src, target.adminUiUrl) ||
-      params.partition !== KIRO_ADMIN_PARTITION
-    ) {
+    const target =
+      params.partition === ANTIGRAVITY_ADMIN_PARTITION
+        ? deps.resolveAntigravity?.()
+        : params.partition === KIRO_ADMIN_PARTITION
+          ? deps.resolve()
+          : null
+    // 仅允许各自管理页面使用其独立会话，且不给 preload / Node 能力
+    if (!target || !isAllowedAdminUrl(params.src, target.adminUiUrl)) {
       event.preventDefault()
       return
     }
@@ -117,13 +124,18 @@ export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps
   })
 
   host.on('did-attach-webview', (_event, guest) => {
+    const resolve = (): { adminUiUrl: string; adminApiKey: string } | null => {
+      for (const target of [deps.resolve(), deps.resolveAntigravity?.()])
+        if (target && isAllowedAdminUrl(guest.getURL(), target.adminUiUrl)) return target
+      return null
+    }
     // 新窗口 / 外链一律交给系统浏览器
     guest.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//.test(url)) void shell.openExternal(url)
       return { action: 'deny' }
     })
     guest.on('will-navigate', (event, url) => {
-      const target = deps.resolve()
+      const target = resolve()
       if (!target || !isAllowedAdminUrl(url, target.adminUiUrl)) {
         event.preventDefault()
         if (/^https?:\/\//.test(url)) void shell.openExternal(url)
@@ -132,7 +144,7 @@ export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps
     // 免登录：Admin 页面读 localStorage 里的 Key 判断是否已登录。
     // 与当前配置不一致（首次打开、Key 改过）时写入并刷新一次。
     guest.on('dom-ready', () => {
-      const target = deps.resolve()
+      const target = resolve()
       if (!target || !isAllowedAdminUrl(guest.getURL(), target.adminUiUrl)) return
       const key = JSON.stringify(target.adminApiKey)
       const storageKey = JSON.stringify(ADMIN_UI_API_KEY_STORAGE_KEY)
@@ -141,7 +153,10 @@ export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps
           `(() => { if (localStorage.getItem(${storageKey}) !== ${key}) {` +
             ` localStorage.setItem(${storageKey}, ${key}); location.reload(); } })()`
         )
-        .catch(() => undefined)
+        .catch((error) => {
+          // 注入失败时 Admin 页会停在未登录，留日志便于排查
+          console.warn('[KiroRsView] 注入 Admin Key 失败：', error)
+        })
     })
   })
 }

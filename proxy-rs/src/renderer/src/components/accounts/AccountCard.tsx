@@ -2,6 +2,7 @@ import { memo, useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Card, CardContent, Badge, Button, askConfirm } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
 import { useAccountActions } from '@/hooks/useAccountActions'
@@ -187,7 +188,18 @@ export const AccountCard = memo(function AccountCard({
     maskNickname,
     usagePrecision,
     updateAccountStatus
-  } = useAccountsStore()
+  } = useAccountsStore(
+    useShallow((s) => ({
+      removeAccount: s.removeAccount,
+      checkAccountStatus: s.checkAccountStatus,
+      refreshAccountToken: s.refreshAccountToken,
+      toggleSelection: s.toggleSelection,
+      maskEmail: s.maskEmail,
+      maskNickname: s.maskNickname,
+      usagePrecision: s.usagePrecision,
+      updateAccountStatus: s.updateAccountStatus
+    }))
+  )
 
   // 解除封禁标记中（loading 状态）
   const [isClearingSuspended, setIsClearingSuspended] = useState(false)

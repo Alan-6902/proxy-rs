@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 /// 取 2 而非 1：单次 429 往往是上游瞬时限流，退避重试即可恢复，
 /// 立即切端点会把瞬时抖动放大成全端点扫描。
 pub const DEFAULT_ENDPOINT_FALLBACK_AFTER_FAILURES: usize = 2;
+pub const DEFAULT_ANTIGRAVITY_PORT: u16 = 12889;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -32,6 +33,10 @@ pub struct Config {
 
     #[serde(default = "default_port")]
     pub port: u16,
+
+    /// Antigravity 独立监听端口，不能与 Kiro 相同
+    #[serde(default = "default_antigravity_port")]
+    pub antigravity_port: u16,
 
     #[serde(default = "default_region")]
     pub region: String,
@@ -155,6 +160,10 @@ fn default_port() -> u16 {
     8080
 }
 
+fn default_antigravity_port() -> u16 {
+    DEFAULT_ANTIGRAVITY_PORT
+}
+
 fn default_region() -> String {
     "us-east-1".to_string()
 }
@@ -201,6 +210,7 @@ impl Default for Config {
         Self {
             host: default_host(),
             port: default_port(),
+            antigravity_port: default_antigravity_port(),
             region: default_region(),
             auth_region: None,
             api_region: None,
@@ -230,6 +240,18 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn validate_listener_ports(&self, antigravity_enabled: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(self.port != 0, "Kiro 监听端口不能为 0");
+        if antigravity_enabled {
+            anyhow::ensure!(self.antigravity_port != 0, "Antigravity 监听端口不能为 0");
+            anyhow::ensure!(
+                self.port != self.antigravity_port,
+                "Antigravity 与 Kiro 必须使用不同的监听端口"
+            );
+        }
+        Ok(())
+    }
+
     /// 获取默认配置文件路径
     pub fn default_config_path() -> &'static str {
         "config.json"
@@ -279,5 +301,33 @@ impl Config {
         fs::write(path, content)
             .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_port_defaults_and_round_trips() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.antigravity_port, DEFAULT_ANTIGRAVITY_PORT);
+        assert_eq!(Config::default().port, 8080);
+        let configured: Config = serde_json::from_str(r#"{"port":12888,"antigravityPort":12901}"#).unwrap();
+        assert_eq!(configured.antigravity_port, 12901);
+        assert_eq!(serde_json::to_value(configured).unwrap()["antigravityPort"], 12901);
+    }
+
+    #[test]
+    fn antigravity_rejects_shared_and_ephemeral_ports() {
+        let mut config = Config::default();
+        config.port = config.antigravity_port;
+        assert!(config.validate_listener_ports(true).is_err());
+        assert!(config.validate_listener_ports(false).is_ok());
+        config.port = 12888;
+        config.antigravity_port = 0;
+        assert!(config.validate_listener_ports(true).is_err());
+        config.antigravity_port = DEFAULT_ANTIGRAVITY_PORT;
+        assert!(config.validate_listener_ports(true).is_ok());
     }
 }

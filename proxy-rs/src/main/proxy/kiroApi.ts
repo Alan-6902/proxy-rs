@@ -21,74 +21,10 @@ import type {
 } from './types'
 import { proxyLogger } from './logger'
 import { getSystemProxy, safeCreateProxyAgent } from './systemProxy'
-import {
-  countTokens,
-  getModelContextLength,
-  setModelContextWindow,
-  getModelContextWindow
-} from './tokenCounter'
-// 重新导出以保持向后兼容（proxyServer.ts 等模块仍 from './kiroApi' 导入）
-export { setModelContextWindow, getModelContextWindow }
+import { countTokens, getModelContextLength } from './tokenCounter'
 
-let logStreamEvents = false
-
-// profileArn 自愈持久化回调：当 Enterprise 账号在运行时首次解析出真实 profileArn 时，
-// 通过该回调通知主进程回写到 renderer store + 磁盘，避免每次请求都重新获取。
-type ProfileArnPersistCallback = (accountId: string, profileArn: string) => void
-let profileArnPersistCallback: ProfileArnPersistCallback | undefined
-export function setProfileArnPersistCallback(cb: ProfileArnPersistCallback | undefined): void {
-  profileArnPersistCallback = cb
-}
-
-export function setLogStreamEvents(enabled: boolean): void {
-  logStreamEvents = enabled
-}
-
-// Payload 大小限制（KB），用户可在高级设置中调整
-let payloadSizeLimitKB = 153600 // 默认 150MB（支持大图片）
-export function setPayloadSizeLimitKB(limitKB: number): void {
-  payloadSizeLimitKB = Math.max(256, Math.min(204800, limitKB))
-}
-
-// Token buffer reserve 开关（默认 false = 完全跳过 trimHistoryByTokens）
-// 关闭时后端不再裁剪任何旧消息，超出 context window 由 Kiro 后端原样返回错误
-let enableTokenBufferReserve = false
-export function setEnableTokenBufferReserve(enabled: boolean): void {
-  enableTokenBufferReserve = !!enabled
-}
-export function getEnableTokenBufferReserve(): boolean {
-  return enableTokenBufferReserve
-}
-
-// Token buffer reserve（仅在 enableTokenBufferReserve=true 时生效）
-// 为 model context window 预留的余量，覆盖 system + tools + current + output + 估算偏差 + schema 开销
-// 默认 20K：开关启用后的合理初始值（200K → effective 180K, 1M → effective 980K）
-let tokenBufferReserve = 20000
-export function setTokenBufferReserve(tokens: number): void {
-  tokenBufferReserve = Math.max(5000, Math.min(150000, tokens))
-}
-export function getTokenBufferReserve(): number {
-  return tokenBufferReserve
-}
-
-// 根据 modelId 和 buffer 计算 effective token limit
-// 仅在 enableTokenBufferReserve=true 时被调用
-// 查不到 model 时 fallback 到 200K context (Claude 默认)
-function getEffectiveTokenLimit(modelId?: string): number {
-  // 复用 getModelContextLength（支持 cache 命中 → 模糊匹配 → 关键词兜底）
-  const ctx = modelId ? getModelContextLength(modelId) : 200000
-  return Math.max(8000, ctx - tokenBufferReserve)
-}
-
-// Token 估算 (UTF-8 字节数 / 3.5，对中英混合场景做安全偏保守估算)
-// 比真实 cl100k_base tokenizer 略偏高 (10-20%), 用于触发裁剪阈值是安全的
-function estimateTokensFromString(str: string): number {
-  return Math.ceil(Buffer.byteLength(str, 'utf-8') / 3.5)
-}
-
-function estimatePayloadTokens(payload: KiroPayload): number {
-  return estimateTokensFromString(JSON.stringify(payload))
-}
+// Payload 大小上限（KB）：超出时截断 history 中过长的 tool result 文本
+const PAYLOAD_SIZE_LIMIT_KB = 153600 // 150MB（支持大图片）
 
 /**
  * 获取网络代理 agent
@@ -992,52 +928,6 @@ function sanitizeConversation(messages: KiroHistoryMessage[]): KiroHistoryMessag
   return sanitized
 }
 
-// 按 token 估算成对裁剪 history 最旧消息 (避免后端 CONTENT_LENGTH_EXCEEDS_THRESHOLD)
-// 切点保证不破坏 toolUse↔toolResult 配对：assistant(toolUse) 必须连同后续 user(toolResult) 一起裁
-// 裁剪后用 ensureStartsWithUserMessage 兜底重新规范化
-function trimHistoryByTokens(
-  payload: KiroPayload,
-  maxTokens: number
-): { trimmed: number; finalTokens: number; iterations: number } {
-  let history = payload.conversationState.history
-  if (!history || history.length === 0) {
-    return { trimmed: 0, finalTokens: estimatePayloadTokens(payload), iterations: 0 }
-  }
-
-  let totalTrimmed = 0
-  let iterations = 0
-  let currentTokens = estimatePayloadTokens(payload)
-  const MAX_ITERATIONS = 100 // 防止极端情况死循环
-
-  while (currentTokens > maxTokens && history.length >= 4 && iterations < MAX_ITERATIONS) {
-    iterations++
-    // 计算安全切点：从 index 0 开始至少裁掉 1 组 (user+assistant)，并连带 toolUse/toolResult 配对
-    let cutAt = 0
-    while (cutAt < history.length - 2) {
-      const msg = history[cutAt]
-      // assistant(toolUse) → 下一条 user(toolResult) 必须一起裁，避免配对断裂
-      if (isAssistantResponseMessage(msg) && hasToolUses(msg)) {
-        cutAt += 2
-      } else {
-        cutAt += 1
-      }
-      if (cutAt >= 2) break
-    }
-
-    if (cutAt === 0) break // 无法继续裁剪
-
-    history = history.slice(cutAt)
-    totalTrimmed += cutAt
-
-    // 裁剪后 history 可能以 assistant 起头 → 补 HELLO 重新规范
-    history = ensureStartsWithUserMessage(history)
-    payload.conversationState.history = history
-    currentTokens = estimatePayloadTokens(payload)
-  }
-
-  return { trimmed: totalTrimmed, finalTokens: currentTokens, iterations }
-}
-
 // ============= 构建 Kiro API 请求负载（参考 Kiro 官方实现）=============
 
 export function buildKiroPayload(
@@ -1150,7 +1040,7 @@ export function buildKiroPayload(
   }
 
   // conversationId 稳定化：同一会话的多轮请求复用同一个 conversationId
-  // 优先级：客户端显式 conversation_id → sessionHint（header 提取）→ history fingerprint → 新 UUID
+  // 优先级：调用方显式 conversation_id → history fingerprint → 新 UUID
   const conversationId = resolveConversationId(history, messageOptions?.conversationId)
   const payload: KiroPayload = {
     conversationState: {
@@ -1192,27 +1082,9 @@ export function buildKiroPayload(
     payload.additionalModelRequestFields = additionalModelRequestFields
   }
 
-  // ====== 第一阶段：按 token 估算成对裁剪旧 history ======
-  // 避免 Kiro 后端 CONTENT_LENGTH_EXCEEDS_THRESHOLD（token 维度的拒绝）
-  // 注意：byte size 充足但 token 超限是常见情况（长对话+大量小消息）
-  // effectiveLimit 按模型 context window 自动算：ctx - tokenBufferReserve（开关启用时，默认 20K）
-  // 例：sonnet-4.5 (200K) → 180K, sonnet-4.5 with 1M beta → 980K
-  // 开关关闭时完全跳过，超出 context window 由 Kiro 后端原样返回错误
-  if (enableTokenBufferReserve) {
-    const effectiveTokenLimit = getEffectiveTokenLimit(modelId)
-    const tokenTrimResult = trimHistoryByTokens(payload, effectiveTokenLimit)
-    if (tokenTrimResult.trimmed > 0) {
-      const modelCtx = getModelContextLength(modelId)
-      console.log(
-        `[KiroPayload] Trimmed ${tokenTrimResult.trimmed} oldest history messages by token estimate (≈${tokenTrimResult.finalTokens.toLocaleString()} / ${effectiveTokenLimit.toLocaleString()} tokens [model ctx ${modelCtx.toLocaleString()} - buffer ${tokenBufferReserve.toLocaleString()}], ${tokenTrimResult.iterations} iter)`
-      )
-    }
-  }
-
-  // ====== 第二阶段：按 byte 截断 tool result 内容 ======
+  // ====== 按 byte 截断 history 中过长的 tool result 内容 ======
   // 避免 HTTP body 过大被 Kiro 网关拒绝
-  // 用户可在高级设置中调整限制值（默认 1536KB = 1.5MB）
-  const PAYLOAD_SIZE_LIMIT = (payloadSizeLimitKB || 1536) * 1024
+  const PAYLOAD_SIZE_LIMIT = PAYLOAD_SIZE_LIMIT_KB * 1024
   const TOOL_RESULT_TRUNCATE_LENGTH = 4000
   let initialPayloadSize = JSON.stringify(payload).length
   if (initialPayloadSize > PAYLOAD_SIZE_LIMIT && payload.conversationState.history) {
@@ -1259,14 +1131,13 @@ export function buildKiroPayload(
 }
 
 // conversationId 稳定化：同一会话的多轮请求复用同一个 conversationId
-// 策略：sessionHint（由 proxyServer 从 header/body 提取）→ 稳定映射到固定 conversationId
-// 无 sessionHint 时用 history fingerprint 兜底
+// 策略：调用方显式传入的 conversationId → 稳定映射到固定 conversationId
+// 未传入时用 history fingerprint 兜底
 const conversationCache = new Map<string, { id: string; timestamp: number }>()
 const CONVERSATION_CACHE_TTL = 2 * 60 * 60 * 1000 // 2 小时
 const CONVERSATION_CACHE_MAX = 1000
 
 function resolveConversationId(history: KiroHistoryMessage[], sessionHint?: string): string {
-  // sessionHint 已包含 API Key hash 前缀（由 proxyServer 注入），天然隔离不同用户
   const key = sessionHint || fingerprintFromHistory(history)
   if (!key) return uuidv4()
 
@@ -1303,7 +1174,7 @@ function fingerprintFromHistory(history: KiroHistoryMessage[]): string | undefin
   return crypto.createHash('sha256').update(fp).digest('hex').slice(0, 32)
 }
 
-// 清除所有内存缓存
+// 清除所有内存缓存（会话 ID / 模型列表 / 端点熔断）；供测试隔离用例状态
 export function clearAllCaches(): {
   conversation: number
   model: number
@@ -1525,7 +1396,7 @@ export function normalizeKiroUpstreamError(error: unknown): KiroUpstreamError {
 export async function callKiroApiStream(
   account: ProxyAccount,
   payload: KiroPayload,
-  // onChunk 可返回 Promise：下游 SSE 写缓冲打满时返回 drain promise，流解析 await 实现背压
+  // onChunk 可返回 Promise：调用方处理不过来时返回 promise，流解析 await 实现背压
   onChunk: (
     text: string,
     toolUse?: KiroToolUse,
@@ -1547,10 +1418,7 @@ export async function callKiroApiStream(
   // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底，流式端点自动不传占位符）
   if (!isKiroApiKeyAccount(account) && !account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
-    if (fetchedArn) {
-      account.profileArn = fetchedArn
-      if (account.id) profileArnPersistCallback?.(account.id, fetchedArn)
-    }
+    if (fetchedArn) account.profileArn = fetchedArn
   }
 
   let lastError: Error | null = null
@@ -1916,9 +1784,6 @@ async function parseEventStream(
   // 是否已拿到 Kiro 真实 tokenUsage（最高优先级，锁定后不再被 contextUsage/tiktoken 覆盖）
   let hasRealTokenUsage = false
 
-  // 流式事件聚合计数（logStreamEvents 开启时，结束后输出摘要而非逐条输出）
-  const streamEventCounts: Record<string, number> = {}
-
   // 初始化 input tokens 估算（优先级链路：tokenUsage > contextUsage 反推 > tiktoken > 字符系数）
   // 这里只是兜底初值，后续真实事件会覆盖
   if (payloadStr) {
@@ -2014,7 +1879,7 @@ async function parseEventStream(
     return hold
   }
   // 处理 leakCarry：正常文本经 onChunk 输出，泄漏工具暂存 leakedTools。isFlush 时吐出残留。
-  // async：emit await onChunk 以保留 SSE 背压（慢客户端时暂停拉流，避免内存堆积）
+  // async：emit await onChunk 以保留背压（调用方处理慢时暂停拉流，避免内存堆积）
   const filterToolLeak = async (isFlush: boolean): Promise<void> => {
     const emit = async (s: string): Promise<void> => {
       if (!s) return
@@ -2252,17 +2117,7 @@ async function parseEventStream(
                 let parseError = false
                 try {
                   if (currentToolUse.inputBuffer) {
-                    if (logStreamEvents)
-                      proxyLogger.debug(
-                        'Kiro',
-                        'Tool input buffer: ' + currentToolUse.inputBuffer.substring(0, 200)
-                      )
                     finalInput = JSON.parse(currentToolUse.inputBuffer)
-                    if (logStreamEvents)
-                      proxyLogger.debug(
-                        'Kiro',
-                        'Parsed tool input: ' + JSON.stringify(finalInput).substring(0, 200)
-                      )
                   }
                 } catch (e) {
                   parseError = true
@@ -2372,12 +2227,6 @@ async function parseEventStream(
                 hasRealTokenUsage = true
               }
               if (metadata.outputTokens) usage.outputTokens = metadata.outputTokens
-            }
-
-            if (logStreamEvents) {
-              // 聚合流式事件（不逐条输出，在 onComplete 时输出摘要）
-              streamEventCounts[eventType || 'unknown'] =
-                (streamEventCounts[eventType || 'unknown'] || 0) + 1
             }
 
             // 处理 usageEvent
@@ -2716,12 +2565,6 @@ async function parseEventStream(
       }
     }
 
-    // 流式事件聚合摘要
-    if (logStreamEvents && Object.keys(streamEventCounts).length > 0) {
-      const total = Object.values(streamEventCounts).reduce((a, b) => a + b, 0)
-      proxyLogger.debug('Kiro', `Stream events summary (${total} total)`, streamEventCounts)
-    }
-
     throwIfAborted(signal)
     proxyLogger.info('Kiro', 'Stream complete, final usage', usage)
     await notifyComplete()
@@ -2812,176 +2655,6 @@ export interface KiroModel {
 function getQServiceEndpoint(region?: string): string {
   if (region?.startsWith('eu-')) return 'https://q.eu-central-1.amazonaws.com'
   return 'https://q.us-east-1.amazonaws.com'
-}
-
-const AWS_REGION_PATTERN = /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d+$/
-const WEB_SEARCH_MCP_PATH = '/mcp'
-
-export class KiroMcpWebSearchError extends KiroUpstreamError {
-  readonly retryable: boolean
-
-  constructor(
-    statusCode?: number,
-    retryable: boolean = false,
-    reason?: string,
-    retryAfterMs?: number
-  ) {
-    super({ statusCode, reason, code: reason, retryAfterMs })
-    this.name = 'KiroMcpWebSearchError'
-    this.message = statusCode
-      ? `Web search MCP request failed (HTTP ${statusCode})`
-      : 'Web search MCP request failed'
-    this.retryable = retryable
-  }
-}
-
-export interface KiroWebSearchResult {
-  type: 'web_search_result'
-  title: string
-  url: string
-  encrypted_content: string
-  page_age: string | null
-}
-
-function getValidatedAwsRegion(region?: string): string {
-  const normalized = region?.trim().toLowerCase()
-  return normalized && AWS_REGION_PATTERN.test(normalized) ? normalized : 'us-east-1'
-}
-
-function formatWebSearchPageAge(publishedDate: unknown): string | null {
-  const timestamp =
-    typeof publishedDate === 'number'
-      ? publishedDate
-      : typeof publishedDate === 'string' && /^\d+$/.test(publishedDate)
-        ? Number(publishedDate)
-        : NaN
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return null
-
-  const date = new Date(timestamp)
-  if (!Number.isFinite(date.getTime())) return null
-  try {
-    return new Intl.DateTimeFormat('en-US', {
-      timeZone: 'UTC',
-      month: 'long',
-      day: 'numeric',
-      year: 'numeric'
-    }).format(date)
-  } catch {
-    return null
-  }
-}
-
-function createWebSearchRequestId(): string {
-  const compact = uuidv4().replace(/-/g, '')
-  return `web_search_tooluse_${compact.slice(0, 22)}_${Date.now()}_${compact.slice(22, 30)}`
-}
-
-export async function callKiroMcpWebSearch(
-  account: ProxyAccount,
-  query: string,
-  signal?: AbortSignal
-): Promise<KiroWebSearchResult[]> {
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    'x-amz-user-agent': getKiroAmzUserAgent(),
-    'user-agent': getKiroUserAgent(),
-    'amz-sdk-invocation-id': uuidv4(),
-    'amz-sdk-request': 'attempt=1; max=3',
-    ...getKiroAuthenticationHeaders(account)
-  }
-  const profileArn = account.profileArn?.trim()
-  if (profileArn && !isPlaceholderProfileArn(profileArn))
-    headers['x-amzn-kiro-profile-arn'] = profileArn
-
-  const endpoint = `https://q.${getValidatedAwsRegion(account.region)}.amazonaws.com${WEB_SEARCH_MCP_PATH}`
-  const requestId = createWebSearchRequestId()
-  const body = {
-    id: requestId,
-    jsonrpc: '2.0',
-    method: 'tools/call',
-    params: { name: 'web_search', arguments: { query } }
-  }
-
-  let response: Response
-  try {
-    response = await fetchWithProxy(
-      endpoint,
-      { method: 'POST', headers, body: JSON.stringify(body), signal },
-      account
-    )
-  } catch (error) {
-    if (signal?.aborted) throw error
-    throw new KiroMcpWebSearchError(undefined, true)
-  }
-  if (!response.ok) {
-    const details = extractUpstreamErrorDetails(
-      response.status,
-      await response.text(),
-      getRetryAfterMs(response.headers.get('retry-after'))
-    )
-    throw new KiroMcpWebSearchError(
-      details.statusCode,
-      response.status === 408 || response.status === 429 || response.status >= 500,
-      details.reason ?? details.code,
-      details.retryAfterMs
-    )
-  }
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new KiroMcpWebSearchError()
-  }
-  if (!payload || typeof payload !== 'object') throw new KiroMcpWebSearchError()
-
-  const responsePayload = payload as {
-    id?: unknown
-    jsonrpc?: unknown
-    result?: unknown
-    error?: unknown
-  }
-  if (
-    responsePayload.jsonrpc !== '2.0' ||
-    responsePayload.id !== requestId ||
-    responsePayload.error !== undefined
-  ) {
-    throw new KiroMcpWebSearchError()
-  }
-
-  const result = responsePayload.result
-  if (!result || typeof result !== 'object') throw new KiroMcpWebSearchError()
-  const resultPayload = result as { isError?: unknown; content?: unknown }
-  if (resultPayload.isError || !Array.isArray(resultPayload.content))
-    throw new KiroMcpWebSearchError()
-
-  const firstContent = resultPayload.content[0]
-  if (!firstContent || typeof firstContent !== 'object') throw new KiroMcpWebSearchError()
-  const firstText = firstContent as { type?: unknown; text?: unknown }
-  if (firstText.type !== 'text' || typeof firstText.text !== 'string')
-    throw new KiroMcpWebSearchError()
-
-  let searchPayload: { results?: unknown }
-  try {
-    searchPayload = JSON.parse(firstText.text) as { results?: unknown }
-  } catch {
-    throw new KiroMcpWebSearchError()
-  }
-  if (!Array.isArray(searchPayload.results)) throw new KiroMcpWebSearchError()
-
-  return searchPayload.results.map((item) => {
-    if (!item || typeof item !== 'object') throw new KiroMcpWebSearchError()
-    const source = item as Record<string, unknown>
-    if (typeof source.title !== 'string' || typeof source.url !== 'string')
-      throw new KiroMcpWebSearchError()
-    return {
-      type: 'web_search_result',
-      title: source.title,
-      url: source.url,
-      encrypted_content: typeof source.snippet === 'string' ? source.snippet : '',
-      page_age: formatWebSearchPageAge(source.publishedDate)
-    }
-  })
 }
 
 // 根据账号区域获取 CodeWhisperer Runtime 端点
@@ -3084,10 +2757,7 @@ export async function fetchKiroModels(
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
   if (!isKiroApiKeyAccount(account) && !account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
-    if (fetchedArn) {
-      account.profileArn = fetchedArn
-      if (account.id) profileArnPersistCallback?.(account.id, fetchedArn)
-    }
+    if (fetchedArn) account.profileArn = fetchedArn
   }
 
   try {
@@ -3263,5 +2933,3 @@ export async function fetchSubscriptionToken(
     return { message: error instanceof Error ? error.message : 'Unknown error' }
   }
 }
-
-// 设置用户偏好（超额开启/关闭）

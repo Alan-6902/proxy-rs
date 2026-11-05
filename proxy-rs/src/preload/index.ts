@@ -8,26 +8,6 @@ import type {
   KskAutomationTaskView
 } from '../shared/kskAutomation'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
-import {
-  CURSOR_ACCOUNTS_CHANNEL,
-  type CursorAccount,
-  type CursorAutoRefreshSettings,
-  type CursorCockpitImportSummary,
-  type CursorCredentialImportSummary,
-  type CursorInjectOptions,
-  type CursorInjectResult,
-  type CursorOAuthStartResult,
-  type CursorRefreshAllSummary
-} from '../shared/cursorAccounts'
-import {
-  GROK_ACCOUNTS_CHANNEL,
-  type GrokAccountView,
-  type GrokRelayInstallProgress,
-  type GrokRelayInstallResult,
-  type GrokRelayStatus,
-  type GrokRemoveResult,
-  type GrokSwitchResult
-} from '../shared/grokAccounts'
 
 // Custom APIs for renderer
 type UpstreamKiroCredentialInput =
@@ -74,19 +54,6 @@ const api = {
     return ipcRenderer.invoke('get-app-version')
   },
 
-  // 监听 OAuth 回调
-  onAuthCallback: (callback: (data: { code: string; state: string }) => void): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      data: { code: string; state: string }
-    ): void => {
-      callback(data)
-    }
-    ipcRenderer.on('auth-callback', handler)
-    return () => {
-      ipcRenderer.removeListener('auth-callback', handler)
-    }
-  },
 
   // 账号管理 - 加载账号数据
   loadAccounts: (): Promise<unknown> => {
@@ -199,21 +166,6 @@ const api = {
     )
   },
 
-  // 监听后台刷新进度
-  onBackgroundRefreshProgress: (
-    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
-  ): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      data: { completed: number; total: number; success: number; failed: number }
-    ): void => {
-      callback(data)
-    }
-    ipcRenderer.on('background-refresh-progress', handler)
-    return () => {
-      ipcRenderer.removeListener('background-refresh-progress', handler)
-    }
-  },
 
   // 监听后台刷新结果（单个账号）
   onBackgroundRefreshResult: (
@@ -272,21 +224,6 @@ const api = {
     return ipcRenderer.invoke('background-batch-check', accounts, concurrency)
   },
 
-  // 监听后台检查进度
-  onBackgroundCheckProgress: (
-    callback: (data: { completed: number; total: number; success: number; failed: number }) => void
-  ): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      data: { completed: number; total: number; success: number; failed: number }
-    ): void => {
-      callback(data)
-    }
-    ipcRenderer.on('background-check-progress', handler)
-    return () => {
-      ipcRenderer.removeListener('background-check-progress', handler)
-    }
-  },
 
   // 监听后台检查结果（单个账号）
   onBackgroundCheckResult: (
@@ -436,22 +373,6 @@ const api = {
     return ipcRenderer.invoke('poll-iam-sso-auth', region || 'us-east-1')
   },
 
-  // 完成 IAM SSO 登录 (用授权码换取 token)
-  completeIamSsoLogin: (
-    code: string
-  ): Promise<{
-    success: boolean
-    completed?: boolean
-    accessToken?: string
-    refreshToken?: string
-    clientId?: string
-    clientSecret?: string
-    region?: string
-    expiresIn?: number
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('complete-iam-sso-login', code)
-  },
 
   // 取消 IAM SSO 登录
   cancelIamSsoLogin: (): Promise<{ success: boolean }> => {
@@ -563,13 +484,15 @@ const api = {
   },
 
   // 内嵌 kiro-rs Admin 页面的地址与 kiro-rs 状态（Admin Key 由主进程注入，不经渲染进程）
-  kiroAdminView: (): Promise<{
+  kiroAdminView: (
+    provider?: 'kiro' | 'antigravity'
+  ): Promise<{
     enabled: boolean
     url?: string
     partition: string
-    kiroRsState?: string
+    serviceState?: string
     detail?: string
-  }> => ipcRenderer.invoke('kiro-admin-view'),
+  }> => ipcRenderer.invoke('kiro-admin-view', provider),
 
   // kiro-rs 子进程状态变化（启动中 / 运行中 / 重启中 / 失败）
   onAccountDbStatus: (
@@ -773,10 +696,6 @@ const api = {
     ipcRenderer.send('update-tray-account-list', accounts)
   },
 
-  // 刷新托盘菜单
-  refreshTrayMenu: (): void => {
-    ipcRenderer.send('refresh-tray-menu')
-  },
 
   // 更新托盘语言
   updateTrayLanguage: (language: 'en' | 'zh'): void => {
@@ -824,20 +743,6 @@ const api = {
     ipcRenderer.send('close-confirm-response', action, rememberChoice)
   },
 
-  // ============ 诊断 API ============
-  /** 测试一个 URL 的连通性（GET，5 秒超时，不带代理特殊处理由主进程默认逻辑） */
-  diagnoseHttpProbe: (params: {
-    url: string
-    method?: 'GET' | 'HEAD'
-    timeoutMs?: number
-  }): Promise<{
-    success: boolean
-    latencyMs?: number
-    status?: number
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('diagnose:http-probe', params)
-  },
 
   // ============ 一键诊断 ============
   diagnoseRun: (params: {
@@ -955,143 +860,6 @@ const api = {
     const handler = (): void => callback()
     ipcRenderer.on('ksk-automation-accounts-changed', handler)
     return () => ipcRenderer.removeListener('ksk-automation-accounts-changed', handler)
-  },
-
-  // ============ Cursor 账号管理 ============
-  cursorAccountsList: (): Promise<IpcResult<CursorAccount[]>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.list),
-
-  /** 本机 Cursor 当前登录的号在账号库里的 id；没匹配上为 null。 */
-  cursorAccountsCurrentId: (): Promise<IpcResult<string | null>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.currentId),
-
-  cursorAccountsRemove: (ids: string[]): Promise<IpcResult<void>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.remove, ids),
-
-  // 下面几个新增入口的 tags 是「本次添加要打的标签」，入库时一并写上，不用再单独改一次
-
-  cursorAccountsImportJson: (
-    json: string,
-    tags: string[] = []
-  ): Promise<IpcResult<CursorAccount[]>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importJson, json, tags),
-
-  cursorAccountsImportLocal: (tags: string[] = []): Promise<IpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importLocal, tags),
-
-  /** 从本机 cockpit-tools（~/.antigravity_cockpit）整批导入 Cursor 账号。 */
-  cursorAccountsImportCockpit: (
-    tags: string[] = []
-  ): Promise<IpcResult<CursorCockpitImportSummary>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.importCockpit, tags),
-
-  /**
-   * 粘贴 WorkosCursorSessionToken cookie 值或 access token（每行一条）批量入库。
-   * 主进程会替用户走完 Cursor 登录握手，拿到带 refresh token 的正式凭据。
-   */
-  cursorAccountsAddToken: (
-    input: string,
-    tags: string[] = []
-  ): Promise<IpcResult<CursorCredentialImportSummary>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.addToken, input, tags),
-
-  cursorAccountsExport: (ids: string[]): Promise<IpcResult<string>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.export, ids),
-
-  cursorAccountsRefresh: (id: string): Promise<IpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refresh, id),
-
-  cursorAccountsRefreshAll: (): Promise<IpcResult<CursorRefreshAllSummary>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.refreshAll),
-
-  cursorAccountsUpdateTags: (id: string, tags: string[]): Promise<IpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.updateTags, id, tags),
-
-  /** 切号：把账号写进本机 Cursor 的登录态。Cursor 在运行时先返回 needsClose 等用户确认。 */
-  cursorAccountsInject: (
-    id: string,
-    options?: CursorInjectOptions
-  ): Promise<IpcResult<CursorInjectResult>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.inject, id, options),
-
-  cursorAccountsOAuthStart: (): Promise<IpcResult<CursorOAuthStartResult>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthStart),
-
-  /** 阻塞到用户在浏览器完成登录（最长 5 分钟），成功即返回入库后的账号。 */
-  cursorAccountsOAuthComplete: (
-    loginId: string,
-    tags: string[] = []
-  ): Promise<IpcResult<CursorAccount>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthComplete, loginId, tags),
-
-  cursorAccountsOAuthCancel: (loginId?: string): Promise<IpcResult<null>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.oauthCancel, loginId),
-
-  cursorAccountsRevealStore: (): Promise<IpcResult<string>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.storePath),
-
-  cursorAccountsGetSettings: (): Promise<IpcResult<CursorAutoRefreshSettings>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsGet),
-
-  /** 改后台自动刷新的开关/间隔，主进程调度器随即按新设置重排。 */
-  cursorAccountsUpdateSettings: (
-    patch: Partial<CursorAutoRefreshSettings>
-  ): Promise<IpcResult<CursorAutoRefreshSettings>> =>
-    ipcRenderer.invoke(CURSOR_ACCOUNTS_CHANNEL.settingsUpdate, patch),
-
-  onCursorAccountsChanged: (callback: () => void): (() => void) => {
-    const handler = (): void => callback()
-    ipcRenderer.on(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
-    return () => ipcRenderer.removeListener(CURSOR_ACCOUNTS_CHANNEL.changed, handler)
-  },
-
-  // ============ Grok Bot 账号管理（切号 + 同步 relay） ============
-  grokAccountsList: (): Promise<IpcResult<GrokAccountView[]>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.list),
-
-  /** 本机 Grok Bot 当前激活账号的 scope；未登录为 null。 */
-  grokAccountsCurrentScope: (): Promise<IpcResult<string | null>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.currentScope),
-
-  /** 切号：（不在 Grok 里就先从 Cursor 账号库写入）改 active + 重启 Grok + 同步 relay。Grok 在运行时先返回 needsClose 等确认。 */
-  grokAccountsSwitch: (
-    scope: string,
-    options?: { closeGrok?: boolean }
-  ): Promise<IpcResult<GrokSwitchResult>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.switch, scope, options),
-
-  /** 从 Grok 客户端移除一个号（Cursor 账号库不动）。Grok 在运行时先返回 needsClose 等确认。 */
-  grokAccountsRemove: (
-    scope: string,
-    options?: { closeGrok?: boolean }
-  ): Promise<IpcResult<GrokRemoveResult>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.remove, scope, options),
-
-  /** 只把反代 relay 配置重新指向某个号的 box 并探活，不重启客户端。 */
-  grokAccountsSyncRelay: (scope: string): Promise<IpcResult<GrokRelayStatus>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.syncRelay, scope),
-
-  /** 探活：本机反代当前能否通过 relay 打到 box。 */
-  grokAccountsRelayStatus: (): Promise<IpcResult<GrokRelayStatus>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.relayStatus),
-
-  /** 确保某个号的 Box 上有 relay 路由：没装就让它的 Bot 去装并等到探针通过。可能跑几分钟，进度走下面的事件。 */
-  grokAccountsEnsureRelayRoute: (scope: string): Promise<IpcResult<GrokRelayInstallResult>> =>
-    ipcRenderer.invoke(GROK_ACCOUNTS_CHANNEL.ensureRelayRoute, scope),
-
-  onGrokRelayInstallProgress: (
-    callback: (progress: GrokRelayInstallProgress) => void
-  ): (() => void) => {
-    const handler = (_event: unknown, progress: GrokRelayInstallProgress): void =>
-      callback(progress)
-    ipcRenderer.on(GROK_ACCOUNTS_CHANNEL.relayInstallProgress, handler)
-    return () => ipcRenderer.removeListener(GROK_ACCOUNTS_CHANNEL.relayInstallProgress, handler)
-  },
-
-  onGrokAccountsChanged: (callback: () => void): (() => void) => {
-    const handler = (): void => callback()
-    ipcRenderer.on(GROK_ACCOUNTS_CHANNEL.changed, handler)
-    return () => ipcRenderer.removeListener(GROK_ACCOUNTS_CHANNEL.changed, handler)
   }
 }
 

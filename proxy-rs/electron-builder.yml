@@ -46,6 +46,8 @@ mac:
   extraResources:
     - from: 'build/kiro-rs/kiro-rs'
       to: 'kiro-rs'
+    - from: 'build/kiro-rs/antigravity-rs'
+      to: 'antigravity-rs'
     # App 启动时同步到 ~/.local/share/serena-native/tools；由 npm run build:serena-native 生成
     - from: 'out/serena-native/serena-native.cjs'
       to: 'serena-native.cjs'

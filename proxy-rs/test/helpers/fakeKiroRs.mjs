@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // 测试用假 kiro-rs：只实现 /api/admin/store/info，参数与真实 kiro-rs 子进程模式一致
 import http from 'node:http'
+import { realpathSync } from 'node:fs'
 const args = process.argv.slice(2)
 const argValues = Object.fromEntries(args.map((value, index) => [value, args[index + 1]]))
 const port = Number(argValues['--port'])
@@ -10,14 +11,20 @@ const server = http.createServer((req, res) => {
     res.writeHead(401).end('{}')
     return
   }
+  const antigravity = Boolean(argValues['--antigravity-db'])
+  if (req.url !== (antigravity ? '/api/admin/service/info' : '/api/admin/store/info')) {
+    res.writeHead(404).end('{}')
+    return
+  }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(
-    JSON.stringify({
-      enabled: true,
-      databaseId: process.env.FAKE_DB_ID,
-      path: argValues['--account-db']
-    })
-  )
+  res.end(JSON.stringify(antigravity ? {
+    service: 'antigravity',
+    databasePath: realpathSync(argValues['--antigravity-db'])
+  } : {
+    enabled: true,
+    databaseId: process.env.FAKE_DB_ID,
+    path: argValues['--account-db']
+  }))
 })
 server.listen(port, host)
 if (args.includes('--exit-on-stdin-eof')) {

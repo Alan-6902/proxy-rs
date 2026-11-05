@@ -13,21 +13,6 @@ export class ToolNameRegistry {
     return kiroName
   }
 
-  toClientName(name: string): string {
-    return this.kiroToOriginal.get(name) || name
-  }
-
-  restoreToolUse<T extends { name: string }>(toolUse: T): T {
-    return {
-      ...toolUse,
-      name: this.toClientName(toolUse.name)
-    }
-  }
-
-  restoreToolUses<T extends { name: string }>(toolUses: T[]): T[] {
-    return toolUses.map((toolUse) => this.restoreToolUse(toolUse))
-  }
-
   private ensureUnique(baseName: string, originalName: string): string {
     const existing = this.kiroToOriginal.get(baseName)
     if (!existing || existing === originalName) return baseName

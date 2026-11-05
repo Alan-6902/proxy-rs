@@ -12,8 +12,9 @@ const FINISH_MAX_TOKENS: &str = "MAX_TOKENS";
 const STOP_END_TURN: &str = "end_turn";
 const STOP_MAX_TOKENS: &str = "max_tokens";
 const STOP_TOOL_USE: &str = "tool_use";
-/// 上游什么都没返回时给客户端的占位文本，避免空消息
-const EMPTY_RESPONSE_TEXT: &str = ".";
+const FINISH_STOP: &str = "STOP";
+const EMPTY_RESPONSE_ERROR: &str = "上游结束时没有正文或工具调用，本次生成失败";
+const INVALID_STREAM_ERROR: &str = "上游 SSE 数据无法解析";
 const DATA_PREFIX: &str = "data:";
 const DONE_MARKER: &str = "[DONE]";
 
@@ -32,32 +33,34 @@ pub struct SseDecoder {
 }
 
 impl SseDecoder {
-    pub fn feed(&mut self, chunk: &[u8]) -> Vec<Value> {
+    pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<Value>, &'static str> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
         while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            if let Some(v) = parse_line(&line) {
+            if let Some(v) = parse_line(&line)? {
                 out.push(v);
             }
         }
-        out
+        Ok(out)
     }
 
     /// 流结束时处理最后一行（可能没有换行符）
-    pub fn finish(&mut self) -> Option<Value> {
+    pub fn finish(&mut self) -> Result<Option<Value>, &'static str> {
         let line = std::mem::take(&mut self.buf);
         parse_line(&line)
     }
 }
 
-fn parse_line(line: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(line).ok()?.trim();
-    let data = text.strip_prefix(DATA_PREFIX)?.trim();
+fn parse_line(line: &[u8]) -> Result<Option<Value>, &'static str> {
+    let text = std::str::from_utf8(line).map_err(|_| INVALID_STREAM_ERROR)?.trim();
+    let Some(data) = text.strip_prefix(DATA_PREFIX).map(str::trim) else {
+        return Ok(None);
+    };
     if data.is_empty() || data == DONE_MARKER {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_str(data).ok()
+    serde_json::from_str(data).map(Some).map_err(|_| INVALID_STREAM_ERROR)
 }
 
 /// 上游响应都包在 `response` 里；个别端点直接返回裸响应
@@ -69,6 +72,7 @@ pub fn unwrap_response(v: &Value) -> &Value {
 struct Usage {
     input: i64,
     output: i64,
+    thinking: i64,
     cached: i64,
 }
 
@@ -84,7 +88,9 @@ pub struct StreamState {
     trailing_signature: Option<String>,
     last_signature: Option<String>,
     used_tool: bool,
-    emitted_block: bool,
+    has_text: bool,
+    saw_thinking: bool,
+    upstream_error: bool,
     finish_reason: Option<String>,
     usage: Usage,
 }
@@ -102,7 +108,9 @@ impl StreamState {
             trailing_signature: None,
             last_signature: None,
             used_tool: false,
-            emitted_block: false,
+            has_text: false,
+            saw_thinking: false,
+            upstream_error: false,
             finish_reason: None,
             usage: Usage::default(),
         }
@@ -111,7 +119,8 @@ impl StreamState {
     fn usage_json(&self) -> Value {
         json!({
             "input_tokens": (self.usage.input - self.usage.cached).max(0),
-            "output_tokens": self.usage.output,
+            "output_tokens": self.usage.output + self.usage.thinking,
+            "output_tokens_details": { "thinking_tokens": self.usage.thinking },
             "cache_read_input_tokens": self.usage.cached,
             "cache_creation_input_tokens": 0,
         })
@@ -143,13 +152,21 @@ impl StreamState {
     /// 处理一个上游响应块
     pub fn process(&mut self, chunk: &Value) -> Vec<SseEvent> {
         let resp = unwrap_response(chunk);
+        if resp.get("error").is_some() || chunk.get("error").is_some() {
+            self.upstream_error = true;
+        }
         if let Some(u) = resp.get("usageMetadata") {
-            let n = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
-            self.usage = Usage {
-                input: n("promptTokenCount"),
-                output: n("candidatesTokenCount") + n("thoughtsTokenCount"),
-                cached: n("cachedContentTokenCount"),
-            };
+            // 部分上游将用量分多帧发送，缺失字段不能覆盖为零。
+            for (key, value) in [
+                ("promptTokenCount", &mut self.usage.input),
+                ("candidatesTokenCount", &mut self.usage.output),
+                ("thoughtsTokenCount", &mut self.usage.thinking),
+                ("cachedContentTokenCount", &mut self.usage.cached),
+            ] {
+                if let Some(n) = u.get(key).and_then(Value::as_i64) {
+                    *value = n.max(0);
+                }
+            }
         }
         let mut events = self.message_start();
         let candidate = &resp["candidates"][0];
@@ -178,7 +195,6 @@ impl StreamState {
             json!({ "type": "content_block_start", "index": self.block_index, "content_block": content_block }),
         ));
         self.block = kind;
-        self.emitted_block = true;
         events
     }
 
@@ -252,6 +268,7 @@ impl StreamState {
             events.extend(self.start_block(BlockKind::Thinking, json!({ "type": "thinking", "thinking": "" })));
         }
         if !text.is_empty() {
+            self.saw_thinking = true;
             events.push(self.delta(json!({ "type": "thinking_delta", "thinking": text })));
         }
         if signature.is_some() {
@@ -275,13 +292,18 @@ impl StreamState {
         if self.block != BlockKind::Text {
             events.extend(self.start_block(BlockKind::Text, json!({ "type": "text", "text": "" })));
         }
+        self.has_text |= !text.trim().is_empty();
         events.push(self.delta(json!({ "type": "text_delta", "text": text })));
         events
     }
 
     fn function_call(&mut self, fc: &Value, signature: Option<String>) -> Vec<SseEvent> {
-        self.used_tool = true;
         let name = fc.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name.trim().is_empty() || fc.get("args").is_some_and(|args| !args.is_object()) {
+            self.upstream_error = true;
+            return Vec::new();
+        }
+        self.used_tool = true;
         let id = fc
             .get("id")
             .and_then(Value::as_str)
@@ -305,14 +327,60 @@ impl StreamState {
         events
     }
 
-    /// 流结束：收尾当前块并发出 message_delta / message_stop
-    pub fn finish(&mut self) -> Vec<SseEvent> {
-        let mut events = self.message_start();
-        events.extend(self.flush_trailing());
-        if !self.emitted_block {
-            events.extend(self.start_block(BlockKind::Text, json!({ "type": "text", "text": "" })));
-            events.push(self.delta(json!({ "type": "text_delta", "text": EMPTY_RESPONSE_TEXT })));
+    pub fn request_id(&self) -> &str {
+        &self.message_id
+    }
+
+    pub fn has_upstream_error(&self) -> bool {
+        self.upstream_error
+    }
+
+    pub fn has_content(&self) -> bool {
+        self.has_text || self.used_tool
+    }
+
+    /// 续跑段接在同一条消息后面：上一段的结束原因作废，等新一段自己给
+    pub fn begin_continuation(&mut self) {
+        self.finish_reason = None;
+    }
+
+    /// 上游正常结束，但只有思考、没有正文或工具调用：可以续跑一次
+    pub fn thinking_only(&self) -> bool {
+        (self.saw_thinking || self.usage.thinking > 0)
+            && !self.has_content()
+            && !self.upstream_error
+            // 输出额度已经用完：续跑大概率再撞上限，直接按失败返回
+            && self.finish_reason.as_deref() != Some(FINISH_MAX_TOKENS)
+    }
+
+    pub fn thinking_tokens(&self) -> i64 {
+        self.usage.thinking
+    }
+
+    pub fn log_outcome(&self, error: Option<&str>) {
+        tracing::info!(
+            request_id = %self.message_id, model = %self.model,
+            candidate_tokens = self.usage.output, thinking_tokens = self.usage.thinking,
+            finish_reason = ?self.finish_reason, has_content = self.has_content(), error,
+            "Antigravity 生成结束"
+        );
+    }
+
+    /// 没有有效成果或缺少上游终止事件时，不伪造可续写的正常消息。
+    pub fn finish(&mut self) -> Result<Vec<SseEvent>, &'static str> {
+        if self.upstream_error {
+            return Err("上游返回生成错误");
         }
+        if !self.has_content() {
+            return Err(EMPTY_RESPONSE_ERROR);
+        }
+        if !matches!(self.finish_reason.as_deref(), Some(FINISH_STOP | FINISH_MAX_TOKENS)) {
+            return Err("上游未正常结束生成，响应可能不完整");
+        }
+        let mut events = self.message_start();
+        // 收尾时的尾随签名后面已无块：不再补空 thinking 块，避免客户端把它当成最后一条消息、读不到正文。
+        // 文本上的签名上游不做校验，丢弃不影响下一轮。
+        self.trailing_signature = None;
         events.extend(self.end_block());
         let stop_reason = if self.used_tool {
             STOP_TOOL_USE
@@ -330,7 +398,7 @@ impl StreamState {
             }),
         ));
         events.push(SseEvent::new("message_stop", json!({ "type": "message_stop" })));
-        events
+        Ok(events)
     }
 }
 
@@ -392,7 +460,7 @@ mod tests {
         for c in chunks {
             events.extend(st.process(c));
         }
-        events.extend(st.finish());
+        events.extend(st.finish().unwrap());
         let msg = aggregate(&events);
         (events, msg)
     }
@@ -400,10 +468,10 @@ mod tests {
     #[test]
     fn decoder_splits_lines_across_chunks() {
         let mut d = SseDecoder::default();
-        assert!(d.feed(b"data: {\"a\":").is_empty());
-        let out = d.feed(b"1}\n\ndata: [DONE]\ndata: {\"b\":2}");
+        assert!(d.feed(b"data: {\"a\":").unwrap().is_empty());
+        let out = d.feed(b"1}\n\ndata: [DONE]\ndata: {\"b\":2}").unwrap();
         assert_eq!(out, vec![json!({ "a": 1 })]);
-        assert_eq!(d.finish(), Some(json!({ "b": 2 })));
+        assert_eq!(d.finish().unwrap(), Some(json!({ "b": 2 })));
     }
 
     #[test]
@@ -434,7 +502,7 @@ mod tests {
     fn maps_function_call_and_remembers_signature() {
         let (_, msg) = run(&[json!({ "response": { "candidates": [{ "content": { "parts": [
             { "functionCall": { "name": "read", "args": { "p": "a" }, "id": "call_9" }, "thoughtSignature": "sig-tool-0123456" }
-        ]}}]}})]);
+        ]}, "finishReason": "STOP" }]}})]);
         let block = &msg["content"][0];
         assert_eq!(block["type"], "tool_use");
         assert_eq!(block["id"], "call_9");
@@ -444,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_text_gets_signature_carrier_and_empty_response_gets_placeholder() {
+    fn signed_text_gets_signature_carrier_and_keeps_max_tokens() {
         let (_, msg) = run(&[json!({ "response": { "candidates": [{ "content": { "parts": [
             { "text": "answer", "thoughtSignature": "sig-text-0123456" }
         ]}, "finishReason": "MAX_TOKENS" }]}})]);
@@ -452,8 +520,66 @@ mod tests {
         assert_eq!(msg["content"][0]["signature"], "sig-text-0123456");
         assert_eq!(msg["content"][1]["text"], "answer");
         assert_eq!(msg["stop_reason"], "max_tokens");
+    }
 
-        let (_, empty) = run(&[]);
-        assert_eq!(empty["content"], json!([{ "type": "text", "text": "." }]));
+    #[test]
+    fn trailing_signature_after_text_does_not_end_with_empty_thinking() {
+        let (_, msg) = run(&[json!({ "response": { "candidates": [{ "content": { "parts": [
+            { "text": "answer" },
+            { "text": "", "thoughtSignature": "sig-trailing-0123456" }
+        ]}, "finishReason": "STOP" }]}})]);
+        let content = msg["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0], json!({ "type": "text", "text": "answer" }));
+        assert_eq!(msg["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn trailing_signature_before_tool_call_is_kept() {
+        let (_, msg) = run(&[json!({ "response": { "candidates": [{ "content": { "parts": [
+            { "text": "answer" },
+            { "text": "", "thoughtSignature": "sig-trailing-0123456" },
+            { "functionCall": { "name": "read", "args": {}, "id": "call_trailing" } }
+        ]}, "finishReason": "STOP" }]}})]);
+        let types: Vec<_> = msg["content"].as_array().unwrap().iter().map(|b| b["type"].clone()).collect();
+        assert_eq!(types, [json!("text"), json!("thinking"), json!("tool_use")]);
+        assert_eq!(msg["content"][1]["signature"], "sig-trailing-0123456");
+    }
+
+    #[test]
+    fn empty_and_thinking_only_responses_fail_instead_of_continuing() {
+        for parts in [json!([]), json!([{ "text": "hmm", "thought": true }]), json!([{ "text": "   " }])] {
+            let mut st = StreamState::new("gemini-4-argon-high");
+            st.process(&json!({ "candidates": [{ "content": { "parts": parts }, "finishReason": "MAX_TOKENS" }],
+                "usageMetadata": { "thoughtsTokenCount": 65535 } }));
+            assert!(st.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn missing_terminal_and_upstream_error_are_not_success() {
+        let mut st = StreamState::new("gemini-3.8-flash-high");
+        st.process(&json!({ "candidates": [{ "content": { "parts": [{ "text": "partial" }] } }] }));
+        assert!(st.finish().is_err());
+        st.process(&json!({ "error": { "message": "upstream secret detail" } }));
+        assert!(st.finish().is_err());
+    }
+
+    #[test]
+    fn split_usage_preserves_thinking_and_candidate_counts() {
+        let (_, msg) = run(&[
+            json!({ "usageMetadata": { "promptTokenCount": 100, "thoughtsTokenCount": 30 } }),
+            json!({ "usageMetadata": { "candidatesTokenCount": 7 }, "candidates": [{
+                "content": { "parts": [{ "text": "answer" }] }, "finishReason": "STOP" }] }),
+        ]);
+        assert_eq!(msg["usage"]["output_tokens"], 37);
+        assert_eq!(msg["usage"]["input_tokens"], 100);
+        assert_eq!(msg["usage"]["output_tokens_details"]["thinking_tokens"], 30);
+    }
+
+    #[test]
+    fn malformed_sse_is_reported() {
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.feed(b"data: {broken}\n").is_err());
     }
 }

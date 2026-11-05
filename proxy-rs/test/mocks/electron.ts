@@ -6,7 +6,11 @@ export const app = {
 
 export const ipcMain = { handle: () => undefined, on: () => undefined }
 
-export const shell = { showItemInFolder: () => undefined, openPath: async () => '' }
+export const shell = {
+  showItemInFolder: () => undefined,
+  openPath: async () => '',
+  openExternal: async () => undefined
+}
 
 export class BrowserWindow {
   static getAllWindows(): BrowserWindow[] {

@@ -214,6 +214,8 @@ export function SettingsPage() {
     darkMode,
     setTheme,
     setDarkMode,
+    sidebarCollapsedOnStart,
+    setSidebarCollapsedOnStart,
     language,
     setLanguage,
     accounts,
@@ -478,6 +480,23 @@ export function SettingsPage() {
               {darkMode ? (isEn ? 'Dark' : '深色') : isEn ? 'Light' : '浅色'}
             </Button>
           </div>
+
+          <SettingRow
+            title={isEn ? 'Collapse sidebar on startup' : '启动时收起侧边栏'}
+            description={
+              isEn
+                ? 'Applied when the app starts. You can still expand or collapse it using the sidebar button.'
+                : '下次启动时生效，仍可通过侧边栏底部按钮随时展开或收起。'
+            }
+            htmlFor="sidebar-collapsed-on-start"
+            control={
+              <Switch
+                id="sidebar-collapsed-on-start"
+                checked={sidebarCollapsedOnStart}
+                onCheckedChange={setSidebarCollapsedOnStart}
+              />
+            }
+          />
 
           {/* 主题颜色 */}
           <div className="pt-2 border-t">

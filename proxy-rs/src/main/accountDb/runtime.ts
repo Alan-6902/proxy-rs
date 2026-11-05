@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { AdminManagedAccountEntry } from '../../shared/adminManaged'
+import { DEFAULT_ANTIGRAVITY_PORT } from '../../shared/antigravity'
 import { reloadAdminManagedIds, setAdminManagedSource } from '../adminManaged/gate'
 import { AccountDb, type AccountDbRow } from './db'
 import { AccountDataBridge, type RawStore } from './bridge'
@@ -37,6 +38,14 @@ export interface AccountDbConfig {
     /** false 时不由 proxy 拉起（开发期手动运行 kiro-rs） */
     manage?: boolean
   }
+  /** Antigravity 独立进程；未配置时沿用原配置路径和原数据库位置。 */
+  antigravityRs?: {
+    configPath?: string
+    binary?: string
+    dbPath?: string
+    port?: number
+    manage?: boolean
+  }
 }
 
 export function defaultAccountDbConfig(): AccountDbConfig {
@@ -56,7 +65,8 @@ export function loadAccountDbConfig(userDataDir: string): AccountDbConfig | null
   return {
     enabled: parsed.enabled === true,
     dbPath: parsed.dbPath || defaults.dbPath,
-    kiroRs: { ...defaults.kiroRs, ...(parsed.kiroRs ?? {}) }
+    kiroRs: { ...defaults.kiroRs, ...(parsed.kiroRs ?? {}) },
+    antigravityRs: parsed.antigravityRs
   }
 }
 
@@ -74,14 +84,20 @@ export function readKiroRsConnection(
 ): {
   adminApiKey: string
   port: number
+  antigravityPort: number
 } {
   const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
     adminApiKey?: string
     port?: number
+    antigravityPort?: number
   }
   const adminApiKey = config.adminApiKey?.trim()
   if (!adminApiKey) throw new Error(`kiro-rs 配置缺少 adminApiKey：${configPath}`)
-  return { adminApiKey, port: portOverride ?? config.port ?? DEFAULT_KIRO_RS_PORT }
+  return {
+    adminApiKey,
+    port: portOverride ?? config.port ?? DEFAULT_KIRO_RS_PORT,
+    antigravityPort: config.antigravityPort ?? DEFAULT_ANTIGRAVITY_PORT
+  }
 }
 
 export function managedEntryOf(row: AccountDbRow): AdminManagedAccountEntry {
@@ -104,6 +120,9 @@ interface Runtime {
   process: KiroRsProcess | null
   kiroRsState: KiroRsState
   kiroRsDetail?: string
+  antigravityProcess: KiroRsProcess | null
+  antigravityState: KiroRsState
+  antigravityDetail?: string
   watcher: NodeJS.Timeout | null
   backupTimer: NodeJS.Timeout | null
   lastSeq: number
@@ -140,6 +159,8 @@ export function activateAccountDb(input: {
     port: connection.port,
     process: null,
     kiroRsState: 'stopped',
+    antigravityProcess: null,
+    antigravityState: 'stopped',
     watcher: null,
     backupTimer: null,
     lastSeq: db.changeSeq(),
@@ -306,6 +327,59 @@ export async function stopManagedKiroRs(): Promise<void> {
   await runtime?.process?.stop()
 }
 
+export function antigravityAdminTarget(): KiroRsAdminTarget | null {
+  if (!runtime) return null
+  if (runtime.antigravityProcess) return runtime.antigravityProcess.target()
+  if ((runtime.config.antigravityRs?.manage ?? runtime.config.kiroRs.manage) !== false) return null
+  const config = runtime.config
+  const connection = readKiroRsConnection(config.antigravityRs?.configPath ?? config.kiroRs.configPath)
+  return {
+    baseUrl: `http://${KIRO_RS_HOST}:${config.antigravityRs?.port ?? connection.antigravityPort}/api/admin`,
+    adminApiKey: connection.adminApiKey,
+    timeoutMs: ADMIN_TIMEOUT_MS
+  }
+}
+
+export async function startManagedAntigravity(input: {
+  binary: string
+  onLog?: (line: string, stream: 'stdout' | 'stderr') => void
+  onStateChange?: (state: KiroRsState, detail?: string) => void
+}): Promise<void> {
+  if (!runtime) return
+  const current = runtime
+  const config = current.config
+  if ((config.antigravityRs?.manage ?? config.kiroRs.manage) === false) return
+  const setState = (state: KiroRsState, detail?: string): void => {
+    current.antigravityState = state
+    current.antigravityDetail = detail
+    input.onStateChange?.(state, detail)
+  }
+  try {
+    if (!existsSync(input.binary)) throw new Error(`找不到 antigravity-rs 可执行文件：${input.binary}`)
+    const configPath = config.antigravityRs?.configPath ?? config.kiroRs.configPath
+    const connection = readKiroRsConnection(configPath)
+    current.antigravityProcess = new KiroRsProcess({
+      service: 'antigravity-rs',
+      binary: input.binary,
+      configPath,
+      dbPath: config.antigravityRs?.dbPath ?? join(dirname(config.dbPath), 'antigravity.sqlite3'),
+      host: KIRO_RS_HOST,
+      port: config.antigravityRs?.port ?? connection.antigravityPort,
+      adminApiKey: connection.adminApiKey,
+      onLog: input.onLog,
+      onStateChange: setState
+    })
+    await current.antigravityProcess.start()
+  } catch (error) {
+    if (!current.antigravityProcess) setState('failed', error instanceof Error ? error.message : String(error))
+    throw error
+  }
+}
+
+export async function stopManagedAntigravity(): Promise<void> {
+  await runtime?.antigravityProcess?.stop()
+}
+
 /** 轮询跨端变化；有变化时刷新托管索引并通知调用方（推给渲染进程） */
 export function startAccountDbWatcher(onChange: () => void): void {
   if (!runtime || runtime.watcher) return
@@ -378,6 +452,8 @@ export interface AccountDbStatus {
   databaseId?: string
   kiroRsState?: KiroRsState
   kiroRsDetail?: string
+  antigravityState?: KiroRsState
+  antigravityDetail?: string
   pending?: number
 }
 
@@ -387,8 +463,11 @@ export function accountDbStatus(): AccountDbStatus {
     enabled: true,
     dbPath: runtime.config.dbPath,
     databaseId: runtime.db.databaseId(),
-    kiroRsState: runtime.process ? runtime.kiroRsState : 'running',
+    kiroRsState: runtime.config.kiroRs.manage === false ? 'running' : runtime.kiroRsState,
     kiroRsDetail: runtime.kiroRsDetail,
+    antigravityState: (runtime.config.antigravityRs?.manage ?? runtime.config.kiroRs.manage) === false
+      ? 'running' : runtime.antigravityState,
+    antigravityDetail: runtime.antigravityDetail,
     pending: runtime.bridge.pendingIds().length
   }
 }

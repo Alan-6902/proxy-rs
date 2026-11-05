@@ -453,23 +453,31 @@ impl SseStateManager {
         None
     }
 
-    /// 生成最终事件序列
-    pub fn generate_final_events(&mut self, usage: serde_json::Value) -> Vec<SseEvent> {
-        let mut events = Vec::new();
-
-        // 关闭所有未关闭的块
-        for (index, block) in self.active_blocks.iter_mut() {
-            if block.started && !block.stopped {
-                events.push(SseEvent::new(
+    /// 关闭所有未关闭的块（按 index 升序，HashMap 迭代顺序不确定）
+    pub fn close_open_blocks(&mut self) -> Vec<SseEvent> {
+        let mut open: Vec<(&i32, &mut BlockState)> = self
+            .active_blocks
+            .iter_mut()
+            .filter(|(_, b)| b.started && !b.stopped)
+            .collect();
+        open.sort_by_key(|(index, _)| **index);
+        open.into_iter()
+            .map(|(index, block)| {
+                block.stopped = true;
+                SseEvent::new(
                     "content_block_stop",
                     json!({
                         "type": "content_block_stop",
                         "index": index
                     }),
-                ));
-                block.stopped = true;
-            }
-        }
+                )
+            })
+            .collect()
+    }
+
+    /// 生成最终事件序列
+    pub fn generate_final_events(&mut self, usage: serde_json::Value) -> Vec<SseEvent> {
+        let mut events = self.close_open_blocks();
 
         // 发送 message_delta
         if !self.message_delta_sent {
@@ -537,6 +545,20 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// 上游在流中途报的错误（Error / 非长度类 Exception）；流结束时以 SSE error 事件告知客户端，
+    /// 不再伪装成正常的 end_turn
+    pub upstream_error: Option<String>,
+}
+
+/// 上游流中途报错时下发给客户端的 SSE error 事件（Anthropic 流式错误格式）
+pub fn upstream_error_event(message: &str) -> SseEvent {
+    SseEvent::new(
+        "error",
+        json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": message }
+        }),
+    )
 }
 
 impl StreamContext {
@@ -564,6 +586,7 @@ impl StreamContext {
             thinking_block_index: None,
             text_block_index: None,
             strip_thinking_leading_newline: false,
+            upstream_error: None,
         }
     }
 
@@ -661,15 +684,20 @@ impl StreamContext {
                 error_message,
             } => {
                 tracing::error!("收到错误事件: {} - {}", error_code, error_message);
+                self.upstream_error
+                    .get_or_insert_with(|| format!("{error_code}: {error_message}"));
                 Vec::new()
             }
             Event::Exception {
                 exception_type,
                 message,
             } => {
-                // 处理 ContentLengthExceededException
+                // ContentLengthExceededException 是输出达到上限，按 max_tokens 正常收尾
                 if exception_type == "ContentLengthExceededException" {
                     self.state_manager.set_stop_reason("max_tokens");
+                } else {
+                    self.upstream_error
+                        .get_or_insert_with(|| format!("{exception_type}: {message}"));
                 }
                 tracing::warn!("收到异常事件: {} - {}", exception_type, message);
                 Vec::new()
@@ -1120,6 +1148,14 @@ impl StreamContext {
         }
 
         log_cache_summary(&self.model, self.token_usage.as_ref());
+
+        // 上游中途报错：关闭已打开的块后发 error 事件，不伪装成正常结束，
+        // 让客户端（如 Claude Code）按失败处理并重试，而不是拿半截内容当成功
+        if let Some(message) = self.upstream_error.clone() {
+            events.extend(self.state_manager.close_open_blocks());
+            events.push(upstream_error_event(&message));
+            return events;
+        }
 
         // 生成最终事件
         let usage = self.usage_json();
@@ -2083,5 +2119,66 @@ mod tests {
             message_delta.data["delta"]["stop_reason"], "tool_use",
             "stop_reason should be tool_use when tool_use is present"
         );
+    }
+
+    #[test]
+    fn test_upstream_exception_emits_error_event_instead_of_end_turn() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let _ = ctx.generate_initial_events();
+        let mut all_events = ctx.process_assistant_response("半截回答");
+        all_events.extend(ctx.process_kiro_event(&Event::Exception {
+            exception_type: "ThrottlingException".to_string(),
+            message: "rate exceeded".to_string(),
+        }));
+        all_events.extend(ctx.generate_final_events());
+
+        let error = all_events
+            .iter()
+            .find(|e| e.event == "error")
+            .expect("上游异常应以 error 事件告知客户端");
+        assert_eq!(error.data["type"], "error");
+        assert!(
+            error.data["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ThrottlingException")
+        );
+        // 不得再伪装成正常结束
+        assert!(all_events.iter().all(|e| e.event != "message_stop"));
+        // 已打开的文本块要先关闭
+        assert!(all_events.iter().any(|e| e.event == "content_block_stop"));
+    }
+
+    #[test]
+    fn test_content_length_exception_still_ends_normally_with_max_tokens() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let _ = ctx.generate_initial_events();
+        let mut all_events = ctx.process_assistant_response("回答");
+        all_events.extend(ctx.process_kiro_event(&Event::Exception {
+            exception_type: "ContentLengthExceededException".to_string(),
+            message: "too long".to_string(),
+        }));
+        all_events.extend(ctx.generate_final_events());
+
+        assert!(all_events.iter().all(|e| e.event != "error"));
+        let delta = all_events.iter().find(|e| e.event == "message_delta").unwrap();
+        assert_eq!(delta.data["delta"]["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn test_final_block_stops_are_in_index_order() {
+        let mut manager = SseStateManager::new();
+        for i in 0..8 {
+            manager.handle_content_block_start(i, "text", json!({"type": "text", "text": ""}));
+        }
+        let indices: Vec<i64> = manager
+            .generate_final_events(json!({}))
+            .iter()
+            .filter(|e| e.event == "content_block_stop")
+            .map(|e| e.data["index"].as_i64().unwrap())
+            .collect();
+        let mut sorted = indices.clone();
+        sorted.sort();
+        assert_eq!(indices, sorted);
     }
 }

@@ -11,9 +11,8 @@ import {
   Archive,
   GripVertical,
   ListChecks,
-  MousePointer2,
-  Bot,
   LayoutDashboard,
+  Sparkles,
   Terminal
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -25,13 +24,12 @@ import { useTranslation } from '@/hooks/useTranslation'
 export type PageType =
   | 'home'
   | 'accounts'
-  | 'cursor'
-  | 'grok'
   | 'tasks'
   | 'diagnose'
   | 'serena'
   | 'configSync'
   | 'kiroAdmin'
+  | 'antigravityAdmin'
   | 'kiroLogs'
   | 'logs'
   | 'settings'
@@ -47,13 +45,12 @@ interface SidebarProps {
 const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType }[] = [
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
-  { id: 'cursor', labelKey: 'nav.cursor', icon: MousePointer2 },
-  { id: 'grok', labelKey: 'nav.grok', icon: Bot },
   { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
   { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
   { id: 'serena', labelKey: 'nav.serena', icon: Network },
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'kiroAdmin', labelKey: 'nav.kiroAdmin', icon: LayoutDashboard },
+  { id: 'antigravityAdmin', labelKey: 'nav.antigravityAdmin', icon: Sparkles },
   { id: 'kiroLogs', labelKey: 'nav.kiroLogs', icon: Terminal },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings },

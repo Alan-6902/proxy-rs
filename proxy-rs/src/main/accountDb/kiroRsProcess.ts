@@ -9,6 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { fetchStoreInfo, type AdminFetch, type KiroRsAdminTarget } from './adminApi'
 
@@ -21,7 +22,9 @@ export interface KiroRsProcessOptions {
   host: string
   port: number
   adminApiKey: string
-  expectedDatabaseId: string
+  expectedDatabaseId?: string
+  /** 默认 Kiro；Antigravity 使用独立二进制、数据库参数与健康检查。 */
+  service?: 'kiro-rs' | 'antigravity-rs'
   /** 健康检查总时长 */
   startTimeoutMs?: number
   /** stop 时 SIGTERM 后等待多久再 SIGKILL */
@@ -101,20 +104,45 @@ export class KiroRsProcess {
     }
   }
 
+  private get serviceName(): string {
+    return this.options.service ?? 'kiro-rs'
+  }
+
+  private async checkHealth(): Promise<void> {
+    if (this.options.service === 'antigravity-rs') {
+      const target = this.adminTarget()
+      const response = await (this.options.fetchImpl ?? fetch)(`${target.baseUrl}/service/info`, {
+        headers: { 'x-api-key': target.adminApiKey },
+        signal: AbortSignal.timeout(target.timeoutMs)
+      })
+      if (!response.ok) throw new Error(`antigravity-rs 健康检查失败：HTTP ${response.status}`)
+      const info = await response.json() as { service?: string; databasePath?: string }
+      if (info.service !== 'antigravity' || info.databasePath !== realpathSync(this.options.dbPath)) {
+        throw new Error('antigravity-rs 的服务身份或账号库不是同一个')
+      }
+      return
+    }
+    const info = await fetchStoreInfo(this.adminTarget(), this.options.fetchImpl)
+    if (!info.enabled) throw new Error('kiro-rs 未以账号库模式运行')
+    if (!this.options.expectedDatabaseId || info.databaseId !== this.options.expectedDatabaseId) {
+      throw new Error('kiro-rs 打开的账号库与 proxy 的不是同一个')
+    }
+  }
+
   private async launch(): Promise<void> {
     const { host, port } = this.options
     if (!(await checkPortFree(host, port))) {
       throw new Error(
-        `端口 ${host}:${port} 已被占用（Docker 里的 kiro-rs 容器是否还在运行？），不会再启动第二个 kiro-rs`
+        `端口 ${host}:${port} 已被占用，不会再启动第二个 ${this.serviceName}`
       )
     }
     const spawnImpl = this.options.spawnImpl ?? spawn
     const child = spawnImpl(
       this.options.binary,
       [
-        '-c',
+        '--config',
         this.options.configPath,
-        '--account-db',
+        this.options.service === 'antigravity-rs' ? '--antigravity-db' : '--account-db',
         this.options.dbPath,
         '--host',
         host,
@@ -144,25 +172,21 @@ export class KiroRsProcess {
         exited,
         new Promise<null>((resolve) => setTimeout(() => resolve(null), HEALTH_POLL_MS))
       ])
-      if (early !== null) throw new Error(`kiro-rs ${early}`)
+      if (early !== null) throw new Error(`${this.serviceName} ${early}`)
       try {
-        const info = await fetchStoreInfo(this.adminTarget(), this.options.fetchImpl)
-        if (!info.enabled) throw new Error('kiro-rs 未以账号库模式运行')
-        if (info.databaseId !== this.options.expectedDatabaseId) {
-          child.kill('SIGTERM')
-          throw new Error(
-            `kiro-rs 打开的账号库（${info.databaseId}）与 proxy 的（${this.options.expectedDatabaseId}）不是同一个`
-          )
-        }
+        await this.checkHealth()
         this.setState('running')
         return
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error)
-        if (lastError.includes('不是同一个') || lastError.includes('未以账号库模式')) throw error
+        if (lastError.includes('不是同一个') || lastError.includes('未以账号库模式')) {
+          child.kill('SIGTERM')
+          throw error
+        }
       }
     }
     child.kill('SIGTERM')
-    throw new Error(`kiro-rs 启动超时：${lastError}`)
+    throw new Error(`${this.serviceName} 启动超时：${lastError}`)
   }
 
   private pipeLogs(child: ChildProcess): void {
@@ -187,7 +211,7 @@ export class KiroRsProcess {
     }
     if (this.state === 'starting') return // 由 launch() 的调用方报告失败
     if (Date.now() - this.startedAt > STABLE_RUN_MS) this.backoffMs = INITIAL_BACKOFF_MS
-    this.scheduleRestart('kiro-rs 意外退出')
+    this.scheduleRestart(`${this.serviceName} 意外退出`)
   }
 
   private scheduleRestart(reason: string): void {

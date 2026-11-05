@@ -8,13 +8,30 @@ import {
   adminUiUrlFromApiBase,
   installAdminWebviewGuards,
   isAllowedAdminUrl,
+  logKiroRsLine,
   parseKiroRsLine
 } from '../../src/main/accountDb/kiroRsView'
 import { proxyLogStore } from '../../src/main/proxy/logger'
+import { ANTIGRAVITY_ADMIN_PARTITION } from '../../src/shared/antigravity'
 
 const ADMIN_URL = 'http://127.0.0.1:12888/admin'
 
 describe('parseKiroRsLine', () => {
+  it('AG 日志分类独立，Kiro 保留原分类', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const line = '[2026-09-10T09:36:01Z] [INFO] 已启动'
+      logKiroRsLine(line, 'stdout', 'antigravity-rs')
+      logKiroRsLine(line, 'stdout')
+      expect(log.mock.calls).toEqual([
+        ['[antigravity-rs] 已启动'],
+        ['[kiro-rs] 已启动']
+      ])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
   it('当前格式：去掉时间戳与级别，保留 [Tag] 消息', () => {
     const line =
       '[2026-09-10T09:36:01.649Z] \x1b[34m[INFO]\x1b[0m [POST] /v1/messages?beta=true 200 (3318ms)'
@@ -155,6 +172,49 @@ describe('installAdminWebviewGuards', () => {
     expect(prevented).toBe(false)
   })
 
+  it('uses a separate Antigravity port and partition, including delayed guest navigation', () => {
+    const host = new EventEmitter()
+    const agUrl = 'http://127.0.0.1:12889/admin/antigravity'
+    installAdminWebviewGuards(host as never, {
+      resolve,
+      resolveAntigravity: () => ({ adminUiUrl: agUrl, adminApiKey: 'test-ag-key' })
+    })
+    const attach = (src: string, partition: string): boolean => {
+      let blocked = false
+      host.emit(
+        'will-attach-webview',
+        {
+          preventDefault: () => {
+            blocked = true
+          }
+        },
+        {},
+        { src, partition }
+      )
+      return blocked
+    }
+    expect(attach(agUrl, ANTIGRAVITY_ADMIN_PARTITION)).toBe(false)
+    expect(attach(agUrl, KIRO_ADMIN_PARTITION)).toBe(true)
+    expect(attach(ADMIN_URL, ANTIGRAVITY_ADMIN_PARTITION)).toBe(true)
+    const guest = fakeGuest('about:blank')
+    host.emit('did-attach-webview', {}, guest)
+    guest.getURL = () => agUrl
+    guest.emit('dom-ready')
+    expect(guest.executed).toHaveLength(1)
+    expect(guest.executed[0]).toContain('test-ag-key')
+    expect(guest.executed[0]).not.toContain('test-admin-key')
+    let blocked = false
+    guest.emit(
+      'will-navigate',
+      {
+        preventDefault: () => {
+          blocked = true
+        }
+      },
+      ADMIN_URL
+    )
+    expect(blocked).toBe(true)
+  })
   it('不在 Admin 页面上时不注入 Key', () => {
     const host = new EventEmitter()
     installAdminWebviewGuards(host as never, { resolve })

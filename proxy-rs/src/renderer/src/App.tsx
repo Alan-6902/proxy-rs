@@ -13,13 +13,12 @@ import {
   ConfigSyncPage,
   LogsPage,
   KiroAdminPage,
-  TaskManagerPage,
-  CursorAccountsPage,
-  GrokAccountsPage
+  TaskManagerPage
 } from './components/pages'
 import { CloseConfirmDialog } from './components/CloseConfirmDialog'
 import { ConfirmDialogHost } from './components/ui'
 import { useAccountsStore } from './store/accounts'
+import { useShallow } from 'zustand/react/shallow'
 
 // 托盘信息防抖延迟：后台刷新风暴时合并多次跨进程 IPC 为单次
 const TRAY_UPDATE_DEBOUNCE_MS = 400
@@ -54,7 +53,19 @@ function App(): React.JSX.Element {
     activeAccountId,
     setActiveAccount,
     checkAndRefreshExpiringTokens
-  } = useAccountsStore()
+  } = useAccountsStore(
+    useShallow((s) => ({
+      loadFromStorage: s.loadFromStorage,
+      stopAutoTokenRefresh: s.stopAutoTokenRefresh,
+      applyBackgroundRefreshResults: s.applyBackgroundRefreshResults,
+      applyBackgroundCheckResults: s.applyBackgroundCheckResults,
+      flushSaveImmediately: s.flushSaveImmediately,
+      accounts: s.accounts,
+      activeAccountId: s.activeAccountId,
+      setActiveAccount: s.setActiveAccount,
+      checkAndRefreshExpiringTokens: s.checkAndRefreshExpiringTokens
+    }))
+  )
 
   // 切换到下一个可用账户
   const switchToNextAccount = useCallback(() => {
@@ -114,7 +125,11 @@ function App(): React.JSX.Element {
 
   // 应用启动时加载本地数据并恢复自动化。
   useEffect(() => {
-    void loadFromStorage()
+    void loadFromStorage().then((loaded) => {
+      if (loaded) {
+        setSidebarCollapsed(useAccountsStore.getState().sidebarCollapsedOnStart)
+      }
+    })
     localStorage.removeItem(LEGACY_WEBHOOK_STORAGE_KEY)
 
     return () => {
@@ -278,10 +293,6 @@ function App(): React.JSX.Element {
         return <HomePage />
       case 'accounts':
         return <AccountManager />
-      case 'cursor':
-        return <CursorAccountsPage />
-      case 'grok':
-        return <GrokAccountsPage />
       case 'tasks':
         return <TaskManagerPage />
       case 'diagnose':
@@ -291,7 +302,9 @@ function App(): React.JSX.Element {
       case 'configSync':
         return <ConfigSyncPage />
       case 'kiroAdmin':
-        return <KiroAdminPage />
+        return <KiroAdminPage key="kiro" />
+      case 'antigravityAdmin':
+        return <KiroAdminPage key="antigravity" provider="antigravity" />
       case 'kiroLogs':
         return (
           <LogsPage

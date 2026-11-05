@@ -174,6 +174,7 @@ interface AccountsState {
   // 主题设置
   theme: string // 主题名称: default, purple, emerald, orange, rose, cyan, amber
   darkMode: boolean // 深色模式
+  sidebarCollapsedOnStart: boolean // 启动时收起侧边栏
 
   // 语言设置
   language: 'auto' | 'en' | 'zh' // auto: 跟随系统
@@ -212,16 +213,9 @@ interface AccountsActions {
 
   // 选择操作
   selectAccount: (id: string) => void
-  deselectAccount: (id: string) => void
   selectAll: () => void
   deselectAll: () => void
   toggleSelection: (id: string) => void
-  getSelectedAccounts: () => Account[]
-  /**
-   * 该账号能否被勾选：选中集合非空且账号不在锁定分组内时为 false。
-   * UI 据此把 checkbox 置灰，从源头阻止跨分组混选。
-   */
-  canSelectAccount: (id: string) => boolean
 
   // 批量验活（结果就地显示在账号列表/卡片上）
   runLivenessBatch: (params: {
@@ -284,6 +278,7 @@ interface AccountsActions {
   // 主题设置
   setTheme: (theme: string) => void
   setDarkMode: (enabled: boolean) => void
+  setSidebarCollapsedOnStart: (collapsed: boolean) => void
   applyTheme: () => void
 
   // 语言设置
@@ -445,6 +440,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   batchImportConcurrency: 100,
   theme: 'default',
   darkMode: false,
+  sidebarCollapsedOnStart: true,
   language: 'auto',
 
   // ==================== 账号 CRUD ====================
@@ -887,18 +883,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     })
   },
 
-  deselectAccount: (id) => {
-    set((state) => {
-      const selectedIds = new Set(state.selectedIds)
-      selectedIds.delete(id)
-      // 清空后解除分组锁定，下次勾选可自由选组
-      return {
-        selectedIds,
-        selectionGroupId: selectedIds.size === 0 ? undefined : state.selectionGroupId
-      }
-    })
-  },
-
   selectAll: () => {
     const { getFilteredAccounts, selectedIds, selectionGroupId } = get()
     const filtered = getFilteredAccounts()
@@ -931,13 +915,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       selectedIds.add(id)
       return { selectedIds, selectionGroupId: account.groupId }
     })
-  },
-
-  canSelectAccount: (id) => {
-    const { accounts, selectedIds, selectionGroupId } = get()
-    if (selectedIds.size === 0) return true
-    if (selectedIds.has(id)) return true
-    return accounts.get(id)?.groupId === selectionGroupId
   },
 
   // ==================== 批量验活 ====================
@@ -1005,13 +982,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   clearLivenessResults: () => {
     livenessAbort = true
     set({ livenessResults: new Map(), livenessRunning: false })
-  },
-
-  getSelectedAccounts: () => {
-    const { accounts, selectedIds } = get()
-    return Array.from(selectedIds)
-      .map((id) => accounts.get(id))
-      .filter((a): a is Account => a !== undefined)
   },
 
   // ==================== 导入导出 ====================
@@ -1701,6 +1671,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchInterval: data.autoSwitchInterval ?? 5,
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
+          sidebarCollapsedOnStart: data.sidebarCollapsedOnStart ?? true,
           language
         })
 
@@ -1808,6 +1779,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       autoSwitchInterval,
       theme,
       darkMode,
+      sidebarCollapsedOnStart,
       language
     } = get()
 
@@ -1833,6 +1805,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchInterval,
           theme,
           darkMode,
+          sidebarCollapsedOnStart,
           language
         })
       } finally {
@@ -1939,6 +1912,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     set({ darkMode: enabled })
     get().saveToStorage()
     get().applyTheme()
+  },
+
+  setSidebarCollapsedOnStart: (sidebarCollapsedOnStart) => {
+    set({ sidebarCollapsedOnStart })
+    get().saveToStorage()
   },
 
   // ==================== 语言设置 ====================

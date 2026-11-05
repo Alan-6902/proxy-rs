@@ -35,12 +35,14 @@ afterEach(async () => {
 
 function make(
   port: number,
-  options: { dbId?: string; states?: KiroRsState[] } = {}
+  options: { dbId?: string; states?: KiroRsState[]; antigravity?: boolean } = {}
 ): KiroRsProcess {
   const proc = new KiroRsProcess({
     binary: process.execPath,
     configPath: 'config.json',
-    dbPath: 'accounts.sqlite3',
+    // 假服务不读写账号；用已存在文件验证路径身份。
+    dbPath: options.antigravity ? FAKE : 'accounts.sqlite3',
+    service: options.antigravity ? 'antigravity-rs' : 'kiro-rs',
     host: '127.0.0.1',
     port,
     adminApiKey: 'admin-key',
@@ -61,6 +63,30 @@ function make(
 }
 
 describe('KiroRsProcess', () => {
+  it('两个服务分别健康检查，停止 AG 不影响 Kiro', async () => {
+    const kiro = make(await freePort())
+    const ag = make(await freePort(), { antigravity: true })
+    await Promise.all([kiro.start(), ag.start()])
+    expect(kiro.currentState).toBe('running')
+    expect(ag.currentState).toBe('running')
+    await ag.stop()
+    expect(ag.currentState).toBe('stopped')
+    expect(kiro.currentState).toBe('running')
+    const target = kiro.target()!
+    const response = await fetch(`${target.baseUrl}/store/info`, {
+      headers: { 'x-api-key': target.adminApiKey }
+    })
+    expect(response.ok).toBe(true)
+  })
+
+  it('AG 端口冲突时 Kiro 仍可运行，错误明确标识 antigravity-rs', async () => {
+    const kiro = make(await freePort())
+    await kiro.start()
+    const ag = make(Number(new URL(kiro.target()!.baseUrl).port), { antigravity: true })
+    await expect(ag.start()).rejects.toThrow(/antigravity-rs/)
+    expect(kiro.currentState).toBe('running')
+  })
+
   it('启动后健康检查通过，stop 后不再重启', async () => {
     const port = await freePort()
     const states: KiroRsState[] = []

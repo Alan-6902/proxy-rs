@@ -45,6 +45,20 @@ pub mod status {
     pub const ERROR: &str = "error";
 }
 
+/// 条件写失败：库里凭据版本已被别的写入者推进（收编 / 重新登录替换等）
+#[derive(Debug)]
+pub struct CredentialVersionConflict {
+    pub id: u64,
+}
+
+impl std::fmt::Display for CredentialVersionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "凭据 #{} 版本已变化，拒绝用旧刷新结果覆盖", self.id)
+    }
+}
+
+impl std::error::Error for CredentialVersionConflict {}
+
 /// 从库里读出的一行账号（未删除）
 #[derive(Debug, Clone)]
 pub struct StoredAccount {
@@ -522,7 +536,7 @@ impl AccountStore {
                 ],
             )?;
             if changed == 0 {
-                bail!("凭据 #{id} 版本已变化，拒绝用旧刷新结果覆盖");
+                return Err(CredentialVersionConflict { id }.into());
             }
             tx.execute(
                 "UPDATE accounts SET refresh_state = 'idle', refresh_started_at_ms = NULL,

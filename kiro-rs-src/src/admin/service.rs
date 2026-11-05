@@ -134,8 +134,8 @@ impl AdminService {
             .map_err(|e| self.classify_error(e, id))?;
 
         // 只有禁用的是当前凭据时才尝试切换到下一个
-        if disabled && id == current_id {
-            let _ = self.token_manager.switch_to_next();
+        if disabled && id == current_id && !self.token_manager.switch_to_next() {
+            tracing::warn!("凭据 #{} 已禁用，但没有其它可用凭据可切换", id);
         }
         Ok(())
     }

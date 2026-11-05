@@ -18,8 +18,8 @@ import { ToolNameRegistry } from './toolNameRegistry'
 
 const KIRO_CACHE_POINT: KiroCachePoint = { type: 'default' }
 
-/** 模型 thinking 能力元数据（由 proxyServer 从模型缓存中查询后传入） */
-export interface ThinkingConfig {
+/** 模型 thinking 能力元数据（可选；不传时按客户端 thinking 参数回退为 adaptive） */
+interface ThinkingConfig {
   schemaPath: 'output_config' | 'reasoning'
   efforts: string[]
   defaultEffort?: string

@@ -1,12 +1,4 @@
-mod admin;
-mod admin_ui;
-mod anthropic;
-mod antigravity;
-mod common;
-mod http_client;
-mod kiro;
-mod model;
-pub mod token;
+use kiro_rs::{admin, admin_ui, anthropic, http_client, kiro, model, runtime, token};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,14 +18,7 @@ async fn main() {
     // 解析命令行参数
     let args = Args::parse();
 
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .event_format(common::log_format::ProxyLogFormat)
-        .init();
+    runtime::init_logging();
 
     // 加载配置
     let config_path = args
@@ -49,6 +34,10 @@ async fn main() {
     if let Some(port) = args.port {
         config.port = port;
     }
+    config.validate_listener_ports(false).unwrap_or_else(|e| {
+        tracing::error!("Kiro 监听端口配置无效: {}", e);
+        std::process::exit(1);
+    });
 
     // 账号库一次性子命令：初始化 / 从 JSON 迁移，完成即退出
     if let Some(db) = args.account_db.as_deref() {
@@ -150,10 +139,15 @@ async fn main() {
     tracing::debug!("主凭证: {:?}", first_credentials);
 
     // 获取 API Key
-    let api_key = config.api_key.clone().unwrap_or_else(|| {
-        tracing::error!("配置文件中未设置 apiKey");
-        std::process::exit(1);
-    });
+    // 空串会让任何 `Authorization: Bearer ` 都通过常量时间比较，等于关闭鉴权
+    let api_key = config
+        .api_key
+        .clone()
+        .filter(|k| !k.trim().is_empty())
+        .unwrap_or_else(|| {
+            tracing::error!("配置文件中未设置 apiKey（或为空）");
+            std::process::exit(1);
+        });
 
     // 构建代理配置
     let proxy_config = config.proxy_url.as_ref().map(|url| {
@@ -164,8 +158,8 @@ async fn main() {
         proxy
     });
 
-    if proxy_config.is_some() {
-        tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
+    if let Some(proxy) = &proxy_config {
+        tracing::info!("已配置 HTTP 代理: {}", proxy.redacted_url());
     }
 
     // 构建端点注册表
@@ -291,42 +285,12 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
-    // Antigravity 账号库：显式指定，或跟随共享账号库放在同目录
-    let antigravity_db = args.antigravity_db.clone().map(std::path::PathBuf::from).or_else(|| {
-        args.account_db.as_deref().and_then(|db| {
-            std::path::Path::new(db)
-                .parent()
-                .map(|d| d.join(antigravity::DEFAULT_DB_FILE_NAME))
-        })
-    });
-    let antigravity_provider = antigravity_db.map(|path| {
-        let store = antigravity::AgStore::open_or_create(&path).unwrap_or_else(|e| {
-            tracing::error!("打开 Antigravity 账号库失败: {}", e);
-            std::process::exit(1);
-        });
-        tracing::info!("Antigravity 账号库: {}", path.display());
-        Arc::new(
-            antigravity::AntigravityProvider::new(
-                Arc::new(store),
-                proxy_config.as_ref(),
-                config.tls_backend,
-            )
-            .unwrap_or_else(|e| {
-                tracing::error!("创建 Antigravity Provider 失败: {}", e);
-                std::process::exit(1);
-            }),
-        )
-    });
-
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
-    let mut anthropic_app = anthropic::create_router_with_provider(
+    let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
     );
-    if let Some(provider) = &antigravity_provider {
-        anthropic_app = anthropic_app.merge(antigravity::create_router(&api_key, provider.clone()));
-    }
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
     // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
@@ -344,13 +308,7 @@ async fn main() {
             let admin_service =
                 admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
             let admin_state = admin::AdminState::new(admin_key, admin_service);
-            let mut admin_app = admin::create_admin_router(admin_state);
-            if let Some(provider) = &antigravity_provider {
-                admin_app = admin_app.nest(
-                    "/antigravity",
-                    antigravity::create_admin_router(admin_key.as_str(), provider.clone()),
-                );
-            }
+            let admin_app = admin::create_admin_router(admin_state);
 
             // 创建 Admin UI 路由
             let admin_ui_app = admin_ui::create_admin_ui_router();
@@ -365,19 +323,18 @@ async fn main() {
         anthropic_app
     };
 
-    // 启动服务器
     let addr = format!("{}:{}", config.host, config.port);
-    tracing::info!("启动 Anthropic API 端点: {}", addr);
-    tracing::info!("API Key: {}***", &api_key[..(api_key.len() / 2)]);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        tracing::error!("Kiro 监听 {} 失败: {}", addr, e);
+        std::process::exit(1);
+    });
+    tracing::info!("kiro-rs 已启动，Kiro API 端点: {}", addr);
+    tracing::info!("API Key: 已配置（{} 字符）", api_key.chars().count());
     tracing::info!("可用 API:");
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");
     tracing::info!("  POST /v1/messages/count_tokens");
-    if antigravity_provider.is_some() {
-        tracing::info!("  GET  /ag/v1/models");
-        tracing::info!("  POST /ag/v1/messages");
-        tracing::info!("  POST /ag/v1/messages/count_tokens");
-    }
+
     if admin_key_valid {
         tracing::info!("Admin API:");
         tracing::info!("  GET  /api/admin/credentials");
@@ -389,56 +346,11 @@ async fn main() {
         tracing::info!("  GET  /admin");
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("监听 {} 失败: {}", addr, e);
-            std::process::exit(1);
-        });
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(args.exit_on_stdin_eof))
+        .with_graceful_shutdown(runtime::shutdown_signal(args.exit_on_stdin_eof))
         .await
         .unwrap();
     // 退出前把防抖中的统计写掉
     token_manager.flush_stats();
     tracing::info!("已退出");
-}
-
-/// SIGINT / SIGTERM，或（子进程模式下）stdin 关闭时触发优雅退出
-async fn shutdown_signal(watch_stdin: bool) {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    let terminate = async {
-        #[cfg(unix)]
-        {
-            if let Ok(mut s) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            {
-                s.recv().await;
-                return;
-            }
-        }
-        std::future::pending::<()>().await
-    };
-    let stdin_eof = async {
-        if !watch_stdin {
-            return std::future::pending::<()>().await;
-        }
-        use tokio::io::AsyncReadExt;
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 256];
-        loop {
-            match stdin.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-        tracing::info!("stdin 已关闭（父进程退出），开始退出");
-    };
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-        _ = stdin_eof => {},
-    }
 }

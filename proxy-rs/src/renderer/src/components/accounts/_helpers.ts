@@ -76,16 +76,6 @@ export function generateRowGlowStyle(tagColors: string[]): CSSProperties {
 
 // ============ 封禁状态样式 ============
 
-// 卡片版封禁背景样式（用 CSS 变量）
-export const unauthorizedCardStyle: CSSProperties = {
-  backgroundColor: 'var(--card-unauthorized-bg)',
-  borderColor: 'var(--card-unauthorized-border)',
-  boxShadow: `
-    0 0 0 1px var(--card-unauthorized-ring),
-    0 4px 12px -2px var(--card-unauthorized-shadow)
-  `
-}
-
 // 列表行封禁背景样式（更轻量，不抢眼）
 export const unauthorizedRowStyle: CSSProperties = {
   backgroundColor: 'var(--card-unauthorized-bg)',
@@ -197,13 +187,3 @@ export function isBannedError(error: string | undefined): boolean {
   )
 }
 
-// ============ 日期格式化 ============
-
-// 把 nextResetDate / freeTrialExpiry 等多种类型安全格式化为 YYYY-MM-DD
-export function formatDateSafe(d: unknown): string {
-  try {
-    return (typeof d === 'string' ? d : new Date(d as Date).toISOString()).split('T')[0]
-  } catch {
-    return ''
-  }
-}

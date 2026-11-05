@@ -84,14 +84,6 @@ export interface SuccessResponse {
   message: string
 }
 
-// 错误响应
-export interface AdminErrorResponse {
-  error: {
-    type: string
-    message: string
-  }
-}
-
 // 请求类型
 export interface SetDisabledRequest {
   disabled: boolean
@@ -135,6 +127,20 @@ export interface AgQuotaModel {
   resetTime: string | null
 }
 
+/** retrieveUserQuotaSummary 的一个窗口桶，window 形如 "5h" / "weekly" */
+export interface AgQuotaBucket {
+  bucketId: string | null
+  window: string | null
+  displayName: string | null
+  remainingFraction: number | null
+  resetTime: string | null
+}
+
+export interface AgQuotaGroup {
+  displayName: string | null
+  buckets: AgQuotaBucket[]
+}
+
 export interface AgAccount {
   id: number
   email: string
@@ -143,15 +149,44 @@ export interface AgAccount {
   tier: string | null
   disabled: boolean
   expiresAtMs: number | null
-  quota: { models: AgQuotaModel[] } | null
+  /** groups 为空表示分组额度接口没拉到，按模型额度兜底展示 */
+  quota: { models: AgQuotaModel[]; groups?: AgQuotaGroup[] } | null
   quotaUpdatedMs: number | null
   lastError: string | null
   lastUsedMs: number | null
+  successCount: number
+  failureCount: number
+  refreshFailureCount: number
 }
 
 export interface AgAccountsResponse {
   accounts: AgAccount[]
   dbPath: string
+}
+
+
+export interface AgCatalogModel {
+  id: string
+  displayName: string
+  contextWindow: number
+  enabled: boolean
+  /** 当前模型列表里有这个模型的启用账号 id */
+  accountIds: number[]
+}
+
+export interface AgModelCatalogResponse {
+  models: AgCatalogModel[]
+}
+
+export interface AgScanResult {
+  id: number
+  email: string
+  ok: boolean
+  error: string | null
+}
+
+export interface AgModelScanResponse extends AgModelCatalogResponse {
+  scan: AgScanResult[]
 }
 
 export interface AgOAuthStart {

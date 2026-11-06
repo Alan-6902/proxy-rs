@@ -497,7 +497,7 @@ async fn handle_non_stream_request(
                             // 累积工具的 JSON 输入
                             let buffer = tool_json_buffers
                                 .entry(tool_use.tool_use_id.clone())
-                                .or_insert_with(String::new);
+                                .or_default();
                             buffer.push_str(&tool_use.input);
 
                             // 如果是完整的工具调用，添加到列表
@@ -890,6 +890,7 @@ async fn handle_stream_request_buffered(
 /// 2. 使用 StreamContext 的事件处理逻辑处理所有 Kiro 事件，结果缓存
 /// 3. 流结束后，用正确的 input_tokens 更正 message_start 事件
 /// 4. 一次性发送所有事件
+///
 /// `usage_sink` 语义同 [`create_sse_stream`]：流结束时把 token 消耗记到该凭据。
 fn create_buffered_sse_stream(
     response: reqwest::Response,

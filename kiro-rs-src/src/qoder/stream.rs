@@ -593,11 +593,9 @@ mod tests {
             ..Default::default()
         };
         let more = |args: &str| Delta { tool_calls: vec![json!({"function":{"arguments":args}})], ..Default::default() };
-        let stream = vec![
-            call("a", "ToolSearch", ""), more("{\"query\":"), more("\"x\"}"),
+        let stream = [call("a", "ToolSearch", ""), more("{\"query\":"), more("\"x\"}"),
             call("b", "Bash", "{\"command\":\"ls\"}"),
-            call("c", "Bash", "{\"command\":\"pwd\"}"),
-        ];
+            call("c", "Bash", "{\"command\":\"pwd\"}")];
         let mut w = AnthropicWriter::new("m", 1);
         let mut events: Vec<SseEvent> = stream.iter().flat_map(|d| w.push(d)).collect();
         events.extend(w.finish());
@@ -635,11 +633,9 @@ mod tests {
         let more = |index: i64, args: &str| Delta {
             tool_calls: vec![json!({"index":index,"function":{"arguments":args}})], ..Default::default()
         };
-        let stream = vec![
-            start(0, "a", "Read"), more(0, "{\"p\":"), more(0, "1}"),
+        let stream = [start(0, "a", "Read"), more(0, "{\"p\":"), more(0, "1}"),
             start(1, "b", "Bash"), more(1, "{\"command\":"),
-            Delta { tool_calls: vec![json!({"index":1,"id":"b","function":{"arguments":"\"ls\"}"}})], ..Default::default() },
-        ];
+            Delta { tool_calls: vec![json!({"index":1,"id":"b","function":{"arguments":"\"ls\"}"}})], ..Default::default() }];
         let mut c = Collected::default();
         stream.iter().for_each(|d| c.push(d));
         let calls = c.openai_response("id", "m", 1, 1)["choices"][0]["message"]["tool_calls"].clone();

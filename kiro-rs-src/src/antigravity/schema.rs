@@ -209,11 +209,10 @@ fn clean_recursive(value: &mut Value) {
 
     // const → enum
     let had_const = if let Some(c) = map.remove("const") {
-        if !map.contains_key("type") {
-            if let Some(t) = infer_type(&c) {
+        if !map.contains_key("type")
+            && let Some(t) = infer_type(&c) {
                 map.insert("type".into(), json!(t));
             }
-        }
         let mut values = map.get("enum").and_then(Value::as_array).cloned().unwrap_or_default();
         if !values.contains(&c) {
             values.push(c);
@@ -234,14 +233,13 @@ fn clean_recursive(value: &mut Value) {
         for k in &dropped {
             props.remove(k);
         }
-        if !dropped.is_empty() {
-            if let Some(Value::Array(req)) = map.get_mut("required") {
+        if !dropped.is_empty()
+            && let Some(Value::Array(req)) = map.get_mut("required") {
                 req.retain(|r| !r.as_str().is_some_and(|s| dropped.iter().any(|d| d == s)));
                 if req.is_empty() {
                     map.remove("required");
                 }
             }
-        }
     }
     if map.get("items").is_some_and(|v| !v.is_object()) {
         map.remove("items");

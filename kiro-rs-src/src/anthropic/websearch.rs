@@ -136,10 +136,9 @@ pub fn extract_search_query(req: &MessagesRequest) -> Option<String> {
 
     // 去除前缀 "Perform a web search for the query: "
     const PREFIX: &str = "Perform a web search for the query: ";
-    let query = if text.starts_with(PREFIX) {
-        text[PREFIX.len()..].to_string()
-    } else {
-        text
+    let query = match text.strip_prefix(PREFIX) {
+        Some(stripped) => stripped.to_string(),
+        None => text,
     };
 
     if query.is_empty() { None } else { Some(query) }
@@ -183,7 +182,7 @@ pub fn create_mcp_request(query: &str) -> (String, McpRequest) {
     // tool_use_id 使用相同格式
     let tool_use_id = format!(
         "srvtoolu_{}",
-        Uuid::new_v4().to_string().replace('-', "")[..32].to_string()
+        &Uuid::new_v4().to_string().replace('-', "")[..32]
     );
 
     let request = McpRequest {
@@ -242,7 +241,7 @@ fn generate_websearch_events(
     let mut events = Vec::new();
     let message_id = format!(
         "msg_{}",
-        Uuid::new_v4().to_string().replace('-', "")[..24].to_string()
+        &Uuid::new_v4().to_string().replace('-', "")[..24]
     );
 
     // 1. message_start

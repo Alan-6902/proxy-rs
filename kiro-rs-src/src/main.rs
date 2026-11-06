@@ -237,12 +237,11 @@ async fn main() {
     });
     // 库中凭据声明的端点同样必须已注册
     for entry in token_manager.snapshot().entries {
-        if let Some(name) = entry.endpoint.as_deref() {
-            if !endpoints.contains_key(name) {
+        if let Some(name) = entry.endpoint.as_deref()
+            && !endpoints.contains_key(name) {
                 tracing::error!("凭据 #{} 指定了未知端点 \"{}\"", entry.id, name);
                 std::process::exit(1);
             }
-        }
     }
     let token_manager = Arc::new(token_manager);
     // 账号库模式：kiro-rs 是唯一刷新方，后台维护所有账号的 token 与首份额度

@@ -249,7 +249,9 @@ impl AntigravityProvider {
     pub fn model_catalog(&self) -> anyhow::Result<Vec<CatalogModel>> {
         let accounts = self.store.snapshot()?;
         let enabled = self.store.enabled_model_ids()?.map(|ids| ids.into_iter().collect::<HashSet<_>>());
-        let mut entries: HashMap<String, (Option<i64>, Option<String>, Vec<i64>)> = HashMap::new();
+        // (最小上下文窗口, 显示名, 拥有该模型的账号 id)
+        type CatalogEntry = (Option<i64>, Option<String>, Vec<i64>);
+        let mut entries: HashMap<String, CatalogEntry> = HashMap::new();
         for account in accounts.iter().filter(|a| !a.disabled) {
             let Some(list) = account.quota.as_ref().and_then(|q| q.get("models")).and_then(Value::as_array) else {
                 continue;
@@ -475,20 +477,18 @@ impl AntigravityProvider {
                 a.expires_at_ms.is_some_and(|exp| exp - TOKEN_REFRESH_SKEW_MS > now_ms())
             })
         };
-        if !force {
-            if let Some(token) = fresh(account) {
+        if !force
+            && let Some(token) = fresh(account) {
                 return Ok(token);
             }
-        }
         let lock = self.refresh_lock(account.id);
         let _guard = lock.lock().await;
         // 等锁期间可能已被别的请求刷新
         let current = self.store.get(account.id)?.unwrap_or_else(|| account.clone());
-        if !force || current.access_token != account.access_token {
-            if let Some(token) = fresh(&current) {
+        if (!force || current.access_token != account.access_token)
+            && let Some(token) = fresh(&current) {
                 return Ok(token);
             }
-        }
         match client::refresh_access_token(&self.api_client, &self.oauth, &current.refresh_token).await {
             Ok(t) => {
                 let expires_at = now_ms() + t.expires_in * 1000;

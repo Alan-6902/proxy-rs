@@ -299,8 +299,8 @@ impl AdminService {
         req: AddCredentialRequest,
     ) -> Result<AddCredentialResponse, AdminServiceError> {
         // 校验端点名：未指定则默认合法，指定则必须已注册
-        if let Some(ref name) = req.endpoint {
-            if !self.known_endpoints.contains(name) {
+        if let Some(ref name) = req.endpoint
+            && !self.known_endpoints.contains(name) {
                 let mut known: Vec<&str> =
                     self.known_endpoints.iter().map(|s| s.as_str()).collect();
                 known.sort();
@@ -309,7 +309,6 @@ impl AdminService {
                     name, known
                 )));
             }
-        }
 
         // 构建凭据对象
         let email = req.email.clone();
@@ -458,14 +457,13 @@ impl AdminService {
         &self,
         req: ImportAccountRequest,
     ) -> Result<ImportAccountResponse, AdminServiceError> {
-        if let Some(ref name) = req.endpoint {
-            if !self.known_endpoints.contains(name) {
+        if let Some(ref name) = req.endpoint
+            && !self.known_endpoints.contains(name) {
                 return Err(AdminServiceError::InvalidCredential(format!(
                     "未知端点 \"{}\"",
                     name
                 )));
             }
-        }
         let cred = KiroCredentials {
             access_token: req.access_token,
             refresh_token: req.refresh_token,
@@ -740,6 +738,24 @@ impl AdminService {
     }
 }
 
+/// `arn:aws:codewhisperer:us-east-1:123:profile/X` → `us-east-1`
+fn region_from_profile_arn(arn: &str) -> Option<String> {
+    let region = arn.split(':').nth(3)?;
+    (!region.is_empty()).then(|| region.to_string())
+}
+
+fn adopt_response(
+    outcome: &'static str,
+    credential_id: Option<u64>,
+    credential_version: Option<i64>,
+) -> AdoptCredentialResponse {
+    AdoptCredentialResponse {
+        outcome,
+        credential_id,
+        credential_version,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -857,23 +873,5 @@ mod tests {
         let info = service.store_info();
         assert!(info.enabled);
         assert!(info.database_id.is_some_and(|id| !id.is_empty()));
-    }
-}
-
-/// `arn:aws:codewhisperer:us-east-1:123:profile/X` → `us-east-1`
-fn region_from_profile_arn(arn: &str) -> Option<String> {
-    let region = arn.split(':').nth(3)?;
-    (!region.is_empty()).then(|| region.to_string())
-}
-
-fn adopt_response(
-    outcome: &'static str,
-    credential_id: Option<u64>,
-    credential_version: Option<i64>,
-) -> AdoptCredentialResponse {
-    AdoptCredentialResponse {
-        outcome,
-        credential_id,
-        credential_version,
     }
 }

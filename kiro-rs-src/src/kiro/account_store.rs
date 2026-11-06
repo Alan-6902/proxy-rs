@@ -561,11 +561,10 @@ impl AccountStore {
         consecutive_failures: u32,
         consecutive_refresh_failures: u32,
     ) -> anyhow::Result<()> {
-        if let Some(reason) = disabled_reason {
-            if !DISABLED_REASONS.contains(&reason) {
+        if let Some(reason) = disabled_reason
+            && !DISABLED_REASONS.contains(&reason) {
                 bail!("未知禁用原因: {reason}");
             }
-        }
         let status = match disabled_reason {
             Some("InvalidRefreshToken") => status::REAUTH_REQUIRED,
             Some("InvalidConfig") => status::ERROR,
@@ -942,11 +941,10 @@ pub fn migrate_from_json(
     let mut count = 0;
     for mut cred in credentials {
         cred.canonicalize_auth_method();
-        if let Some(id) = cred.id {
-            if !seen.insert(id) {
+        if let Some(id) = cred.id
+            && !seen.insert(id) {
                 bail!("credentials.json 中存在重复 ID: {id}");
             }
-        }
         let meta = NewAccountMeta {
             in_pool: true,
             ..Default::default()

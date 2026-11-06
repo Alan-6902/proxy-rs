@@ -165,8 +165,10 @@ mod tests {
     #[test]
     fn test_codewhisperer_host_and_url() {
         let creds = KiroCredentials::default();
-        let mut config = Config::default();
-        config.region = "us-east-1".to_string();
+        let config = Config {
+            region: "us-east-1".to_string(),
+            ..Default::default()
+        };
         let ctx = ctx_with_region(&creds, &config);
 
         let ep = AmazonQEndpoint::codewhisperer();
@@ -184,8 +186,10 @@ mod tests {
     #[test]
     fn test_amazonq_host_and_url() {
         let creds = KiroCredentials::default();
-        let mut config = Config::default();
-        config.region = "us-east-1".to_string();
+        let config = Config {
+            region: "us-east-1".to_string(),
+            ..Default::default()
+        };
         let ctx = ctx_with_region(&creds, &config);
 
         let ep = AmazonQEndpoint::amazonq();

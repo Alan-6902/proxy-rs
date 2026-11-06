@@ -14,16 +14,13 @@ pub const DEFAULT_QODER_PORT: u16 = 12890;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TlsBackend {
+    #[default]
     Rustls,
     NativeTls,
 }
 
-impl Default for TlsBackend {
-    fn default() -> Self {
-        Self::Rustls
-    }
-}
 
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,9 +160,10 @@ pub struct Config {
     #[serde(default)]
     pub endpoints: HashMap<String, serde_json::Value>,
 
-    /// 配置文件路径（运行时元数据，不写入 JSON）
+    /// 配置文件路径（运行时元数据，不写入 JSON）。
+    /// `pub(crate)` 仅为让同 crate 的测试能用 `Config { .., ..Default::default() }` 构造。
     #[serde(skip)]
-    config_path: Option<PathBuf>,
+    pub(crate) config_path: Option<PathBuf>,
 }
 
 fn default_host() -> String {
@@ -305,8 +303,10 @@ impl Config {
         let path = path.as_ref();
         if !path.exists() {
             // 配置文件不存在，返回默认配置
-            let mut config = Self::default();
-            config.config_path = Some(path.to_path_buf());
+            let config = Self {
+                config_path: Some(path.to_path_buf()),
+                ..Default::default()
+            };
             return Ok(config);
         }
 

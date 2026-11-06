@@ -33,7 +33,7 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     };
 
     // type（必须是字符串）
-    if !obj.get("type").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+    if obj.get("type").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
         obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
     }
 
@@ -194,13 +194,11 @@ impl std::error::Error for ConversionError {}
 /// 提取 session UUID 作为 conversationId
 fn extract_session_id(user_id: &str) -> Option<String> {
     // 先尝试 JSON 解析
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id) {
-        if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
-            if is_valid_uuid(session_id) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id)
+        && let Some(session_id) = json.get("session_id").and_then(|v| v.as_str())
+            && is_valid_uuid(session_id) {
                 return Some(session_id.to_string());
             }
-        }
-    }
 
     // 回退到字符串格式: 查找 "session_" 后面的内容
     if let Some(pos) = user_id.find("session_") {
@@ -259,15 +257,14 @@ fn collect_history_tool_names(history: &[Message]) -> Vec<String> {
     let mut tool_names = Vec::new();
 
     for msg in history {
-        if let Message::Assistant(assistant_msg) = msg {
-            if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
+        if let Message::Assistant(assistant_msg) = msg
+            && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
                 for tool_use in tool_uses {
                     if !tool_names.contains(&tool_use.name) {
                         tool_names.push(tool_use.name.clone());
                     }
                 }
             }
-        }
     }
 
     tool_names
@@ -630,8 +627,8 @@ fn remove_orphaned_tool_uses(
     }
 
     for msg in history.iter_mut() {
-        if let Message::Assistant(assistant_msg) = msg {
-            if let Some(ref mut tool_uses) = assistant_msg.assistant_response_message.tool_uses {
+        if let Message::Assistant(assistant_msg) = msg
+            && let Some(ref mut tool_uses) = assistant_msg.assistant_response_message.tool_uses {
                 let original_len = tool_uses.len();
                 tool_uses.retain(|tu| !orphaned_ids.contains(&tu.tool_use_id));
 
@@ -645,7 +642,6 @@ fn remove_orphaned_tool_uses(
                     );
                 }
             }
-        }
     }
 }
 
@@ -818,11 +814,10 @@ fn build_tool_name_map(
     {
         if let Some(blocks) = message.content.as_array() {
             for block in blocks {
-                if block.get("type").and_then(|value| value.as_str()) == Some("tool_use") {
-                    if let Some(name) = block.get("name").and_then(|value| value.as_str()) {
+                if block.get("type").and_then(|value| value.as_str()) == Some("tool_use")
+                    && let Some(name) = block.get("name").and_then(|value| value.as_str()) {
                         names.insert(name.to_string());
                     }
-                }
             }
         }
     }
@@ -998,9 +993,7 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
     let mut user_buffer: Vec<&super::types::Message> = Vec::new();
     let mut assistant_buffer: Vec<&super::types::Message> = Vec::new();
 
-    for i in 0..history_end_index {
-        let msg = &messages[i];
-
+    for msg in messages.iter().take(history_end_index) {
         if msg.role == "user" {
             // 先处理累积的 assistant 消息
             if !assistant_buffer.is_empty() {
@@ -1785,8 +1778,8 @@ mod tests {
         let history = &result.conversation_state.history;
         let mut found = false;
         for msg in history {
-            if let Message::Assistant(a) = msg {
-                if let Some(ref tool_uses) = a.assistant_response_message.tool_uses {
+            if let Message::Assistant(a) = msg
+                && let Some(ref tool_uses) = a.assistant_response_message.tool_uses {
                     for tu in tool_uses {
                         if tu.tool_use_id == "toolu_01" {
                             assert_eq!(tu.name, short_name, "历史中的 tool_use name 应该是短名称");
@@ -1794,7 +1787,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
         assert!(found, "应该在历史中找到 tool_use");
     }
@@ -2476,14 +2468,12 @@ mod tests {
         let state = result.unwrap().conversation_state;
         let mut found_tool_use = false;
         for msg in &state.history {
-            if let Message::Assistant(assistant_msg) = msg {
-                if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                    if tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ") {
+            if let Message::Assistant(assistant_msg) = msg
+                && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
+                    && tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ") {
                         found_tool_use = true;
                         break;
                     }
-                }
-            }
         }
         assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");
     }

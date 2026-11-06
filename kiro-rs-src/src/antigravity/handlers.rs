@@ -279,8 +279,8 @@ fn generation_events(
             _ = g.ping.tick() => Ok(vec![SseEvent::new("ping", serde_json::json!({ "type": "ping" }))]),
         };
         let mut finished = false;
-        if ended {
-            if let Ok(events) = result.as_mut() {
+        if ended
+            && let Ok(events) = result.as_mut() {
                 match continue_thinking_only(&mut g, limits).await {
                     Ok(true) => {}
                     Ok(false) => {
@@ -293,7 +293,6 @@ fn generation_events(
                     Err(e) => result = Err(e),
                 }
             }
-        }
         if !had_content && g.st.has_content() {
             tracing::info!(request_id = g.st.request_id(), elapsed_ms = elapsed_ms(limits.first),
                 "Antigravity 首次有效内容");

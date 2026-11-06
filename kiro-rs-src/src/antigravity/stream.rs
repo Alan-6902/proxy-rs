@@ -203,11 +203,10 @@ impl StreamState {
             return Vec::new();
         }
         let mut events = Vec::new();
-        if self.block == BlockKind::Thinking {
-            if let Some(sig) = self.pending_signature.take() {
+        if self.block == BlockKind::Thinking
+            && let Some(sig) = self.pending_signature.take() {
                 events.push(self.delta(json!({ "type": "signature_delta", "signature": sig })));
             }
-        }
         events.push(SseEvent::new(
             "content_block_stop",
             json!({ "type": "content_block_stop", "index": self.block_index }),
@@ -433,11 +432,10 @@ pub fn aggregate(events: &[SseEvent]) -> Value {
                 }
             }
             "content_block_stop" => {
-                if let (Some(block), Some(json_buf)) = (blocks.last_mut(), partial_json.last()) {
-                    if block["type"] == "tool_use" && !json_buf.is_empty() {
+                if let (Some(block), Some(json_buf)) = (blocks.last_mut(), partial_json.last())
+                    && block["type"] == "tool_use" && !json_buf.is_empty() {
                         block["input"] = serde_json::from_str(json_buf).unwrap_or_else(|_| json!({}));
                     }
-                }
             }
             "message_delta" => {
                 message["stop_reason"] = d["delta"]["stop_reason"].clone();

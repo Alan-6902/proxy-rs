@@ -114,14 +114,13 @@ impl KiroEndpoint for IdeEndpoint {
 ///
 /// Amazon Q 系列端点的请求体加工与 IDE 完全一致，故对同模块公开以便复用。
 pub(super) fn inject_profile_arn(request_body: &str, profile_arn: &Option<String>) -> String {
-    if let Some(arn) = profile_arn {
-        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(request_body) {
+    if let Some(arn) = profile_arn
+        && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(request_body) {
             json["profileArn"] = serde_json::Value::String(arn.clone());
             if let Ok(body) = serde_json::to_string(&json) {
                 return body;
             }
         }
-    }
     request_body.to_string()
 }
 

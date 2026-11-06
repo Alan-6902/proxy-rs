@@ -31,11 +31,10 @@ impl TaskTracker {
         let key = hex::encode(Sha256::digest(seed.to_string().as_bytes()));
         let now = Instant::now();
         self.entries.retain(|_, entry| now.duration_since(entry.used) < TASK_IDLE);
-        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_TASKS {
-            if let Some(oldest) = self.entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_TASKS
+            && let Some(oldest) = self.entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) {
                 self.entries.remove(&oldest);
             }
-        }
         let entry = self.entries.entry(key).or_insert_with(|| Entry {
             context: TaskContext {
                 id: uuid::Uuid::new_v4().to_string(),

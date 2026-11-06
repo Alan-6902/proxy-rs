@@ -572,11 +572,10 @@ fn build_tool_config(choice: Option<&Value>) -> Value {
         Some(_) => MODE_ANY,
     };
     let mut fcc = json!({ "mode": mode });
-    if kind == Some(TOOL_CHOICE_TOOL) {
-        if let Some(name) = choice.and_then(|c| str_field(c, "name")) {
+    if kind == Some(TOOL_CHOICE_TOOL)
+        && let Some(name) = choice.and_then(|c| str_field(c, "name")) {
             fcc["allowedFunctionNames"] = json!([name]);
         }
-    }
     json!({ "functionCallingConfig": fcc, "includeServerSideToolInvocations": true })
 }
 

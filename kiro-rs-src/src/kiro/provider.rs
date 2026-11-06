@@ -696,11 +696,12 @@ pub(crate) mod tests {
 
     /// 构造一个只做端点链解析用的 provider（不发起任何网络请求）
     fn provider_with(fallback_order: Vec<&str>, default_endpoint: &str) -> KiroProvider {
-        let mut config = Config::default();
-        config.api_key = Some("test-key".to_string());
-        config.default_endpoint = default_endpoint.to_string();
-        config.endpoint_fallback_order =
-            fallback_order.into_iter().map(|s| s.to_string()).collect();
+        let config = Config {
+            api_key: Some("test-key".to_string()),
+            default_endpoint: default_endpoint.to_string(),
+            endpoint_fallback_order: fallback_order.into_iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
 
         let token_manager =
             MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)

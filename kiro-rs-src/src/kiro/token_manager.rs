@@ -977,11 +977,10 @@ impl MultiTokenManager {
                 )
             })
         };
-        if let Some((reason, failures, refresh_failures)) = state {
-            if let Err(e) = store.set_enabled_state(id, reason, failures, refresh_failures) {
+        if let Some((reason, failures, refresh_failures)) = state
+            && let Err(e) = store.set_enabled_state(id, reason, failures, refresh_failures) {
                 tracing::warn!("凭据 #{} 禁用状态写入账号库失败: {}", id, e);
             }
-        }
     }
 
     /// Admin 修改禁用状态后的持久化：库模式写库并传播错误，JSON 模式整文件回写
@@ -1106,11 +1105,10 @@ impl MultiTokenManager {
         let new_creds = match refreshed {
             Ok(creds) if !is_token_expired(&creds) => creds,
             other => {
-                if let Some(store) = &self.store {
-                    if let Err(e) = store.end_refresh(id) {
+                if let Some(store) = &self.store
+                    && let Err(e) = store.end_refresh(id) {
                         tracing::warn!("凭据 #{} 清除刷新标记失败: {}", id, e);
                     }
-                }
                 return match other {
                     Err(e) => Err(e),
                     Ok(_) => Err(anyhow::anyhow!("刷新后的 Token 仍然无效或已过期")),
@@ -1455,8 +1453,7 @@ impl MultiTokenManager {
             .iter()
             .filter(|e| e.schedulable())
             .min_by_key(|e| e.credentials.priority)
-        {
-            if best.id != *current_id {
+            && best.id != *current_id {
                 tracing::info!(
                     "优先级变更后切换凭据: #{} -> #{}（优先级 {}）",
                     *current_id,
@@ -1465,7 +1462,6 @@ impl MultiTokenManager {
                 );
                 *current_id = best.id;
             }
-        }
     }
 
     /// 尝试使用指定凭据获取有效 Token
@@ -2407,11 +2403,10 @@ impl MultiTokenManager {
                 }
             };
 
-            if changed && self.store.is_none() {
-                if let Err(e) = self.persist_credentials() {
+            if changed && self.store.is_none()
+                && let Err(e) = self.persist_credentials() {
                     tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
                 }
-            }
         }
 
         Ok(usage_limits)
@@ -3106,8 +3101,8 @@ impl MultiTokenManager {
             return Ok(existing(id));
         }
         // 同一上游账号重新登录：替换已有那一行的凭据，不新增账号（验收 A39 / A34）
-        if let Some(identity) = meta.upstream_identity.as_deref().filter(|v| !v.is_empty()) {
-            if let Some(id) = store.find_by_upstream_identity(identity)? {
+        if let Some(identity) = meta.upstream_identity.as_deref().filter(|v| !v.is_empty())
+            && let Some(id) = store.find_by_upstream_identity(identity)? {
                 let version = self.replace_entry_credentials(id, &cred)?;
                 tracing::info!(
                     "凭据 #{} 已按上游身份重新登录，凭据已替换（版本 {}）",
@@ -3120,7 +3115,6 @@ impl MultiTokenManager {
                     replaced: true,
                 });
             }
-        }
         if cred.machine_id.is_none() {
             cred.machine_id = Some(machine_id::generate_from_credentials(&cred, &self.config));
         }
@@ -3207,11 +3201,10 @@ impl MultiTokenManager {
                 .lock()
                 .iter()
                 .any(|e| e.id == id && !e.disabled);
-            if enabled {
-                if let Err(e) = self.get_usage_limits_for(id).await {
+            if enabled
+                && let Err(e) = self.get_usage_limits_for(id).await {
                     tracing::warn!("后台查询凭据 #{} 额度失败: {}", id, e);
                 }
-            }
         }
     }
 
@@ -3497,8 +3490,10 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_with_expired_token() {
-        let mut credentials = KiroCredentials::default();
-        credentials.expires_at = Some("2020-01-01T00:00:00Z".to_string());
+        let credentials = KiroCredentials {
+            expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
         assert!(is_token_expired(&credentials));
     }
 
@@ -3549,8 +3544,10 @@ mod tests {
 
     #[test]
     fn test_validate_refresh_token_valid() {
-        let mut credentials = KiroCredentials::default();
-        credentials.refresh_token = Some("a".repeat(150));
+        let credentials = KiroCredentials {
+            refresh_token: Some("a".repeat(150)),
+            ..Default::default()
+        };
         let result = validate_refresh_token(&credentials);
         assert!(result.is_ok());
     }
@@ -3567,9 +3564,11 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_token_rejects_api_key_credential() {
         let config = Config::default();
-        let mut credentials = KiroCredentials::default();
-        credentials.kiro_api_key = Some("ksk_test_key_123".to_string());
-        credentials.auth_method = Some("api_key".to_string());
+        let credentials = KiroCredentials {
+            kiro_api_key: Some("ksk_test_key_123".to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let result = refresh_token(&credentials, &config, None).await;
 
@@ -3586,13 +3585,17 @@ mod tests {
     async fn test_add_credential_reject_duplicate_refresh_token() {
         let config = Config::default();
 
-        let mut existing = KiroCredentials::default();
-        existing.refresh_token = Some("a".repeat(150));
+        let existing = KiroCredentials {
+            refresh_token: Some("a".repeat(150)),
+            ..Default::default()
+        };
 
         let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
 
-        let mut duplicate = KiroCredentials::default();
-        duplicate.refresh_token = Some("a".repeat(150));
+        let duplicate = KiroCredentials {
+            refresh_token: Some("a".repeat(150)),
+            ..Default::default()
+        };
 
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
@@ -3604,9 +3607,11 @@ mod tests {
         let config = Config::default();
         let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
 
-        let mut api_key_cred = KiroCredentials::default();
-        api_key_cred.kiro_api_key = Some("ksk_test_key_123".to_string());
-        api_key_cred.auth_method = Some("api_key".to_string());
+        let api_key_cred = KiroCredentials {
+            kiro_api_key: Some("ksk_test_key_123".to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let result = manager.add_credential(api_key_cred).await;
         assert!(result.is_ok());
@@ -3620,15 +3625,19 @@ mod tests {
     async fn test_add_credential_reject_duplicate_api_key() {
         let config = Config::default();
 
-        let mut existing = KiroCredentials::default();
-        existing.kiro_api_key = Some("ksk_existing_key".to_string());
-        existing.auth_method = Some("api_key".to_string());
+        let existing = KiroCredentials {
+            kiro_api_key: Some("ksk_existing_key".to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
 
-        let mut duplicate = KiroCredentials::default();
-        duplicate.kiro_api_key = Some("ksk_existing_key".to_string());
-        duplicate.auth_method = Some("api_key".to_string());
+        let duplicate = KiroCredentials {
+            kiro_api_key: Some("ksk_existing_key".to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
@@ -3646,9 +3655,11 @@ mod tests {
         let config = Config::default();
         let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
 
-        let mut cred = KiroCredentials::default();
-        cred.kiro_api_key = Some(String::new());
-        cred.auth_method = Some("api_key".to_string());
+        let cred = KiroCredentials {
+            kiro_api_key: Some(String::new()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let result = manager.add_credential(cred).await;
         assert!(result.is_err());
@@ -3666,8 +3677,10 @@ mod tests {
         let config = Config::default();
         let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
 
-        let mut cred = KiroCredentials::default();
-        cred.auth_method = Some("api_key".to_string());
+        let cred = KiroCredentials {
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
         // kiro_api_key is None
 
         let result = manager.add_credential(cred).await;
@@ -3685,14 +3698,18 @@ mod tests {
     async fn test_add_credential_api_key_and_oauth_coexist() {
         let config = Config::default();
 
-        let mut oauth_cred = KiroCredentials::default();
-        oauth_cred.refresh_token = Some("a".repeat(150));
+        let oauth_cred = KiroCredentials {
+            refresh_token: Some("a".repeat(150)),
+            ..Default::default()
+        };
 
         let manager = MultiTokenManager::new(config, vec![oauth_cred], None, None, false).unwrap();
 
-        let mut api_key_cred = KiroCredentials::default();
-        api_key_cred.kiro_api_key = Some("ksk_new_key".to_string());
-        api_key_cred.auth_method = Some("api_key".to_string());
+        let api_key_cred = KiroCredentials {
+            kiro_api_key: Some("ksk_new_key".to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
 
         let result = manager.add_credential(api_key_cred).await;
         assert!(result.is_ok());
@@ -3705,10 +3722,14 @@ mod tests {
     #[test]
     fn test_multi_token_manager_new() {
         let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.priority = 0;
-        let mut cred2 = KiroCredentials::default();
-        cred2.priority = 1;
+        let cred1 = KiroCredentials {
+            priority: 0,
+            ..Default::default()
+        };
+        let cred2 = KiroCredentials {
+            priority: 1,
+            ..Default::default()
+        };
 
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
@@ -3730,10 +3751,14 @@ mod tests {
     #[test]
     fn test_multi_token_manager_duplicate_ids() {
         let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.id = Some(1);
-        let mut cred2 = KiroCredentials::default();
-        cred2.id = Some(1); // 重复 ID
+        let cred1 = KiroCredentials {
+            id: Some(1),
+            ..Default::default()
+        };
+        let cred2 = KiroCredentials {
+            id: Some(1), // 重复 ID
+            ..Default::default()
+        };
 
         let result = MultiTokenManager::new(config, vec![cred1, cred2], None, None, false);
         assert!(result.is_err());
@@ -3750,12 +3775,16 @@ mod tests {
         let config = Config::default();
 
         // auth_method=api_key 但缺少 kiro_api_key → 应被自动禁用
-        let mut bad_cred = KiroCredentials::default();
-        bad_cred.auth_method = Some("api_key".to_string());
+        let bad_cred = KiroCredentials {
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
         // kiro_api_key 保持 None
 
-        let mut good_cred = KiroCredentials::default();
-        good_cred.refresh_token = Some("valid_token".to_string());
+        let good_cred = KiroCredentials {
+            refresh_token: Some("valid_token".to_string()),
+            ..Default::default()
+        };
 
         let manager =
             MultiTokenManager::new(config, vec![bad_cred, good_cred], None, None, false).unwrap();
@@ -3768,9 +3797,11 @@ mod tests {
         let config = Config::default();
 
         // auth_method=api_key 且有 kiro_api_key → 不应被禁用
-        let mut cred = KiroCredentials::default();
-        cred.auth_method = Some("api_key".to_string());
-        cred.kiro_api_key = Some("ksk_test123".to_string());
+        let cred = KiroCredentials {
+            auth_method: Some("api_key".to_string()),
+            kiro_api_key: Some("ksk_test123".to_string()),
+            ..Default::default()
+        };
 
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
         assert_eq!(manager.total_count(), 1);
@@ -3826,10 +3857,14 @@ mod tests {
     #[test]
     fn test_multi_token_manager_switch_to_next() {
         let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.refresh_token = Some("token1".to_string());
-        let mut cred2 = KiroCredentials::default();
-        cred2.refresh_token = Some("token2".to_string());
+        let cred1 = KiroCredentials {
+            refresh_token: Some("token1".to_string()),
+            ..Default::default()
+        };
+        let cred2 = KiroCredentials {
+            refresh_token: Some("token2".to_string()),
+            ..Default::default()
+        };
 
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
@@ -3866,12 +3901,16 @@ mod tests {
     #[tokio::test]
     async fn test_multi_token_manager_acquire_context_auto_recovers_all_disabled() {
         let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.access_token = Some("t1".to_string());
-        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
-        let mut cred2 = KiroCredentials::default();
-        cred2.access_token = Some("t2".to_string());
-        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let cred1 = KiroCredentials {
+            access_token: Some("t1".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            ..Default::default()
+        };
+        let cred2 = KiroCredentials {
+            access_token: Some("t2".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            ..Default::default()
+        };
 
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
@@ -3895,17 +3934,23 @@ mod tests {
     #[tokio::test]
     async fn test_multi_token_manager_acquire_context_balanced_retries_until_bad_credential_disabled()
      {
-        let mut config = Config::default();
-        config.load_balancing_mode = "balanced".to_string();
+        let config = Config {
+            load_balancing_mode: "balanced".to_string(),
+            ..Default::default()
+        };
 
-        let mut bad_cred = KiroCredentials::default();
-        bad_cred.priority = 0;
-        bad_cred.refresh_token = Some("bad".to_string());
+        let bad_cred = KiroCredentials {
+            priority: 0,
+            refresh_token: Some("bad".to_string()),
+            ..Default::default()
+        };
 
-        let mut good_cred = KiroCredentials::default();
-        good_cred.priority = 1;
-        good_cred.access_token = Some("good-token".to_string());
-        good_cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let good_cred = KiroCredentials {
+            priority: 1,
+            access_token: Some("good-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            ..Default::default()
+        };
 
         let manager =
             MultiTokenManager::new(config, vec![bad_cred, good_cred], None, None, false).unwrap();
@@ -3917,22 +3962,28 @@ mod tests {
 
     /// 构造两张均可用（token 未过期）的凭据 + 指定粘性开关
     fn manager_with_two_live_creds(session_affinity_enabled: bool) -> MultiTokenManager {
-        let mut config = Config::default();
-        config.session_affinity_enabled = session_affinity_enabled;
+        let mut config = Config {
+            session_affinity_enabled,
+            ..Default::default()
+        };
         // balanced 模式下每次都会重新均衡选择，最能暴露粘性是否真的生效
         config.load_balancing_mode = "balanced".to_string();
 
         let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
 
-        let mut c1 = KiroCredentials::default();
-        c1.priority = 0;
-        c1.access_token = Some("token-1".to_string());
-        c1.expires_at = Some(expires.clone());
+        let c1 = KiroCredentials {
+            priority: 0,
+            access_token: Some("token-1".to_string()),
+            expires_at: Some(expires.clone()),
+            ..Default::default()
+        };
 
-        let mut c2 = KiroCredentials::default();
-        c2.priority = 1;
-        c2.access_token = Some("token-2".to_string());
-        c2.expires_at = Some(expires);
+        let c2 = KiroCredentials {
+            priority: 1,
+            access_token: Some("token-2".to_string()),
+            expires_at: Some(expires),
+            ..Default::default()
+        };
 
         MultiTokenManager::new(config, vec![c1, c2], None, None, false).unwrap()
     }
@@ -4195,11 +4246,15 @@ mod tests {
     #[test]
     fn test_credential_region_priority_uses_credential_auth_region() {
         // 凭据配置了 auth_region 时，应使用凭据的 auth_region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.auth_region = Some("eu-west-1".to_string());
+        let credentials = KiroCredentials {
+            auth_region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
 
         let region = credentials.effective_auth_region(&config);
         assert_eq!(region, "eu-west-1");
@@ -4208,11 +4263,15 @@ mod tests {
     #[test]
     fn test_credential_region_priority_fallback_to_credential_region() {
         // 凭据未配置 auth_region 但配置了 region 时，应回退到凭据.region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.region = Some("eu-central-1".to_string());
+        let credentials = KiroCredentials {
+            region: Some("eu-central-1".to_string()),
+            ..Default::default()
+        };
 
         let region = credentials.effective_auth_region(&config);
         assert_eq!(region, "eu-central-1");
@@ -4221,8 +4280,10 @@ mod tests {
     #[test]
     fn test_credential_region_priority_fallback_to_config() {
         // 凭据未配置 auth_region 和 region 时，应回退到 config
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
         let credentials = KiroCredentials::default();
         assert!(credentials.auth_region.is_none());
@@ -4235,14 +4296,20 @@ mod tests {
     #[test]
     fn test_multiple_credentials_use_respective_regions() {
         // 多凭据场景下，不同凭据使用各自的 auth_region
-        let mut config = Config::default();
-        config.region = "ap-northeast-1".to_string();
+        let config = Config {
+            region: "ap-northeast-1".to_string(),
+            ..Default::default()
+        };
 
-        let mut cred1 = KiroCredentials::default();
-        cred1.auth_region = Some("us-east-1".to_string());
+        let cred1 = KiroCredentials {
+            auth_region: Some("us-east-1".to_string()),
+            ..Default::default()
+        };
 
-        let mut cred2 = KiroCredentials::default();
-        cred2.region = Some("eu-west-1".to_string());
+        let cred2 = KiroCredentials {
+            region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
 
         let cred3 = KiroCredentials::default(); // 无 region，使用 config
 
@@ -4254,11 +4321,15 @@ mod tests {
     #[test]
     fn test_idc_oidc_endpoint_uses_credential_auth_region() {
         // 验证 IdC OIDC endpoint URL 使用凭据 auth_region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.auth_region = Some("eu-central-1".to_string());
+        let credentials = KiroCredentials {
+            auth_region: Some("eu-central-1".to_string()),
+            ..Default::default()
+        };
 
         let region = credentials.effective_auth_region(&config);
         let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
@@ -4269,11 +4340,15 @@ mod tests {
     #[test]
     fn test_social_refresh_endpoint_uses_credential_auth_region() {
         // 验证 Social refresh endpoint URL 使用凭据 auth_region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.auth_region = Some("ap-southeast-1".to_string());
+        let credentials = KiroCredentials {
+            auth_region: Some("ap-southeast-1".to_string()),
+            ..Default::default()
+        };
 
         let region = credentials.effective_auth_region(&config);
         let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
@@ -4287,11 +4362,15 @@ mod tests {
     #[test]
     fn test_api_call_uses_effective_api_region() {
         // 验证 API 调用使用 effective_api_region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.region = Some("eu-west-1".to_string());
+        let credentials = KiroCredentials {
+            region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
 
         // 凭据.region 不参与 api_region 回退链
         let api_region = credentials.effective_api_region(&config);
@@ -4303,11 +4382,15 @@ mod tests {
     #[test]
     fn test_api_call_uses_credential_api_region() {
         // 凭据配置了 api_region 时，API 调用应使用凭据的 api_region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.api_region = Some("eu-central-1".to_string());
+        let credentials = KiroCredentials {
+            api_region: Some("eu-central-1".to_string()),
+            ..Default::default()
+        };
 
         let api_region = credentials.effective_api_region(&config);
         let api_host = format!("q.{}.amazonaws.com", api_region);
@@ -4318,11 +4401,15 @@ mod tests {
     #[test]
     fn test_credential_region_empty_string_treated_as_set() {
         // 空字符串 auth_region 被视为已设置（虽然不推荐，但行为应一致）
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
+        let config = Config {
+            region: "us-west-2".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.auth_region = Some("".to_string());
+        let credentials = KiroCredentials {
+            auth_region: Some("".to_string()),
+            ..Default::default()
+        };
 
         let region = credentials.effective_auth_region(&config);
         // 空字符串被视为已设置，不会回退到 config
@@ -4332,12 +4419,16 @@ mod tests {
     #[test]
     fn test_auth_and_api_region_independent() {
         // auth_region 和 api_region 互不影响
-        let mut config = Config::default();
-        config.region = "default".to_string();
+        let config = Config {
+            region: "default".to_string(),
+            ..Default::default()
+        };
 
-        let mut credentials = KiroCredentials::default();
-        credentials.auth_region = Some("auth-only".to_string());
-        credentials.api_region = Some("api-only".to_string());
+        let credentials = KiroCredentials {
+            auth_region: Some("auth-only".to_string()),
+            api_region: Some("api-only".to_string()),
+            ..Default::default()
+        };
 
         assert_eq!(credentials.effective_auth_region(&config), "auth-only");
         assert_eq!(credentials.effective_api_region(&config), "api-only");
@@ -4372,8 +4463,10 @@ mod tests {
     #[tokio::test]
     async fn test_record_token_usage_accumulates_per_credential() {
         let config = Config::default();
-        let mut cred = KiroCredentials::default();
-        cred.refresh_token = Some("rt-1".to_string());
+        let cred = KiroCredentials {
+            refresh_token: Some("rt-1".to_string()),
+            ..Default::default()
+        };
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
 
         let id = manager.snapshot().entries[0].id;
@@ -4391,8 +4484,10 @@ mod tests {
     #[tokio::test]
     async fn test_record_token_usage_ignores_zero_and_unknown_id() {
         let config = Config::default();
-        let mut cred = KiroCredentials::default();
-        cred.refresh_token = Some("rt-1".to_string());
+        let cred = KiroCredentials {
+            refresh_token: Some("rt-1".to_string()),
+            ..Default::default()
+        };
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
         let id = manager.snapshot().entries[0].id;
 

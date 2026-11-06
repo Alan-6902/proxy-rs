@@ -43,7 +43,7 @@
     "framer-motion": "^12.40.0",
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.555.0",
-    "nodemailer": "9.0.4",
+    "nodemailer": "^9.1.1",
     "smol-toml": "^1.9.1",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.17",
@@ -81,8 +81,9 @@
   },
   "allowScripts": {
     "cbor-extract@2.2.0": true,
-    "electron@38.7.2": true,
+    "electron@38.8.6": true,
     "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
     "koffi@2.16.2": true
   }
 }

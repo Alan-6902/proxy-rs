@@ -25,11 +25,10 @@ fn free_port() -> u16 {
 async fn wait_ready(client: &reqwest::Client, url: &str) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Ok(response) = client.get(url).header("x-api-key", "test-admin-key").send().await {
-                if response.status().is_success() {
+            if let Ok(response) = client.get(url).header("x-api-key", "test-admin-key").send().await
+                && response.status().is_success() {
                     return response.json().await.unwrap();
                 }
-            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }).await.expect("服务应在规定时间内就绪")
@@ -60,6 +59,9 @@ async fn services_have_separate_databases_ports_and_lifetimes() {
     std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
         "host": "127.0.0.1", "port": kiro_port, "antigravityPort": ag_port,
         "apiKey": "test-api-key", "adminApiKey": "test-admin-key",
+        // antigravity-rs 启动时强制要求 OAuth 客户端配置（见 config.rs），测试只需占位值。
+        "antigravityOauthClientId": "test-client-id.apps.googleusercontent.com",
+        "antigravityOauthClientSecret": "test-client-secret",
     })).unwrap()).unwrap();
     let ag_db = fixture.directory.join("antigravity.sqlite3");
     let kiro_db = fixture.directory.join("accounts.sqlite3");

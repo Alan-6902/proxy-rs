@@ -105,7 +105,7 @@ export function AccountDetailDialog({
   account,
   onRefresh,
   isRefreshing
-}: AccountDetailDialogProps) {
+}: AccountDetailDialogProps): React.JSX.Element | null {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsError, setModelsError] = useState<string | null>(null)

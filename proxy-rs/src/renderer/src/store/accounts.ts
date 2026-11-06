@@ -998,7 +998,6 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       exportAccounts = Array.from(accounts.values())
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const data: AccountExportData = {
       version: get().appVersion,
       exportedAt: Date.now(),
@@ -2660,7 +2659,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
 
     // 计算当前数据的哈希值
-    const computeHash = () => {
+    const computeHash = (): string => {
       const { accounts, groups, tags, activeAccountId } = get()
       return JSON.stringify({
         accounts: Object.fromEntries(accounts),

@@ -4,7 +4,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle, askConfirm } from '..
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
-import type { AccountGroup } from '@/types/account'
+import type { Account, AccountGroup } from '@/types/account'
 import { X, Plus, Edit2, Trash2, Users, Check, FolderOpen } from 'lucide-react'
 
 interface GroupManageDialogProps {
@@ -46,7 +46,7 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
   }
 
   // 创建分组
-  const handleCreate = () => {
+  const handleCreate = (): void => {
     if (!newName.trim()) return
     addGroup({
       name: newName.trim(),
@@ -60,7 +60,7 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
   }
 
   // 开始编辑
-  const handleStartEdit = (group: AccountGroup) => {
+  const handleStartEdit = (group: AccountGroup): void => {
     setEditingId(group.id)
     setEditName(group.name)
     setEditDescription(group.description || '')
@@ -68,7 +68,7 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
   }
 
   // 保存编辑
-  const handleSaveEdit = () => {
+  const handleSaveEdit = (): void => {
     if (!editingId || !editName.trim()) return
     updateGroup(editingId, {
       name: editName.trim(),
@@ -94,17 +94,17 @@ export function GroupManageDialog({ isOpen, onClose }: GroupManageDialogProps): 
   }
 
   // 批量分配账号到分组（不退出分配模式，允许连续操作）
-  const handleAssignAccounts = (groupId: string | undefined, accountIds: string[]) => {
+  const handleAssignAccounts = (groupId: string | undefined, accountIds: string[]): void => {
     moveAccountsToGroup(accountIds, groupId)
   }
 
   // 获取可分配的账号列表
-  const getAssignableAccounts = (groupId: string) => {
+  const getAssignableAccounts = (groupId: string): Account[] => {
     return Array.from(accounts.values()).filter((acc) => acc.groupId !== groupId)
   }
 
   // 获取分组内的账号列表
-  const getGroupAccounts = (groupId: string) => {
+  const getGroupAccounts = (groupId: string): Account[] => {
     return Array.from(accounts.values()).filter((acc) => acc.groupId === groupId)
   }
 

@@ -1,41 +1,12 @@
 import { useEffect, useState } from 'react'
-import {
-  Home,
-  Users,
-  Settings,
-  Info,
-  ChevronRight,
-  ScrollText,
-  Stethoscope,
-  Network,
-  Archive,
-  GripVertical,
-  ListChecks,
-  LayoutDashboard,
-  Sparkles,
-  Terminal,
-  Bot
-} from 'lucide-react'
+import { ChevronRight, GripVertical } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import proxyRsIcon from '@/assets/proxy-rs-icon.svg'
 import { APP_NAME } from '../../../../shared/appIdentity'
 import { useTranslation } from '@/hooks/useTranslation'
 
-export type PageType =
-  | 'home'
-  | 'accounts'
-  | 'tasks'
-  | 'diagnose'
-  | 'serena'
-  | 'configSync'
-  | 'kiroAdmin'
-  | 'antigravityAdmin'
-  | 'qoderAdmin'
-  | 'kiroLogs'
-  | 'logs'
-  | 'settings'
-  | 'about'
+import { menuItemsConfig, type PageType } from './pageTypes'
 
 interface SidebarProps {
   currentPage: PageType
@@ -44,27 +15,7 @@ interface SidebarProps {
   onToggleCollapse: () => void
 }
 
-const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType }[] = [
-  { id: 'home', labelKey: 'nav.home', icon: Home },
-  { id: 'accounts', labelKey: 'nav.accounts', icon: Users },
-  { id: 'tasks', labelKey: 'nav.tasks', icon: ListChecks },
-  { id: 'diagnose', labelKey: 'nav.diagnose', icon: Stethoscope },
-  { id: 'serena', labelKey: 'nav.serena', icon: Network },
-  { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
-  { id: 'kiroAdmin', labelKey: 'nav.kiroAdmin', icon: LayoutDashboard },
-  { id: 'antigravityAdmin', labelKey: 'nav.antigravityAdmin', icon: Sparkles },
-  { id: 'qoderAdmin', labelKey: 'nav.qoderAdmin', icon: Bot },
-  { id: 'kiroLogs', labelKey: 'nav.kiroLogs', icon: Terminal },
-  { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
-  { id: 'settings', labelKey: 'nav.settings', icon: Settings },
-  { id: 'about', labelKey: 'nav.about', icon: Info }
-]
-
 const SIDEBAR_ORDER_STORAGE_KEY = 'proxy-rs.sidebar-order'
-
-export function isPageType(value: unknown): value is PageType {
-  return menuItemsConfig.some((item) => item.id === value)
-}
 
 function getInitialMenuItems(): typeof menuItemsConfig {
   try {
@@ -94,7 +45,12 @@ function getInitialMenuItems(): typeof menuItemsConfig {
   }
 }
 
-export function Sidebar({ currentPage, onPageChange, collapsed, onToggleCollapse }: SidebarProps) {
+export function Sidebar({
+  currentPage,
+  onPageChange,
+  collapsed,
+  onToggleCollapse
+}: SidebarProps): React.JSX.Element {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const [menuItems, setMenuItems] = useState(getInitialMenuItems)

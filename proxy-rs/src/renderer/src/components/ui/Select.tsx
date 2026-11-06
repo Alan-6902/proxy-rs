@@ -25,14 +25,14 @@ export function Select({
   placeholder = '请选择',
   className,
   disabled = false
-}: SelectProps) {
+}: SelectProps): React.JSX.Element {
   const [isOpen, setIsOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   const selectedOption = options.find((opt) => opt.value === value)
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: MouseEvent): void => {
       if (ref.current && !ref.current.contains(event.target as Node)) {
         setIsOpen(false)
       }

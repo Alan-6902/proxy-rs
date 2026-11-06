@@ -22,7 +22,7 @@ export function ExportDialog({
   onClose,
   accounts: maskedAccounts,
   selectedCount
-}: ExportDialogProps) {
+}: ExportDialogProps): React.JSX.Element | null {
   /*
    * 账号库模式下账号列表不带 token 明文（改造方案 §6.3），而导出"包含凭据"必须要真值，
    * 所以打开对话框时按需向主进程取一次带凭据的版本。非账号库模式返回 null，沿用入参。
@@ -115,7 +115,7 @@ export function ExportDialog({
   // 生成导出内容
   const generateContent = (format: ExportFormat): string => {
     switch (format) {
-      case 'json':
+      case 'json': {
         // 使用 store 的 exportAccounts 函数导出完整数据
         const exportData = exportAccounts(accounts.map((a) => a.id))
         // 如果不包含凭证，移除敏感信息
@@ -131,6 +131,7 @@ export function ExportDialog({
           }))
         }
         return JSON.stringify(exportData, null, 2)
+      }
 
       case 'oidc': {
         // 精简 JSON：只含关键凭证（邮箱/密码/refreshToken/clientId/clientSecret/provider）
@@ -177,7 +178,7 @@ export function ExportDialog({
           })
           .join('\n\n---\n\n')
 
-      case 'csv':
+      case 'csv': {
         // CSV 格式：包含凭证时可用于导入
         const headers = includeCredentials
           ? ['邮箱', '昵称', '登录方式', 'RefreshToken', 'ClientId', 'ClientSecret', 'Region']
@@ -210,6 +211,7 @@ export function ExportDialog({
             .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
             .join('\n')
         )
+      }
 
       case 'kami':
         // 卡密格式：邮箱----密码----RefreshToken----ClientId----ClientSecret----登录方式
@@ -249,7 +251,7 @@ export function ExportDialog({
   }
 
   // 导出处理
-  const handleExport = async () => {
+  const handleExport = async (): Promise<void> => {
     const content = generateContent(selectedFormat)
     const count = accounts.length
 

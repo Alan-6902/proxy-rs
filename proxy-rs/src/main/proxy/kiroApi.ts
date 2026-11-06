@@ -1,4 +1,6 @@
 // Kiro API 调用核心模块
+import { release as osRelease } from 'node:os'
+import { createHash } from 'node:crypto'
 import { v4 as uuidv4 } from 'uuid'
 import {
   fetch as undiciFetch,
@@ -183,7 +185,7 @@ const OS_PLATFORM =
   process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'macos' : 'linux'
 const OS_RELEASE = (() => {
   try {
-    return require('os').release()
+    return osRelease()
   } catch {
     return '10.0.0'
   }
@@ -1170,8 +1172,7 @@ function fingerprintFromHistory(history: KiroHistoryMessage[]): string | undefin
         `${msg.userInputMessage?.content || ''}|${msg.assistantResponseMessage?.content || ''}`
     )
     .join('::')
-  const crypto = require('crypto')
-  return crypto.createHash('sha256').update(fp).digest('hex').slice(0, 32)
+  return createHash('sha256').update(fp).digest('hex').slice(0, 32)
 }
 
 // 清除所有内存缓存（会话 ID / 模型列表 / 端点熔断）；供测试隔离用例状态
@@ -1370,7 +1371,7 @@ const STREAM_RATE_LIMIT_MAX_RETRIES = 2
 async function waitForStreamRateLimitRetry(ms: number, signal?: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(resolve, ms)
-    const abort = () => {
+    const abort = (): void => {
       clearTimeout(timeout)
       reject(getAbortError(signal))
     }
@@ -1745,11 +1746,11 @@ async function parseEventStream(
   payloadStr?: string // 请求 payload JSON 字符串，用于 tiktoken 精确计算
 ): Promise<void> {
   const reader = body.getReader()
-  const abort = () => {
+  const abort = (): void => {
     reader.cancel(getAbortError(signal)).catch(() => undefined)
   }
   let buffer = new Uint8Array(0)
-  let usage: KiroUsage = {
+  const usage: KiroUsage = {
     inputTokens: 0,
     outputTokens: 0,
     credits: 0,

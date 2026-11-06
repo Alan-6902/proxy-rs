@@ -295,7 +295,7 @@ export function AddAccountDialog({
     startUrl?: string
     authMethod?: string
     provider?: string
-  }) => {
+  }): Promise<void> => {
     console.log('[AddAccountDialog] Login successful, verifying credentials...')
 
     try {
@@ -386,7 +386,7 @@ export function AddAccountDialog({
   }
 
   // 启动 Builder ID 登录
-  const handleStartBuilderIdLogin = async () => {
+  const handleStartBuilderIdLogin = async (): Promise<void> => {
     setIsLoggingIn(true)
     setError(null)
     setBuilderIdLoginData(null)
@@ -418,7 +418,7 @@ export function AddAccountDialog({
   }
 
   // 启动 IAM SSO 登录 (Authorization Code flow)
-  const handleStartIamSsoLogin = async () => {
+  const handleStartIamSsoLogin = async (): Promise<void> => {
     if (!ssoStartUrl.trim()) {
       setError(isEn ? 'Please enter SSO Start URL' : '请输入 SSO Start URL')
       return
@@ -456,7 +456,7 @@ export function AddAccountDialog({
   }
 
   // 开始轮询 IAM SSO 授权
-  const startIamSsoPolling = (interval: number) => {
+  const startIamSsoPolling = (interval: number): void => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current)
     }
@@ -505,7 +505,7 @@ export function AddAccountDialog({
   }
 
   // 开始轮询 Builder ID 授权
-  const startPolling = (interval: number) => {
+  const startPolling = (interval: number): void => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current)
     }
@@ -553,7 +553,7 @@ export function AddAccountDialog({
   }
 
   // 取消登录
-  const handleCancelLogin = async () => {
+  const handleCancelLogin = async (): Promise<void> => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current)
       pollIntervalRef.current = null
@@ -575,7 +575,7 @@ export function AddAccountDialog({
   }
 
   // 启动 Social Auth 登录 (Google/GitHub)
-  const handleStartSocialLogin = async (socialProvider: 'Google' | 'Github') => {
+  const handleStartSocialLogin = async (socialProvider: 'Google' | 'Github'): Promise<void> => {
     setIsLoggingIn(true)
     setError(null)
 
@@ -594,7 +594,7 @@ export function AddAccountDialog({
   }
 
   // 复制 user_code
-  const handleCopyUserCode = async () => {
+  const handleCopyUserCode = async (): Promise<void> => {
     if (builderIdLoginData?.userCode) {
       await navigator.clipboard.writeText(builderIdLoginData.userCode)
       setCopied(true)
@@ -603,7 +603,7 @@ export function AddAccountDialog({
   }
 
   // 从 SSO Token 导入并添加账号（支持批量）
-  const handleSsoImport = async () => {
+  const handleSsoImport = async (): Promise<void> => {
     if (!ssoToken.trim()) {
       setError('请输入 x-amz-sso_authn 的值')
       return
@@ -924,7 +924,7 @@ export function AddAccountDialog({
   }
 
   // OIDC 批量导入
-  const handleOidcBatchAdd = async () => {
+  const handleOidcBatchAdd = async (): Promise<void> => {
     if (!oidcBatchData.trim()) {
       setError('请输入凭证数据')
       return
@@ -1189,7 +1189,7 @@ export function AddAccountDialog({
   }
 
   // OIDC 凭证添加账号（验证并添加）
-  const handleOidcAdd = async () => {
+  const handleOidcAdd = async (): Promise<void> => {
     if (!refreshToken) {
       setError('请填写 Refresh Token')
       return
@@ -1285,7 +1285,7 @@ export function AddAccountDialog({
     }
   }
 
-  const resetForm = () => {
+  const resetForm = (): void => {
     setImportMode('login')
     setRefreshToken('')
     setClientId('')
@@ -1801,6 +1801,7 @@ export function AddAccountDialog({
                           href="https://view.awsapps.com/start/#/device?user_code=PQCF-FCCN/start/#/device?user_code=PQCF-FCCN"
                           target="_blank"
                           className="underline hover:text-primary/80 font-medium"
+                          rel="noreferrer"
                         >
                           view.awsapps.com/start/#/device?user_code=PQCF-FCCN
                         </a>

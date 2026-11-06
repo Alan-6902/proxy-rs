@@ -13,7 +13,11 @@ interface EditAccountDialogProps {
   account: Account | null
 }
 
-export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDialogProps) {
+export function EditAccountDialog({
+  open,
+  onOpenChange,
+  account
+}: EditAccountDialogProps): React.JSX.Element | null {
   const { updateAccount } = useAccountsStore()
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
@@ -94,7 +98,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
   }, [account])
 
   // 验证并刷新信息
-  const handleVerifyAndRefresh = async () => {
+  const handleVerifyAndRefresh = async (): Promise<void> => {
     const isApiKey =
       account?.credentials.credentialKind === 'kiro_api_key' ||
       Boolean(account?.credentials.kiroApiKey)
@@ -166,7 +170,7 @@ export function EditAccountDialog({ open, onOpenChange, account }: EditAccountDi
   }, [open])
 
   // 保存
-  const handleSave = () => {
+  const handleSave = (): void => {
     if (!account || !accountInfo) return
 
     const now = Date.now()

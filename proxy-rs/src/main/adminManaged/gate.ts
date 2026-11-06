@@ -43,9 +43,7 @@ let managedIdsListener: ((ids: readonly string[]) => void) | undefined
  *
  * 做成回调而不是在 gate 里直接发 IPC：gate 是纯逻辑层，不该知道窗口的存在。
  */
-export function setAdminManagedChangeListener(
-  listener: (ids: readonly string[]) => void
-): void {
+export function setAdminManagedChangeListener(listener: (ids: readonly string[]) => void): void {
   managedIdsListener = listener
 }
 

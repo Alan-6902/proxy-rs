@@ -29,11 +29,22 @@ export default defineConfig(
     }
   },
   {
-    // 下游参考实现与 mock 上游都是纯 JS 联调脚本（前者还要给用户拿去改），
-    // 不进安装包也不参与 typecheck，不要求 TS 的显式返回类型标注
-    files: ['downstream-example/**/*.mjs', 'kiroapp-mock/**/*.mjs'],
     rules: {
-      '@typescript-eslint/explicit-function-return-type': 'off'
+      // `({ secret, ...rest }) => rest` 这类剔除字段的解构是有意为之；`_x` 形参表示有意忽略
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { ignoreRestSiblings: true, argsIgnorePattern: '^_' }
+      ]
+    }
+  },
+  {
+    // 构建 / 安装脚本是纯 JS（.mjs / .cjs），不进安装包也不参与 typecheck：
+    // 不要求 TS 的显式返回类型，.cjs 允许 require，测试里的空 stub 方法也放行
+    files: ['scripts/**/*.{mjs,cjs}', 'build/**/*.{mjs,cjs}'],
+    rules: {
+      '@typescript-eslint/explicit-function-return-type': 'off',
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-empty-function': 'off'
     }
   },
   eslintConfigPrettier

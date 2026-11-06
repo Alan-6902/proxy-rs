@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable */
+
 /**
  * patch-kiro-ide.cjs
  *

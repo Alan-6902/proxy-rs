@@ -4,7 +4,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle, askConfirm } from '..
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
-import type { AccountTag } from '@/types/account'
+import type { Account, AccountTag } from '@/types/account'
 import { X, Plus, Edit2, Trash2, Tag, Check, Palette } from 'lucide-react'
 
 interface TagManageDialogProps {
@@ -92,7 +92,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
   }
 
   // 创建标签
-  const handleCreate = () => {
+  const handleCreate = (): void => {
     if (!newName.trim()) return
     const argbColor = toArgb(newColor, newAlpha)
     addTag({
@@ -106,7 +106,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
   }
 
   // 开始编辑
-  const handleStartEdit = (tag: AccountTag) => {
+  const handleStartEdit = (tag: AccountTag): void => {
     setEditingId(tag.id)
     setEditName(tag.name)
     const { alpha, rgb } = parseArgb(tag.color)
@@ -115,7 +115,7 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
   }
 
   // 保存编辑
-  const handleSaveEdit = () => {
+  const handleSaveEdit = (): void => {
     if (!editingId || !editName.trim()) return
     const argbColor = toArgb(editColor, editAlpha)
     updateTag(editingId, {
@@ -141,12 +141,12 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
   }
 
   // 获取带有此标签的账号列表
-  const getTaggedAccounts = (tagId: string) => {
+  const getTaggedAccounts = (tagId: string): Account[] => {
     return Array.from(accounts.values()).filter((acc) => acc.tags.includes(tagId))
   }
 
   // 获取可添加此标签的账号列表
-  const getUntaggedByTag = (tagId: string) => {
+  const getUntaggedByTag = (tagId: string): Account[] => {
     return Array.from(accounts.values()).filter((acc) => !acc.tags.includes(tagId))
   }
 
@@ -468,6 +468,3 @@ export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): Reac
     document.body
   )
 }
-
-// 导出工具函数供其他组件使用
-export { toRgba, parseArgb, toArgb }

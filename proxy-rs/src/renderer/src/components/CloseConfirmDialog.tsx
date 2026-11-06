@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { useTranslation } from '../hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
 
-export function CloseConfirmDialog() {
+export function CloseConfirmDialog(): React.JSX.Element | null {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
   const [open, setOpen] = useState(false)
@@ -19,7 +19,7 @@ export function CloseConfirmDialog() {
     return () => unsubscribe()
   }, [])
 
-  const handleAction = (action: 'minimize' | 'quit' | 'cancel') => {
+  const handleAction = (action: 'minimize' | 'quit' | 'cancel'): void => {
     window.api.sendCloseConfirmResponse(action, rememberChoice)
     setOpen(false)
   }

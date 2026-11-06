@@ -1,4 +1,3 @@
-/// <reference path="../../src/preload/index.d.ts" />
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAccountsStore } from '../../src/renderer/src/store/accounts'
 import type { Account } from '../../src/renderer/src/types/account'
@@ -108,11 +107,16 @@ describe('托管账号渲染层只发送标识、展示结果', () => {
     await useAccountsStore.getState().batchCheckStatus(['managed', 'local'])
     const accounts = api.backgroundBatchCheck.mock.calls[0][0]
     expect(accounts.find((item: Account) => item.id === 'managed').credentials).toEqual({})
-    expect(accounts.find((item: Account) => item.id === 'local').credentials.accessToken).toBe('old-access')
+    expect(accounts.find((item: Account) => item.id === 'local').credentials.accessToken).toBe(
+      'old-access'
+    )
   })
 
   it('旧的过期检查入口不能用托管账号本地时间触发强刷', async () => {
-    api.refreshAccountToken.mockResolvedValue({ success: true, data: { accessToken: 'new', expiresIn: 3600 } })
+    api.refreshAccountToken.mockResolvedValue({
+      success: true,
+      data: { accessToken: 'new', expiresIn: 3600 }
+    })
     api.checkAccountStatus.mockResolvedValue({ success: true, data: { status: 'active' } })
     await useAccountsStore.getState().checkAndRefreshExpiringTokens()
     await useAccountsStore.getState().refreshExpiredTokensOnly()
@@ -142,19 +146,17 @@ describe('托管账号渲染层只发送标识、展示结果', () => {
       id: 'managed',
       email: 'managed@example.test'
     })
-    useAccountsStore
-      .getState()
-      .applyBackgroundRefreshResults([
-        {
-          id: 'managed',
-          success: true,
-          data: {
-            accessToken: 'unexpected',
-            refreshToken: 'unexpected',
-            usage: { current: 20, limit: 100 }
-          }
+    useAccountsStore.getState().applyBackgroundRefreshResults([
+      {
+        id: 'managed',
+        success: true,
+        data: {
+          accessToken: 'unexpected',
+          refreshToken: 'unexpected',
+          usage: { current: 20, limit: 100 }
         }
-      ])
+      }
+    ])
     expect(useAccountsStore.getState().accounts.get('managed')!.credentials).toEqual(original)
     expect(useAccountsStore.getState().accounts.get('managed')!.usage.current).toBe(20)
   })

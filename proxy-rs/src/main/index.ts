@@ -1213,6 +1213,7 @@ let store: {
 let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
+import type { ParsedSubscription, ParsedUsage } from '../shared/usageLimitsParse'
 import {
   getUsageApiType,
   registerUsageApiTypeIpcHandlers,
@@ -4020,6 +4021,28 @@ app.whenReady().then(async () => {
   ipcMain.handle('check-account-status', async (_event, account) => {
     console.log(`[IPC] check-account-status [${account?.email || 'unknown'}]`)
 
+    /** 检查成功时返回给渲染层的结构；usage / subscription 与 shared/usageLimitsParse 保持同形 */
+    interface AccountStatusCheckSuccess {
+      success: true
+      data: {
+        status: 'active' | 'error'
+        email?: string
+        userId?: string
+        idp?: string
+        userStatus?: string
+        featureFlags?: string[]
+        subscriptionTitle: string
+        usage: ParsedUsage
+        subscription: ParsedSubscription
+        newCredentials?: {
+          accessToken: string
+          refreshToken?: string
+          expiresAt?: number
+          credentialRevision?: string
+        }
+      }
+    }
+
     interface Bonus {
       bonusCode?: string
       displayName?: string
@@ -4094,7 +4117,7 @@ app.whenReady().then(async () => {
         credentialRevision?: string
       },
       userInfo?: UserInfoResponse
-    ) => {
+    ): AccountStatusCheckSuccess => {
       console.log(`[Kiro API] Usage [${account?.email || userInfo?.email || 'unknown'}]`, result)
 
       // 解析 Credits 使用量（resourceType 为 CREDIT）
@@ -6567,19 +6590,39 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-kiro-available-models', async () => {
     try {
       if (!store) return { models: [] }
-      const accountData = store.get('accountData') as { accounts?: Record<string, any> } | undefined
+      /** 诊断只读取存储账号里与上游调用相关的字段 */
+      interface StoredAccountForDiagnose {
+        id: string
+        email?: string
+        idp?: string
+        isActive?: boolean
+        status?: string
+        profileArn?: string
+        credentials?: {
+          credentialKind?: ProxyAccount['credentialKind']
+          accessToken?: string
+          kiroApiKey?: string
+          refreshToken?: string
+          provider?: string
+          profileArn?: string
+          expiresAt?: number
+          clientId?: string
+          clientSecret?: string
+          region?: string
+          authMethod?: string
+        }
+      }
+      const accountData = store.get('accountData') as
+        | { accounts?: Record<string, StoredAccountForDiagnose> }
+        | undefined
       if (!accountData?.accounts) return { models: [] }
 
-      const allAccounts = Object.values(accountData.accounts) as any[]
+      const allAccounts = Object.values(accountData.accounts)
+      const hasUpstreamCredential = (acc: StoredAccountForDiagnose): boolean =>
+        Boolean(acc.credentials?.accessToken || acc.credentials?.kiroApiKey)
       const account =
-        allAccounts.find(
-          (acc: any) =>
-            acc.isActive && (acc.credentials?.accessToken || acc.credentials?.kiroApiKey)
-        ) ||
-        allAccounts.find(
-          (acc: any) =>
-            acc.status === 'active' && (acc.credentials?.accessToken || acc.credentials?.kiroApiKey)
-        )
+        allAccounts.find((acc) => acc.isActive && hasUpstreamCredential(acc)) ||
+        allAccounts.find((acc) => acc.status === 'active' && hasUpstreamCredential(acc))
       if (!account) return { models: [] }
 
       const credential = resolveUpstreamKiroCredential({
@@ -7071,9 +7114,11 @@ async function startAccountDbServices(): Promise<void> {
   const config = loadAccountDbConfig(app.getPath('userData'))
   if (!config) return
   const antigravityStart = startManagedAntigravity({
-    binary: config.antigravityRs?.binary ?? (app.isPackaged
-      ? join(process.resourcesPath, 'antigravity-rs')
-      : join(app.getAppPath(), '..', 'kiro-rs-src', 'target', 'release', 'antigravity-rs')),
+    binary:
+      config.antigravityRs?.binary ??
+      (app.isPackaged
+        ? join(process.resourcesPath, 'antigravity-rs')
+        : join(app.getAppPath(), '..', 'kiro-rs-src', 'target', 'release', 'antigravity-rs')),
     onLog: (line, stream) => logKiroRsLine(line, stream, 'antigravity-rs'),
     onStateChange: (state, detail) => {
       console.log(`[antigravity-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)

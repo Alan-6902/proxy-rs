@@ -36,11 +36,11 @@ export function AccountList({ onAddAccount, onEditAccount }: AccountListProps): 
 
   const accounts = getFilteredAccounts()
 
-  const handleShowDetail = (account: Account) => {
+  const handleShowDetail = (account: Account): void => {
     setDetailAccount(account)
   }
 
-  const handleRefreshDetail = async () => {
+  const handleRefreshDetail = async (): Promise<void> => {
     if (!detailAccount) return
     setIsRefreshing(true)
     try {

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { callKiroApiStream, fetchKiroModels } from '../../src/main/proxy/kiroApi'
+import type { KiroPayload } from '../../src/main/proxy/types'
+import type { Account } from '../../src/renderer/src/types/account'
 
 function eventStreamFrame(eventType: string, payload: unknown): Uint8Array {
   const encoder = new TextEncoder()
@@ -45,7 +47,7 @@ const payload = {
     currentMessage: { userInputMessage: { content: 'hello', modelId: 'gpt-5-6-terra' } },
     history: []
   }
-} as any
+} as unknown as KiroPayload
 
 afterEach(async () => {
   vi.unstubAllGlobals()
@@ -522,7 +524,7 @@ describe('Kiro API key account sync signature', () => {
           kiroApiKey: 'ksk_test_redacted',
           region: 'eu-central-1'
         }
-      } as any,
+      } as unknown as Account,
       'http://127.0.0.1:7890'
     )
 

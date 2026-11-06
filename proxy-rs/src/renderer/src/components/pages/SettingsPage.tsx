@@ -187,7 +187,7 @@ const themeGroupsEn = [
   }
 ]
 
-export function SettingsPage() {
+export function SettingsPage(): React.JSX.Element {
   const {
     privacyMode,
     setPrivacyMode,
@@ -247,7 +247,7 @@ export function SettingsPage() {
 
   // 加载快捷键设置
   useEffect(() => {
-    const loadShortcut = async () => {
+    const loadShortcut = async (): Promise<void> => {
       try {
         const shortcut = await window.api.getShowWindowShortcut()
         setShowWindowShortcut(shortcut)
@@ -261,7 +261,7 @@ export function SettingsPage() {
   }, [])
 
   // 保存快捷键设置
-  const handleShortcutChange = async (shortcut: string) => {
+  const handleShortcutChange = async (shortcut: string): Promise<void> => {
     setShowWindowShortcut(shortcut)
     setShortcutError('')
     try {
@@ -275,7 +275,7 @@ export function SettingsPage() {
   }
 
   // 按键录制处理
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (!isRecordingShortcut) return
     e.preventDefault()
 
@@ -304,7 +304,7 @@ export function SettingsPage() {
 
   // 加载 Usage API 类型设置
   useEffect(() => {
-    const loadUsageApiType = async () => {
+    const loadUsageApiType = async (): Promise<void> => {
       try {
         const type = await window.api.getUsageApiType()
         setUsageApiType(type)
@@ -318,7 +318,7 @@ export function SettingsPage() {
   }, [])
 
   // 保存 Usage API 类型
-  const handleUsageApiTypeChange = async (type: 'rest' | 'cbor') => {
+  const handleUsageApiTypeChange = async (type: 'rest' | 'cbor'): Promise<void> => {
     setUsageApiType(type)
     try {
       await window.api.setUsageApiType(type)
@@ -329,7 +329,7 @@ export function SettingsPage() {
 
   // 加载托盘设置
   useEffect(() => {
-    const loadTraySettings = async () => {
+    const loadTraySettings = async (): Promise<void> => {
       try {
         const settings = await window.api.getTraySettings()
         // 只在 IPC 真的回了对象时覆盖，避免 nullish 响应清空默认值导致渲染崩溃
@@ -347,7 +347,7 @@ export function SettingsPage() {
   const handleTraySettingChange = async (
     key: keyof typeof traySettings,
     value: boolean | string
-  ) => {
+  ): Promise<void> => {
     const newSettings = { ...traySettings, [key]: value }
     setTraySettings(newSettings)
     try {
@@ -357,7 +357,7 @@ export function SettingsPage() {
     }
   }
 
-  const handleManualRefresh = async () => {
+  const handleManualRefresh = async (): Promise<void> => {
     setIsManualRefreshing(true)
     try {
       await checkAndRefreshExpiringTokens()
@@ -367,11 +367,11 @@ export function SettingsPage() {
   }
   const themeGroups = isEn ? themeGroupsEn : themeGroupsZh
 
-  const handleExport = () => {
+  const handleExport = (): void => {
     setShowExportDialog(true)
   }
 
-  const handleImport = async () => {
+  const handleImport = async (): Promise<void> => {
     setIsImporting(true)
     try {
       const fileData = await window.api.importFromFile()

@@ -8,7 +8,8 @@ const BUILD_SCRIPTS = new Set(['build:mac', 'build:mac:current'])
 const TEST_RETENTION_MS = 24 * 60 * 60 * 1000
 const CARGO_CLEAN_TIMEOUT_MS = 30_000
 const RUST_MACRO_SERVER = 'rust-analyzer-proc-macro-srv'
-const TEST_DIRECTORY = /^(account-store-test|credential-identity-test)-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
+const TEST_DIRECTORY =
+  /^(account-store-test|credential-identity-test)-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 
 // 只接受仓库内的真实目录，拒绝任何一级父路径的软链。
 export function directory(root, relative) {
@@ -39,8 +40,14 @@ function onlyRetainedMacroLibraries(output, target) {
     const file = line.slice(1)
     const name = path.basename(file)
     // cargo clean -p kiro-rs 不删除第三方宏库；本包库和其他占用仍然阻止清理。
-    if (processName !== RUST_MACRO_SERVER || path.dirname(file) !== path.join(target, 'debug/deps') ||
-      !name.startsWith('lib') || name.startsWith('libkiro_rs') || !name.endsWith('.dylib')) return false
+    if (
+      processName !== RUST_MACRO_SERVER ||
+      path.dirname(file) !== path.join(target, 'debug/deps') ||
+      !name.startsWith('lib') ||
+      name.startsWith('libkiro_rs') ||
+      !name.endsWith('.dylib')
+    )
+      return false
     files += 1
   }
   return files > 0
@@ -56,8 +63,12 @@ export function assertIdle(dir, run, allowRetainedMacros = false) {
   }
   const output = result.stdout?.trim() ?? ''
   if (result.status === 1 && !output) return
-  if (allowRetainedMacros && (result.status === 0 || result.status === 1) &&
-    onlyRetainedMacroLibraries(output, dir)) return
+  if (
+    allowRetainedMacros &&
+    (result.status === 0 || result.status === 1) &&
+    onlyRetainedMacroLibraries(output, dir)
+  )
+    return
   throw new Error(`目录正在使用或占用检查失败，保留：${dir}`)
 }
 
@@ -77,14 +88,31 @@ export function cleanRustCaches(root, run, log, now) {
   assertIdle(target, run, true)
   // 按包清理由 Cargo 自己持有构建锁；不能在一次 lsof 检查后直接删 incremental。
   // 显式固定输出目录，避免环境变量或 Cargo 配置把清理指向仓库外。
-  for (const [profile, output] of [['dev', 'debug'], ['release', 'release']]) {
+  for (const [profile, output] of [
+    ['dev', 'debug'],
+    ['release', 'release']
+  ]) {
     if (!directory(root, `kiro-rs-src/target/${output}`)) continue
-    const result = run('cargo', ['clean', '--frozen', '--profile', profile, '--package', 'kiro-rs',
-      '--target-dir', target, '--config', `build.build-dir=${JSON.stringify(target)}`], {
-      cwd: path.join(root, 'kiro-rs-src'),
-      stdio: 'inherit',
-      timeout: CARGO_CLEAN_TIMEOUT_MS
-    })
+    const result = run(
+      'cargo',
+      [
+        'clean',
+        '--frozen',
+        '--profile',
+        profile,
+        '--package',
+        'kiro-rs',
+        '--target-dir',
+        target,
+        '--config',
+        `build.build-dir=${JSON.stringify(target)}`
+      ],
+      {
+        cwd: path.join(root, 'kiro-rs-src'),
+        stdio: 'inherit',
+        timeout: CARGO_CLEAN_TIMEOUT_MS
+      }
+    )
     if (result.error || result.signal || result.status !== 0) {
       throw new Error('Cargo 清理未完成或等待构建锁超时；保留其余缓存。')
     }
@@ -114,7 +142,9 @@ export function withPackageLock(projectRoot, action) {
     fs.mkdirSync(lock)
   } catch (error) {
     if (error.code === 'EEXIST') {
-      throw new Error(`已有打包任务、安装任务或中断后遗留锁：${lock}；请确认没有打包进程后再移除此空目录。`)
+      throw new Error(
+        `已有打包任务、安装任务或中断后遗留锁：${lock}；请确认没有打包进程后再移除此空目录。`
+      )
     }
     throw error
   }
@@ -125,11 +155,11 @@ export function withPackageLock(projectRoot, action) {
   }
 }
 
-export function buildMac(script, args, {
-  projectRoot = PROJECT_ROOT,
-  run = spawnSync,
-  log = console.log
-} = {}) {
+export function buildMac(
+  script,
+  args,
+  { projectRoot = PROJECT_ROOT, run = spawnSync, log = console.log } = {}
+) {
   if (!BUILD_SCRIPTS.has(script)) throw new Error(`不支持的打包命令：${script}`)
   return withPackageLock(projectRoot, (project, repo) => {
     const dist = directory(repo, `${path.basename(project)}/dist`)

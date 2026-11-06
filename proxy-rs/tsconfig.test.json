@@ -9,6 +9,7 @@
     "test/integration/**/*.ts",
     "test/helpers/**/*.ts",
     "test/vitest.setup.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "src/preload/*.d.ts"
   ]
 }

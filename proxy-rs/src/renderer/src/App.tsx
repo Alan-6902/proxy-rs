@@ -287,7 +287,7 @@ function App(): React.JSX.Element {
     }
   }, [applyBackgroundCheckResults])
 
-  const renderPage = () => {
+  const renderPage = (): React.JSX.Element => {
     switch (currentPage) {
       case 'home':
         return <HomePage />

@@ -7,7 +7,12 @@ interface ToggleProps {
   size?: 'sm' | 'md'
 }
 
-export function Toggle({ checked, onChange, disabled = false, size = 'md' }: ToggleProps) {
+export function Toggle({
+  checked,
+  onChange,
+  disabled = false,
+  size = 'md'
+}: ToggleProps): React.JSX.Element {
   const sizes = {
     sm: { track: 'w-8 h-4', thumb: 'w-3 h-3', translate: 'translate-x-4' },
     md: { track: 'w-11 h-6', thumb: 'w-5 h-5', translate: 'translate-x-5' }

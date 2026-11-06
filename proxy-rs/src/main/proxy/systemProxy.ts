@@ -1,6 +1,7 @@
 // 系统代理检测（Windows 注册表 / macOS scutil）+ 安全 ProxyAgent 工厂
 // 含 SOCKS5/SOCKS4 代理支持（通过 socks 包 + undici Agent.connect 钩子）
 
+import { execSync } from 'node:child_process'
 import { ProxyAgent, Agent, type Dispatcher } from 'undici'
 import * as tls from 'tls'
 
@@ -146,7 +147,6 @@ export function getSystemProxy(): string | null {
   }
   try {
     if (process.platform === 'win32') {
-      const { execSync } = require('child_process')
       const result = execSync(
         'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable',
         { encoding: 'utf8', timeout: 3000, windowsHide: true }
@@ -165,7 +165,6 @@ export function getSystemProxy(): string | null {
         }
       }
     } else if (process.platform === 'darwin') {
-      const { execSync } = require('child_process')
       const result = execSync('scutil --proxy', { encoding: 'utf8', timeout: 3000 })
       // 优先 HTTPS 代理，回退到 HTTP 代理（仅 undici 支持的 http/https 协议）
       const httpsEnabled = /HTTPSEnable\s*:\s*1/.test(result)
@@ -278,6 +277,8 @@ function createSocksDispatcher(u: URL): Agent {
       // 动态导入 socks 库
       let SocksClient: typeof import('socks').SocksClient
       try {
+        // socks 不是直接依赖（随 socks-proxy-agent 间接安装），按可选依赖同步加载，缺失时走回调报错
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         SocksClient = require('socks').SocksClient
       } catch (err) {
         callback(err as Error, null)

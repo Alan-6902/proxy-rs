@@ -51,7 +51,7 @@ const getSubscriptionColor = (type: string, title?: string): string => {
   return 'bg-gray-500'
 }
 
-export function HomePage() {
+export function HomePage(): React.JSX.Element {
   const { accounts, activeAccountId, getStats, usagePrecision, setFilter, setActiveGroupTab } =
     useAccountsStore()
   const { t } = useTranslation()

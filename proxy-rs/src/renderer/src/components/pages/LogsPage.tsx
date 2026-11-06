@@ -200,7 +200,7 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
     if (atBottom) setNewLogCount(0)
   }, [])
 
-  const scrollToBottom = () => {
+  const scrollToBottom = (): void => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
       setIsAtBottom(true)
@@ -208,14 +208,14 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
     }
   }
 
-  const handleClear = async () => {
+  const handleClear = async (): Promise<void> => {
     await window.api.appLogsClear(category)
     setLogs([])
     setTotalCount(0)
     setNewLogCount(0)
   }
 
-  const handleExport = () => {
+  const handleExport = (): void => {
     const content = filteredLogs
       .map((log) => {
         const dataStr = log.data
@@ -292,7 +292,7 @@ export function LogsPage({ category, heading }: LogsPageProps = {}): React.JSX.E
     ERROR: logs.filter((l) => l.level === 'ERROR').length
   }
 
-  const formatTime = (ts: string) => {
+  const formatTime = (ts: string): string => {
     try {
       const d = new Date(ts)
       return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}.${d.getMilliseconds().toString().padStart(3, '0')}`
@@ -626,7 +626,7 @@ function VirtualLogList({
   onScroll: () => void
   isAtBottom: boolean
   formatTime: (ts: string) => string
-}) {
+}): React.JSX.Element {
   const isScroll = messageLayout === 'scroll'
   const virtualizer = useVirtualizer({
     count: logs.length,

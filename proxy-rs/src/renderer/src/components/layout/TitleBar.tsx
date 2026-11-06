@@ -23,7 +23,7 @@ export function TitleBar(): React.ReactNode {
   useEffect(() => {
     let cleanup: (() => void) | undefined
 
-    const init = async () => {
+    const init = async (): Promise<void> => {
       try {
         const p = await window.api.window.getPlatform()
         setPlatform(p)

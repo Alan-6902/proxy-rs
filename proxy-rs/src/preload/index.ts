@@ -54,7 +54,6 @@ const api = {
     return ipcRenderer.invoke('get-app-version')
   },
 
-
   // 账号管理 - 加载账号数据
   loadAccounts: (): Promise<unknown> => {
     return ipcRenderer.invoke('load-accounts')
@@ -166,7 +165,6 @@ const api = {
     )
   },
 
-
   // 监听后台刷新结果（单个账号）
   onBackgroundRefreshResult: (
     callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
@@ -223,7 +221,6 @@ const api = {
   }> => {
     return ipcRenderer.invoke('background-batch-check', accounts, concurrency)
   },
-
 
   // 监听后台检查结果（单个账号）
   onBackgroundCheckResult: (
@@ -372,7 +369,6 @@ const api = {
   }> => {
     return ipcRenderer.invoke('poll-iam-sso-auth', region || 'us-east-1')
   },
-
 
   // 取消 IAM SSO 登录
   cancelIamSsoLogin: (): Promise<{ success: boolean }> => {
@@ -629,7 +625,8 @@ const api = {
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window-is-maximized'),
     getPlatform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('window-get-platform'),
     onMaximizeChange: (callback: (isMaximized: boolean) => void): (() => void) => {
-      const handler = (_event: any, isMaximized: boolean): void => callback(isMaximized)
+      const handler = (_event: Electron.IpcRendererEvent, isMaximized: boolean): void =>
+        callback(isMaximized)
       ipcRenderer.on('window-maximize-changed', handler)
       return () => ipcRenderer.removeListener('window-maximize-changed', handler)
     }
@@ -696,7 +693,6 @@ const api = {
     ipcRenderer.send('update-tray-account-list', accounts)
   },
 
-
   // 更新托盘语言
   updateTrayLanguage: (language: 'en' | 'zh'): void => {
     ipcRenderer.send('update-tray-language', language)
@@ -742,7 +738,6 @@ const api = {
   ): void => {
     ipcRenderer.send('close-confirm-response', action, rememberChoice)
   },
-
 
   // ============ 一键诊断 ============
   diagnoseRun: (params: {

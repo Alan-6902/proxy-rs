@@ -75,7 +75,13 @@ function translate(
  * useTranslation hook
  * @returns { t, language, actualLanguage }
  */
-export function useTranslation() {
+export interface Translation {
+  t: (key: string, params?: Record<string, string | number>) => string
+  language: Language
+  actualLanguage: Exclude<Language, 'auto'>
+}
+
+export function useTranslation(): Translation {
   const language = useAccountsStore((state) => state.language)
 
   const actualLanguage = useMemo(() => getActualLanguage(language), [language])

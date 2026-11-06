@@ -82,9 +82,7 @@ export async function syncManagedAccountFromAdmin(
   }
 
   // 反代给的是毫秒时间戳，卡片按 ISO 字符串渲染（与上游口径一致）
-  const nextResetDate = parsed.nextResetAt
-    ? new Date(parsed.nextResetAt).toISOString()
-    : undefined
+  const nextResetDate = parsed.nextResetAt ? new Date(parsed.nextResetAt).toISOString() : undefined
 
   const title = parsed.subscriptionTitle?.trim()
   const subscription: ManagedAccountSubscription | undefined = title

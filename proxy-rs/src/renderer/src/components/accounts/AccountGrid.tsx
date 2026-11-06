@@ -33,7 +33,7 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
     const container = parentRef.current
     if (!container) return
 
-    const updateLayout = () => {
+    const updateLayout = (): void => {
       const usableWidth = container.clientWidth - PADDING_X
       // 列数：尽可能多，前提是每列不小于 MIN_CARD_WIDTH
       const cols = Math.max(1, Math.floor((usableWidth + GAP) / (MIN_CARD_WIDTH + GAP)))
@@ -64,11 +64,11 @@ export function AccountGrid({ onAddAccount, onEditAccount }: AccountGridProps): 
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
 
-  const handleShowDetail = (account: Account) => {
+  const handleShowDetail = (account: Account): void => {
     setDetailAccount(account)
   }
 
-  const handleRefreshDetail = async () => {
+  const handleRefreshDetail = async (): Promise<void> => {
     if (!detailAccount) return
     setIsRefreshing(true)
     try {

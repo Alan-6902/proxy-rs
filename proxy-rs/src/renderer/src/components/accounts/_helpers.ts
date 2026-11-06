@@ -186,4 +186,3 @@ export function isBannedError(error: string | undefined): boolean {
     /\b423\b/.test(lower)
   )
 }
-

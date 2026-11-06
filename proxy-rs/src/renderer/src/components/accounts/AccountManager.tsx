@@ -54,7 +54,7 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
   const isEn = t('common.unknown') === 'Unknown'
 
   // 获取要导出的账号列表
-  const getExportAccounts = () => {
+  const getExportAccounts = (): Account[] => {
     const accountList = Array.from(accounts.values())
     if (selectedIds.size > 0) {
       return accountList.filter((acc) => selectedIds.has(acc.id))

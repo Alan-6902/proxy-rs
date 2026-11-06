@@ -4,7 +4,12 @@ import {
   syncManagedAccountFromAdmin
 } from '../../src/main/adminManaged/accountSync'
 
-function target(fetchImpl: typeof fetch) {
+function target(fetchImpl: typeof fetch): {
+  baseUrl: string
+  adminApiKey: string
+  timeoutSeconds: number
+  fetchImpl: typeof fetch
+} {
   return {
     baseUrl: 'http://127.0.0.1:8990',
     adminApiKey: 'test-only',

@@ -13,3 +13,6 @@ out
 
 # mock 上游的自签证书，本机生成、不入库
 kiroapp-mock/.cert/
+
+# 本机密钥文件，不入库（之前只靠 .git/info/exclude 挡着，换台机器就没了）
+key.json

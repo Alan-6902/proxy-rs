@@ -168,19 +168,6 @@ function getFallbackRestApiBase(ssoRegion?: string): string {
     : KIRO_REST_API_ENDPOINTS['eu-central-1']
 }
 
-// API 类型配置
-type UsageApiType = 'rest' | 'cbor'
-let currentUsageApiType: UsageApiType = 'rest' // 默认使用 REST API (GetUsageLimits)
-
-export function setUsageApiType(type: UsageApiType): void {
-  currentUsageApiType = type
-  console.log(`[API] Usage API type set to: ${type}`)
-}
-
-export function getUsageApiType(): UsageApiType {
-  return currentUsageApiType
-}
-
 // 获取网络代理 agent（用户设置代理优先于系统代理）
 function getNetworkAgent(): Dispatcher | undefined {
   const envProxy =
@@ -1054,7 +1041,7 @@ async function getUsageAndLimits(
   proxyUrl?: string
 ): Promise<UnifiedUsageResponse> {
   if (
-    currentUsageApiType === 'rest' ||
+    getUsageApiType() === 'rest' ||
     (typeof accessToken !== 'string' && accessToken.credentialKind === 'kiro_api_key')
   ) {
     // 使用 REST API (GetUsageLimits)
@@ -1226,6 +1213,11 @@ let store: {
 let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
+import {
+  getUsageApiType,
+  registerUsageApiTypeIpcHandlers,
+  restoreUsageApiType
+} from './usageApiType'
 import { ANTIGRAVITY_ADMIN_PARTITION, ANTIGRAVITY_ADMIN_PATH } from '../shared/antigravity'
 import { QODER_ADMIN_PARTITION, QODER_ADMIN_PATH } from '../shared/qoder'
 import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
@@ -2516,11 +2508,7 @@ async function initStoreInternal(): Promise<void> {
     console.error('[Store] Account data migration failed:', error)
   }
 
-  // 恢复保存的 Usage API 类型
-  const savedUsageApiType = storeInstance.get('usageApiType') as 'rest' | 'cbor' | undefined
-  if (savedUsageApiType) {
-    setUsageApiType(savedUsageApiType)
-  }
+  restoreUsageApiType(storeInstance)
 }
 
 /**
@@ -3293,6 +3281,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-app-version', () => {
     return app.getVersion()
   })
+
+  // ============ Usage API 类型（设置页） ============
+  registerUsageApiTypeIpcHandlers(() => store)
 
   // ============ 一键诊断 ============
   /**

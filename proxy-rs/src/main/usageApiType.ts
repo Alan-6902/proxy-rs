@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import { IPC } from '../shared/ipcChannels'
 
 /**
  * 用量查询走哪种上游接口：REST（GetUsageLimits）或 CBOR。
@@ -8,10 +9,6 @@ export type UsageApiType = 'rest' | 'cbor'
 
 export const DEFAULT_USAGE_API_TYPE: UsageApiType = 'rest'
 export const USAGE_API_TYPE_STORE_KEY = 'usageApiType'
-export const USAGE_API_TYPE_IPC = {
-  get: 'get-usage-api-type',
-  set: 'set-usage-api-type'
-} as const
 
 interface UsageApiTypeStore {
   get: (key: string, defaultValue?: unknown) => unknown
@@ -40,9 +37,9 @@ export function restoreUsageApiType(store: UsageApiTypeStore): void {
 }
 
 export function registerUsageApiTypeIpcHandlers(getStore: () => UsageApiTypeStore | null): void {
-  ipcMain.handle(USAGE_API_TYPE_IPC.get, () => getUsageApiType())
+  ipcMain.handle(IPC.getUsageApiType, () => getUsageApiType())
 
-  ipcMain.handle(USAGE_API_TYPE_IPC.set, (_event, type: unknown) => {
+  ipcMain.handle(IPC.setUsageApiType, (_event, type: unknown) => {
     if (!isUsageApiType(type)) {
       throw new Error(`无效的 Usage API 类型：${String(type)}`)
     }

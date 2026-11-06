@@ -8,7 +8,7 @@ import type {
 } from '../shared/kskAutomation'
 import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../shared/localAdminPush'
 
-interface AccountData {
+export interface AccountData {
   accounts: Record<string, unknown>
   groups: Record<string, unknown>
   tags: Record<string, unknown>
@@ -31,7 +31,7 @@ interface AccountData {
   language?: 'auto' | 'en' | 'zh'
 }
 
-interface RefreshResult {
+export interface RefreshResult {
   success: boolean
   /** 托管账号只返回操作结果，不返回 OAuth 凭据。 */
   adminManaged?: boolean
@@ -48,7 +48,7 @@ interface RefreshResult {
 }
 
 /** 切换 Kiro CLI 账号的结果；成功时带切号前刷新得到的新凭据 */
-interface SwitchAccountCliResult {
+export interface SwitchAccountCliResult {
   success: boolean
   data?: {
     /** 写入的 kiro-cli 数据库路径 */
@@ -81,7 +81,7 @@ interface ResourceDetail {
   overageEnabled?: boolean
 }
 
-interface StatusResult {
+export interface StatusResult {
   success: boolean
   data?: {
     status: string
@@ -134,7 +134,7 @@ type UpstreamKiroCredentialInput =
       kiroApiKey?: string
     }
 
-interface KiroApi {
+export interface KiroApi {
   serena: SerenaApi
   openExternal: (url: string) => void
   openIncognitoBrowser: (url: string) => void

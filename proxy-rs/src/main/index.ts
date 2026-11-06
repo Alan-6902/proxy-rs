@@ -1213,6 +1213,7 @@ let store: {
 let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
+import { IPC, IPC_EVENT } from '../shared/ipcChannels'
 import type { ParsedSubscription, ParsedUsage } from '../shared/usageLimitsParse'
 import {
   getUsageApiType,
@@ -1886,7 +1887,7 @@ async function renewKiroCliSocialCredentials(token: KiroCliSocialToken): Promise
   }
   // 账号库里已有更新的凭据时不会真的发刷新请求，singleflight 也就不会同步 CLI，这里补一次
   if (result.reusedCanonical) await syncKiroCliAfterRefresh(token.refresh_token, result)
-  sendRendererEvent('background-refresh-result', {
+  sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
     id: candidate.accountId,
     success: true,
     data: {
@@ -2804,7 +2805,7 @@ const localNotifications = new LocalNotificationService(
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
-    mainWindow.webContents.send('local-notification-navigate', page)
+    mainWindow.webContents.send(IPC_EVENT.localNotificationNavigate, page)
   }
 )
 
@@ -2919,10 +2920,10 @@ function initTray(): void {
       app.quit()
     },
     onRefreshAccount: async () => {
-      mainWindow?.webContents.send('tray-refresh-account')
+      mainWindow?.webContents.send(IPC_EVENT.trayRefreshAccount)
     },
     onSwitchAccount: async () => {
-      mainWindow?.webContents.send('tray-switch-account')
+      mainWindow?.webContents.send(IPC_EVENT.traySwitchAccount)
     },
     getCurrentAccount: () => currentProxyAccount,
     getAccountList: () => allAccounts
@@ -2977,8 +2978,12 @@ function createWindow(): void {
   })
 
   // ============ 自定义 titlebar IPC ============
-  mainWindow.on('maximize', () => mainWindow?.webContents.send('window-maximize-changed', true))
-  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window-maximize-changed', false))
+  mainWindow.on('maximize', () =>
+    mainWindow?.webContents.send(IPC_EVENT.windowMaximizeChanged, true)
+  )
+  mainWindow.on('unmaximize', () =>
+    mainWindow?.webContents.send(IPC_EVENT.windowMaximizeChanged, false)
+  )
 
   mainWindow.on('ready-to-show', () => {
     // 设置带版本号的标题（HTML 加载后会覆盖初始标题）
@@ -3004,7 +3009,7 @@ function createWindow(): void {
         // 询问用户 - 先阻止关闭，再异步处理
         event.preventDefault()
         // 通知渲染进程显示自定义对话框
-        mainWindow.webContents.send('show-close-confirm-dialog')
+        mainWindow.webContents.send(IPC_EVENT.showCloseConfirmDialog)
         return
       }
       // closeAction === 'quit' 时继续关闭流程
@@ -3084,7 +3089,7 @@ function handleProtocolUrl(url: string): void {
       const state = urlObj.searchParams.get('state')
 
       if (code && state && mainWindow) {
-        mainWindow.webContents.send('auth-callback', { code, state })
+        mainWindow.webContents.send(IPC_EVENT.authCallback, { code, state })
         mainWindow.focus()
       }
     }
@@ -3137,20 +3142,20 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 打开外部链接
-  ipcMain.on('open-external', (_event, url: string) => {
+  ipcMain.on(IPC_EVENT.openExternal, (_event, url: string) => {
     if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
       shell.openExternal(url)
     }
   })
 
-  ipcMain.on('open-incognito-browser', (_event, url: string) => {
+  ipcMain.on(IPC_EVENT.openIncognitoBrowser, (_event, url: string) => {
     if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
       openBrowserInPrivateMode(url)
     }
   })
 
   // 登录流程走到终态（账号已入库 / 失败 / 取消）后，由渲染进程关闭无痕浏览器
-  ipcMain.on('close-incognito-browser', () => {
+  ipcMain.on(IPC_EVENT.closeIncognitoBrowser, () => {
     closePrivateBrowserWindow()
   })
 
@@ -3170,28 +3175,28 @@ app.whenReady().then(async () => {
   // ============ 托盘相关 IPC ============
 
   // IPC: 获取托盘设置
-  ipcMain.handle('get-tray-settings', () => {
+  ipcMain.handle(IPC.getTraySettings, () => {
     return traySettings
   })
 
   // ============ 自定义 titlebar IPC ============
-  ipcMain.on('window-minimize', () => mainWindow?.minimize())
-  ipcMain.on('window-maximize-toggle', () => {
+  ipcMain.on(IPC_EVENT.windowMinimize, () => mainWindow?.minimize())
+  ipcMain.on(IPC_EVENT.windowMaximizeToggle, () => {
     if (!mainWindow) return
     if (mainWindow.isMaximized()) mainWindow.unmaximize()
     else mainWindow.maximize()
   })
-  ipcMain.on('window-close', () => mainWindow?.close())
-  ipcMain.handle('window-is-maximized', () => !!mainWindow?.isMaximized())
-  ipcMain.handle('window-get-platform', () => process.platform)
+  ipcMain.on(IPC_EVENT.windowClose, () => mainWindow?.close())
+  ipcMain.handle(IPC.windowIsMaximized, () => !!mainWindow?.isMaximized())
+  ipcMain.handle(IPC.windowGetPlatform, () => process.platform)
 
   // IPC: 获取显示主窗口快捷键
-  ipcMain.handle('get-show-window-shortcut', () => {
+  ipcMain.handle(IPC.getShowWindowShortcut, () => {
     return showWindowShortcut
   })
 
   // IPC: 设置显示主窗口快捷键
-  ipcMain.handle('set-show-window-shortcut', async (_event, shortcut: string) => {
+  ipcMain.handle(IPC.setShowWindowShortcut, async (_event, shortcut: string) => {
     try {
       showWindowShortcut = shortcut
       await saveShortcutSettings()
@@ -3203,7 +3208,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 保存托盘设置
-  ipcMain.handle('save-tray-settings', async (_event, settings: Partial<TraySettings>) => {
+  ipcMain.handle(IPC.saveTraySettings, async (_event, settings: Partial<TraySettings>) => {
     try {
       traySettings = { ...traySettings, ...settings }
       await saveTraySettings()
@@ -3225,7 +3230,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 更新托盘账户信息（从渲染进程调用）
-  ipcMain.on('update-tray-account', (_event, account: typeof currentProxyAccount) => {
+  ipcMain.on(IPC_EVENT.updateTrayAccount, (_event, account: typeof currentProxyAccount) => {
     currentProxyAccount = account
     updateCurrentAccount(account)
 
@@ -3238,20 +3243,20 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 更新托盘账户列表（从渲染进程调用）
-  ipcMain.on('update-tray-account-list', (_event, accounts: typeof allAccounts) => {
+  ipcMain.on(IPC_EVENT.updateTrayAccountList, (_event, accounts: typeof allAccounts) => {
     allAccounts = accounts
     updateAccountList(accounts)
   })
 
   // IPC: 更新托盘语言
-  ipcMain.on('update-tray-language', (_event, language: 'en' | 'zh') => {
+  ipcMain.on(IPC_EVENT.updateTrayLanguage, (_event, language: 'en' | 'zh') => {
     resolvedNotificationLanguage = language
     updateTrayLanguage(language)
   })
 
   // IPC: 关闭确认对话框响应
   ipcMain.on(
-    'close-confirm-response',
+    IPC_EVENT.closeConfirmResponse,
     (_event, action: 'minimize' | 'quit' | 'cancel', rememberChoice: boolean) => {
       if (action === 'minimize') {
         mainWindow?.hide()
@@ -3279,7 +3284,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 获取应用版本
-  ipcMain.handle('get-app-version', () => {
+  ipcMain.handle(IPC.getAppVersion, () => {
     return app.getVersion()
   })
 
@@ -3292,7 +3297,7 @@ app.whenReady().then(async () => {
    * 支持指定代理 URL；返回每个目标的延迟与错误
    */
   ipcMain.handle(
-    'diagnose:run',
+    IPC.diagnoseRun,
     async (
       _event,
       params: {
@@ -3359,7 +3364,7 @@ app.whenReady().then(async () => {
   // IPC: 账号测活 —— 给指定账号的指定模型发一条真实消息（callKiroApi）
   // 给指定模型发一条测试消息，验证账号是否能正常返回，用于一键诊断"账号测活"功能
   ipcMain.handle(
-    'diagnose:account-liveness',
+    IPC.diagnoseAccountLiveness,
     async (
       _event,
       params: {
@@ -3552,7 +3557,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 加载账号数据
-  ipcMain.handle('load-accounts', async () => {
+  ipcMain.handle(IPC.loadAccounts, async () => {
     try {
       await initStore()
       const data = store!.get('accountData', EMPTY_ACCOUNT_DATA)
@@ -3575,7 +3580,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 取带凭据的账号（导出 / 复制凭据这类显式操作；账号库模式下列表已脱敏）
-  ipcMain.handle('account-db:accounts-with-secrets', async (_event, ids: unknown) => {
+  ipcMain.handle(IPC.accountDbAccountsWithSecrets, async (_event, ids: unknown) => {
     await initStore()
     if (!isAccountDbMode()) return null
     const list = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
@@ -3583,7 +3588,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 删除账号（账号库模式经 kiro-rs 删除；旧模式由 save-accounts 快照完成，这里无操作）
-  ipcMain.handle('account-db:delete', async (_event, ids: unknown) => {
+  ipcMain.handle(IPC.accountDbDelete, async (_event, ids: unknown) => {
     const list = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
     const bridge = accountDbBridge()
     if (!bridge) return { success: true, failed: [] }
@@ -3594,7 +3599,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 加入 / 移出反代号池（账号库模式；号池成员才接反代请求）
-  ipcMain.handle('account-db:set-in-pool', async (_event, accountId: string, inPool: boolean) => {
+  ipcMain.handle(IPC.accountDbSetInPool, async (_event, accountId: string, inPool: boolean) => {
     await initStore()
     const row = accountDbRow(accountId)
     if (!row) return { success: false, error: '账号尚未进入账号库，请稍后重试' }
@@ -3609,25 +3614,25 @@ app.whenReady().then(async () => {
   })
 
   // IPC: App 运行日志（系统日志页、kiro-rs 日志页）。category 为空时取全部
-  ipcMain.handle('app-logs-get', (_event, count?: number, category?: string) => {
+  ipcMain.handle(IPC.appLogsGet, (_event, count?: number, category?: string) => {
     const limit = typeof count === 'number' && count > 0 ? count : undefined
     if (category) return proxyLogStore.getLastOfCategory(category, limit)
     return limit ? proxyLogStore.getLast(limit) : proxyLogStore.getAll()
   })
-  ipcMain.handle('app-logs-count', (_event, category?: string) =>
+  ipcMain.handle(IPC.appLogsCount, (_event, category?: string) =>
     category ? proxyLogStore.countOfCategory(category) : proxyLogStore.count()
   )
-  ipcMain.handle('app-logs-clear', (_event, category?: string) => {
+  ipcMain.handle(IPC.appLogsClear, (_event, category?: string) => {
     if (category) proxyLogStore.clearCategory(category)
     else proxyLogStore.clear()
     return { success: true }
   })
 
   // IPC: Kiro CLI 当前登录的账号（账号库模式；该账号由 kiro-cli 自己刷新）
-  ipcMain.handle('kiro-cli-current-account', () => ({ accountId: currentKiroCliAccountId() }))
+  ipcMain.handle(IPC.kiroCliCurrentAccount, () => ({ accountId: currentKiroCliAccountId() }))
 
   // IPC: 内嵌 Admin 页面的地址（Key 由主进程在页面里注入，不下发给渲染进程）
-  ipcMain.handle('kiro-admin-view', (_event, provider?: unknown) => {
+  ipcMain.handle(IPC.kiroAdminView, (_event, provider?: unknown) => {
     const status = accountDbStatus()
     const pick =
       provider === 'antigravity'
@@ -3660,13 +3665,13 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 账号库状态（是否启用、kiro-rs 子进程状态、待导入数量）
-  ipcMain.handle('account-db:status', () => ({
+  ipcMain.handle(IPC.accountDbStatus, () => ({
     ...accountDbStatus(),
     error: accountDbStartupError ?? undefined
   }))
 
   // IPC: 保存账号数据
-  ipcMain.handle('save-accounts', async (_event, data) => {
+  ipcMain.handle(IPC.saveAccounts, async (_event, data) => {
     await accountStoreCoordinator.runExclusive(async () => {
       try {
         await initStore()
@@ -3689,7 +3694,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 刷新账号 Token（支持 IdC 和社交登录）
-  ipcMain.handle('refresh-account-token', async (_event, account) =>
+  ipcMain.handle(IPC.refreshAccountToken, async (_event, account) =>
     runCredentialRefreshOperation(
       { success: false as const, error: { message: CREDENTIAL_REFRESH_UNAVAILABLE } },
       async () => {
@@ -3803,7 +3808,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 把账号切换为 Kiro CLI 当前账号（只传 accountId，凭据由主进程从账号库读取）
-  ipcMain.handle('switch-account-cli', async (_event, accountId: string) => {
+  ipcMain.handle(IPC.switchAccountCli, async (_event, accountId: string) => {
     try {
       if (typeof accountId !== 'string' || !accountId) throw new Error('缺少账号 ID')
       return { success: true, data: await switchAccountToKiroCli(accountId) }
@@ -3818,7 +3823,7 @@ app.whenReady().then(async () => {
 
   // IPC: 从 SSO Token 导入账号 (x-amz-sso_authn)
   ipcMain.handle(
-    'import-from-sso-token',
+    IPC.importFromSsoToken,
     async (_event, bearerToken: string, region: string = 'us-east-1') => {
       console.log('[IPC] import-from-sso-token called')
 
@@ -4018,7 +4023,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 检查账号状态（支持自动刷新 Token）
-  ipcMain.handle('check-account-status', async (_event, account) => {
+  ipcMain.handle(IPC.checkAccountStatus, async (_event, account) => {
     console.log(`[IPC] check-account-status [${account?.email || 'unknown'}]`)
 
     /** 检查成功时返回给渲染层的结构；usage / subscription 与 shared/usageLimitsParse 保持同形 */
@@ -4528,7 +4533,7 @@ app.whenReady().then(async () => {
         synced.usage = projected.usage as typeof synced.usage
         synced.subscription = projected.subscription as typeof synced.subscription
       }
-      sendRendererEvent('background-refresh-result', {
+      sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
         id: accountId,
         success: synced.status === 'active',
         error: synced.errorMessage,
@@ -4541,7 +4546,7 @@ app.whenReady().then(async () => {
       })
       return synced.status === 'active'
     } catch (error) {
-      sendRendererEvent('background-refresh-result', {
+      sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
         id: accountId,
         success: false,
         error: error instanceof Error ? error.message : String(error)
@@ -4741,7 +4746,7 @@ app.whenReady().then(async () => {
                   })
                 }
                 // 通知渲染进程刷新失败
-                sendRendererEvent('background-refresh-result', {
+                sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
                   id: account.id,
                   success: false,
                   error: refreshResult.error
@@ -5040,7 +5045,7 @@ app.whenReady().then(async () => {
             completed++
 
             // 通知渲染进程更新账号
-            sendRendererEvent('background-refresh-result', {
+            sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
               id: account.id,
               success: true,
               data: {
@@ -5069,7 +5074,7 @@ app.whenReady().then(async () => {
                 accountId: account.id
               })
             }
-            sendRendererEvent('background-refresh-result', {
+            sendRendererEvent(IPC_EVENT.backgroundRefreshResult, {
               id: account.id,
               success: false,
               error: isApiKey
@@ -5096,7 +5101,7 @@ app.whenReady().then(async () => {
   // 暴露给主进程调度器复用（startMainPoolTokenRefresh）
   backgroundBatchRefreshImpl = backgroundBatchRefresh
   ipcMain.handle(
-    'background-batch-refresh',
+    IPC.backgroundBatchRefresh,
     (
       _event,
       accounts: BackgroundRefreshAccount[],
@@ -5116,7 +5121,7 @@ app.whenReady().then(async () => {
     return candidates[0]?.accountId
   })
   // 托管集合一变就推给渲染进程，用于把 CLI 切号之类的入口置灰
-  setAdminManagedChangeListener((ids) => sendRendererEvent('admin-managed-changed', ids))
+  setAdminManagedChangeListener((ids) => sendRendererEvent(IPC_EVENT.adminManagedChanged, ids))
   await startManagedAccountRefresh({
     reload: reloadAdminManagedIds,
     adopt: runAdminManagedAdoptionOnce,
@@ -5128,11 +5133,11 @@ app.whenReady().then(async () => {
   })
 
   // 渲染进程启动时拉一次托管集合（事件只推增量，首帧需要主动取）
-  ipcMain.handle('get-admin-managed-ids', () => [...adminManagedIdsSnapshot()])
+  ipcMain.handle(IPC.getAdminManagedIds, () => [...adminManagedIdsSnapshot()])
 
   // IPC: 后台批量检查账号状态（不刷新 Token，只检查状态）
   ipcMain.handle(
-    'background-batch-check',
+    IPC.backgroundBatchCheck,
     async (
       _event,
       accounts: Array<{
@@ -5179,7 +5184,7 @@ app.whenReady().then(async () => {
                   true
                 )
                 const ok = synced.status === 'active'
-                sendRendererEvent('background-check-result', {
+                sendRendererEvent(IPC_EVENT.backgroundCheckResult, {
                   id: account.id,
                   success: ok,
                   data: synced,
@@ -5499,7 +5504,7 @@ app.whenReady().then(async () => {
               completed++
 
               // 通知渲染进程更新账号
-              sendRendererEvent('background-check-result', {
+              sendRendererEvent(IPC_EVENT.backgroundCheckResult, {
                 id: account.id,
                 success: true,
                 data: {
@@ -5513,7 +5518,7 @@ app.whenReady().then(async () => {
             } catch (e) {
               failed++
               completed++
-              sendRendererEvent('background-check-result', {
+              sendRendererEvent(IPC_EVENT.backgroundCheckResult, {
                 id: account.id,
                 success: false,
                 error: e instanceof Error ? e.message : 'Unknown error'
@@ -5534,7 +5539,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 导出到文件
-  ipcMain.handle('export-to-file', async (_event, data: string, filename: string) => {
+  ipcMain.handle(IPC.exportToFile, async (_event, data: string, filename: string) => {
     try {
       const result = await dialog.showSaveDialog(mainWindow!, {
         title: '导出账号数据',
@@ -5554,7 +5559,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 从文件导入
-  ipcMain.handle('import-from-file', async () => {
+  ipcMain.handle(IPC.importFromFile, async () => {
     try {
       const result = await dialog.showOpenDialog(mainWindow!, {
         title: '导入账号数据',
@@ -5582,7 +5587,7 @@ app.whenReady().then(async () => {
 
   // IPC: 验证凭证并获取账号信息（用于添加账号）
   ipcMain.handle(
-    'verify-account-credentials',
+    IPC.verifyAccountCredentials,
     async (
       _event,
       credentials: {
@@ -6004,7 +6009,7 @@ app.whenReady().then(async () => {
   } | null = null
 
   // IPC: 启动 Builder ID 手动登录
-  ipcMain.handle('start-builder-id-login', async (_event, region: string = 'us-east-1') => {
+  ipcMain.handle(IPC.startBuilderIdLogin, async (_event, region: string = 'us-east-1') => {
     console.log('[Login] Starting Builder ID login...')
 
     const oidcBase = `https://oidc.${region}.amazonaws.com`
@@ -6092,7 +6097,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 轮询 Builder ID 授权状态
-  ipcMain.handle('poll-builder-id-auth', async (_event, region: string = 'us-east-1') => {
+  ipcMain.handle(IPC.pollBuilderIdAuth, async (_event, region: string = 'us-east-1') => {
     console.log('[Login] Polling for authorization...')
 
     if (!currentLoginState || currentLoginState.type !== 'builderid') {
@@ -6167,7 +6172,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 取消 Builder ID 登录
-  ipcMain.handle('cancel-builder-id-login', async () => {
+  ipcMain.handle(IPC.cancelBuilderIdLogin, async () => {
     console.log('[Login] Cancelling Builder ID login...')
     currentLoginState = null
     return { success: true }
@@ -6189,7 +6194,7 @@ app.whenReady().then(async () => {
 
   // IPC: 启动 IAM Identity Center SSO 登录 (使用 Authorization Code Grant with PKCE)
   ipcMain.handle(
-    'start-iam-sso-login',
+    IPC.startIamSsoLogin,
     async (_event, startUrl: string, region: string = 'us-east-1') => {
       console.log('[Login] Starting IAM Identity Center SSO login (Authorization Code flow)...')
       console.log('[Login] Start URL:', startUrl)
@@ -6407,7 +6412,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 轮询 IAM SSO 授权状态 (检查本地服务器是否收到回调)
-  ipcMain.handle('poll-iam-sso-auth', async () => {
+  ipcMain.handle(IPC.pollIamSsoAuth, async () => {
     if (!currentLoginState || currentLoginState.type !== 'iamsso') {
       return { success: false, error: '没有进行中的 IAM SSO 登录' }
     }
@@ -6442,7 +6447,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 取消 IAM SSO 登录
-  ipcMain.handle('cancel-iam-sso-login', async () => {
+  ipcMain.handle(IPC.cancelIamSsoLogin, async () => {
     console.log('[Login] Cancelling IAM SSO login...')
     if (iamSsoServer) {
       iamSsoServer.close()
@@ -6454,7 +6459,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 启动 Social Auth 登录 (Google/GitHub)
-  ipcMain.handle('start-social-login', async (_event, provider: 'Google' | 'Github') => {
+  ipcMain.handle(IPC.startSocialLogin, async (_event, provider: 'Google' | 'Github') => {
     console.log(`[Login] Starting ${provider} Social Auth login in built-in incognito browser...`)
 
     const crypto = await import('crypto')
@@ -6495,7 +6500,7 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 交换 Social Auth token
-  ipcMain.handle('exchange-social-token', async (_event, code: string, state: string) => {
+  ipcMain.handle(IPC.exchangeSocialToken, async (_event, code: string, state: string) => {
     console.log('[Login] Exchanging Social Auth token...')
 
     if (!currentLoginState || currentLoginState.type !== 'social') {
@@ -6551,14 +6556,14 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 取消 Social Auth 登录
-  ipcMain.handle('cancel-social-login', async () => {
+  ipcMain.handle(IPC.cancelSocialLogin, async () => {
     console.log('[Login] Cancelling Social Auth login...')
     currentLoginState = null
     return { success: true }
   })
 
   // IPC: 设置代理
-  ipcMain.handle('set-proxy', async (_event, enabled: boolean, url: string) => {
+  ipcMain.handle(IPC.setProxy, async (_event, enabled: boolean, url: string) => {
     const normalizedUrl = enabled && url ? normalizeProxyUrl(url) : url
     const electronProxy = getElectronProxySettings(normalizedUrl)
     console.log(
@@ -6587,7 +6592,7 @@ app.whenReady().then(async () => {
   // ============ 诊断模型查询 IPC ============
 
   // IPC: 获取当前账号可用模型（诊断功能使用）
-  ipcMain.handle('get-kiro-available-models', async () => {
+  ipcMain.handle(IPC.getKiroAvailableModels, async () => {
     try {
       if (!store) return { models: [] }
       /** 诊断只读取存储账号里与上游调用相关的字段 */
@@ -6668,7 +6673,7 @@ app.whenReady().then(async () => {
 
   // IPC: 获取账户可用模型列表
   ipcMain.handle(
-    'account-get-models',
+    IPC.accountGetModels,
     async (
       _event,
       credentialInput: UpstreamKiroCredential,
@@ -6727,7 +6732,7 @@ app.whenReady().then(async () => {
 
   // IPC: 获取可用订阅列表
   ipcMain.handle(
-    'account-get-subscriptions',
+    IPC.accountGetSubscriptions,
     async (
       _event,
       credentialInput: UpstreamKiroCredential,
@@ -6776,7 +6781,7 @@ app.whenReady().then(async () => {
 
   // IPC: 获取订阅管理/支付链接
   ipcMain.handle(
-    'account-get-subscription-url',
+    IPC.accountGetSubscriptionUrl,
     async (
       _event,
       credentialInput: UpstreamKiroCredential,
@@ -6825,7 +6830,7 @@ app.whenReady().then(async () => {
   )
 
   // IPC: 在系统默认浏览器无痕模式中打开订阅链接
-  ipcMain.handle('open-subscription-window', async (_event, url: string) => {
+  ipcMain.handle(IPC.openSubscriptionWindow, async (_event, url: string) => {
     try {
       openBrowserInPrivateMode(url)
       return { success: true }
@@ -6855,7 +6860,7 @@ app.whenReady().then(async () => {
         if (error) {
           console.log('[Login] Auth callback error:', error)
           if (mainWindow) {
-            mainWindow.webContents.send('social-auth-callback', { error })
+            mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { error })
             mainWindow.focus()
           }
           return
@@ -6863,7 +6868,7 @@ app.whenReady().then(async () => {
 
         if (code && state && mainWindow) {
           console.log('[Login] Auth callback received, code:', code.substring(0, 20) + '...')
-          mainWindow.webContents.send('social-auth-callback', { code, state })
+          mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { code, state })
           mainWindow.focus()
         }
         return
@@ -7043,7 +7048,7 @@ function notifyKiroCliAccountIfChanged(): void {
   const accountId = currentKiroCliAccountId()
   if (accountId === lastNotifiedKiroCliAccountId) return
   lastNotifiedKiroCliAccountId = accountId
-  sendRendererEvent('kiro-cli-account-changed', { accountId })
+  sendRendererEvent(IPC_EVENT.kiroCliAccountChanged, { accountId })
 }
 
 async function syncKiroCliAfterAccountDbChange(): Promise<void> {
@@ -7066,7 +7071,7 @@ async function syncKiroCliAfterAccountDbChange(): Promise<void> {
       console.warn(
         `[KiroCLI] 账号 ${outcome.accountId} 需要重新登录：账号库中的 Refresh Token 已失效（CLI 可能自行刷新过一次）`
       )
-      sendRendererEvent('kiro-cli-needs-reauth', { accountId: outcome.accountId })
+      sendRendererEvent(IPC_EVENT.kiroCliNeedsReauth, { accountId: outcome.accountId })
     }
   } catch (error) {
     console.warn('[KiroCLI] 同步失败：', error instanceof Error ? error.message : error)
@@ -7103,7 +7108,7 @@ function resolveQoderAdminView(): { adminUiUrl: string; adminApiKey: string } | 
 /** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
 async function startAccountDbServices(): Promise<void> {
   startAccountDbWatcher(() => {
-    sendRendererEvent('account-db-changed', null)
+    sendRendererEvent(IPC_EVENT.accountDbChanged, null)
     void reconcileKiroCliWithAccountDb()
   })
   startAccountDbBackups()
@@ -7122,7 +7127,7 @@ async function startAccountDbServices(): Promise<void> {
     onLog: (line, stream) => logKiroRsLine(line, stream, 'antigravity-rs'),
     onStateChange: (state, detail) => {
       console.log(`[antigravity-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
-      sendRendererEvent('account-db-status', accountDbStatus())
+      sendRendererEvent(IPC_EVENT.accountDbStatus, accountDbStatus())
     }
   }).catch((error) => {
     console.error('[antigravity-rs] 启动失败：', error instanceof Error ? error.message : error)
@@ -7136,7 +7141,7 @@ async function startAccountDbServices(): Promise<void> {
     onLog: (line, stream) => logKiroRsLine(line, stream, 'qoder-rs'),
     onStateChange: (state, detail) => {
       console.log(`[qoder-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
-      sendRendererEvent('account-db-status', accountDbStatus())
+      sendRendererEvent(IPC_EVENT.accountDbStatus, accountDbStatus())
     }
   }).catch((error) => {
     console.error('[qoder-rs] 启动失败：', error instanceof Error ? error.message : error)
@@ -7147,7 +7152,7 @@ async function startAccountDbServices(): Promise<void> {
       onLog: (line, stream) => logKiroRsLine(line, stream),
       onStateChange: (state, detail) => {
         console.log(`[kiro-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
-        sendRendererEvent('account-db-status', { ...accountDbStatus(), error: detail })
+        sendRendererEvent(IPC_EVENT.accountDbStatus, { ...accountDbStatus(), error: detail })
         // 就绪后立刻对账：App 没开期间 CLI 可能自己刷新过，要赶在 kiro-rs 首轮巡检
         // （启动后 30 秒）拿作废的旧 token 去刷新之前把 CLI 的新凭据收编进来
         if (state === 'running') void reconcileKiroCliWithAccountDb()

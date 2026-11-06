@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { SERENA_CHANNEL, type SerenaApi } from '../shared/serena'
 import { electronAPI } from '@electron-toolkit/preload'
+import { IPC, IPC_EVENT } from '../shared/ipcChannels'
+import { KSK_AUTOMATION_CHANNEL } from '../shared/kskAutomation'
+import type {
+  AccountData,
+  KiroApi,
+  RefreshResult,
+  StatusResult,
+  SwitchAccountCliResult
+} from './index.d'
 import type { IpcResult } from '../shared/ipcResult'
 import type {
   KskAutomationStatusEvent,
@@ -28,7 +37,7 @@ interface AccountDbStatusView {
   error?: string
 }
 
-const api = {
+const api: KiroApi = {
   serena: {
     snapshot: () => ipcRenderer.invoke(SERENA_CHANNEL.snapshot),
     previewLanguages: (id, languages) =>
@@ -40,35 +49,35 @@ const api = {
   } satisfies SerenaApi,
   // 打开外部链接
   openExternal: (url: string): void => {
-    ipcRenderer.send('open-external', url)
+    ipcRenderer.send(IPC_EVENT.openExternal, url)
   },
   openIncognitoBrowser: (url: string): void => {
-    ipcRenderer.send('open-incognito-browser', url)
+    ipcRenderer.send(IPC_EVENT.openIncognitoBrowser, url)
   },
   closeIncognitoBrowser: (): void => {
-    ipcRenderer.send('close-incognito-browser')
+    ipcRenderer.send(IPC_EVENT.closeIncognitoBrowser)
   },
 
   // 获取应用版本
   getAppVersion: (): Promise<string> => {
-    return ipcRenderer.invoke('get-app-version')
+    return ipcRenderer.invoke(IPC.getAppVersion)
   },
 
   // 账号管理 - 加载账号数据
-  loadAccounts: (): Promise<unknown> => {
-    return ipcRenderer.invoke('load-accounts')
+  loadAccounts: (): Promise<AccountData | null> => {
+    return ipcRenderer.invoke(IPC.loadAccounts)
   },
 
   // 账号管理 - 保存账号数据
   saveAccounts: (data: unknown): Promise<void> => {
-    return ipcRenderer.invoke('save-accounts', data)
+    return ipcRenderer.invoke(IPC.saveAccounts, data)
   },
 
   // 账号库模式：删除账号（经 kiro-rs）。旧模式下为空操作，删除仍由 saveAccounts 快照完成
   accountDbDelete: (
     ids: string[]
   ): Promise<{ success: boolean; failed: Array<{ id: string; reason: string }> }> => {
-    return ipcRenderer.invoke('account-db:delete', ids)
+    return ipcRenderer.invoke(IPC.accountDbDelete, ids)
   },
 
   // 账号库模式：加入 / 移出反代号池
@@ -76,16 +85,16 @@ const api = {
     accountId: string,
     inPool: boolean
   ): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('account-db:set-in-pool', accountId, inPool)
+    return ipcRenderer.invoke(IPC.accountDbSetInPool, accountId, inPool)
   },
 
   // 账号库模式：取带凭据的账号（导出 / 复制凭据；普通列表已脱敏）。非账号库模式返回 null
   accountDbAccountsWithSecrets: (ids: string[]): Promise<Record<string, unknown> | null> => {
-    return ipcRenderer.invoke('account-db:accounts-with-secrets', ids)
+    return ipcRenderer.invoke(IPC.accountDbAccountsWithSecrets, ids)
   },
 
   // 账号库模式：状态（是否启用、kiro-rs 子进程状态、待导入数量）
-  accountDbStatus: (): Promise<AccountDbStatusView> => ipcRenderer.invoke('account-db:status'),
+  accountDbStatus: (): Promise<AccountDbStatusView> => ipcRenderer.invoke(IPC.accountDbStatus),
 
   /*
    * 账号库模式：CLI 当前账号的 Refresh Token 已失效（多半是 kiro-cli 自己刷新过一次，
@@ -95,34 +104,34 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, payload: { accountId: string }): void => {
       callback(payload)
     }
-    ipcRenderer.on('kiro-cli-needs-reauth', handler)
+    ipcRenderer.on(IPC_EVENT.kiroCliNeedsReauth, handler)
     return () => {
-      ipcRenderer.removeListener('kiro-cli-needs-reauth', handler)
+      ipcRenderer.removeListener(IPC_EVENT.kiroCliNeedsReauth, handler)
     }
   },
 
   // 账号库模式：kiro-rs 更新了凭据 / 额度 / 状态（事件不带数据，收到后重新加载账号）
   onAccountDbChanged: (callback: () => void): (() => void) => {
     const handler = (): void => callback()
-    ipcRenderer.on('account-db-changed', handler)
+    ipcRenderer.on(IPC_EVENT.accountDbChanged, handler)
     return () => {
-      ipcRenderer.removeListener('account-db-changed', handler)
+      ipcRenderer.removeListener(IPC_EVENT.accountDbChanged, handler)
     }
   },
 
   // 账号管理 - 刷新 Token
-  refreshAccountToken: (account: unknown): Promise<unknown> => {
-    return ipcRenderer.invoke('refresh-account-token', account)
+  refreshAccountToken: (account: unknown): Promise<RefreshResult> => {
+    return ipcRenderer.invoke(IPC.refreshAccountToken, account)
   },
 
   // 账号管理 - 切换为 Kiro CLI 当前账号
-  switchAccountCli: (accountId: string): Promise<unknown> => {
-    return ipcRenderer.invoke('switch-account-cli', accountId)
+  switchAccountCli: (accountId: string): Promise<SwitchAccountCliResult> => {
+    return ipcRenderer.invoke(IPC.switchAccountCli, accountId)
   },
 
   // 账号管理 - 检查账号状态
-  checkAccountStatus: (account: unknown): Promise<unknown> => {
-    return ipcRenderer.invoke('check-account-status', account)
+  checkAccountStatus: (account: unknown): Promise<StatusResult> => {
+    return ipcRenderer.invoke(IPC.checkAccountStatus, account)
   },
 
   // 后台批量刷新账号（在主进程执行，不阻塞 UI）
@@ -157,7 +166,7 @@ const api = {
     failedCount: number
   }> => {
     return ipcRenderer.invoke(
-      'background-batch-refresh',
+      IPC.backgroundBatchRefresh,
       accounts,
       concurrency,
       syncInfo,
@@ -175,22 +184,22 @@ const api = {
     ): void => {
       callback(data)
     }
-    ipcRenderer.on('background-refresh-result', handler)
+    ipcRenderer.on(IPC_EVENT.backgroundRefreshResult, handler)
     return () => {
-      ipcRenderer.removeListener('background-refresh-result', handler)
+      ipcRenderer.removeListener(IPC_EVENT.backgroundRefreshResult, handler)
     }
   },
 
   // 已交给本机反代托管的账号 id 集合（渲染层据此把 CLI 切号等入口置灰）
-  getAdminManagedIds: (): Promise<string[]> => ipcRenderer.invoke('get-admin-managed-ids'),
+  getAdminManagedIds: (): Promise<string[]> => ipcRenderer.invoke(IPC.getAdminManagedIds),
 
   onAdminManagedChanged: (callback: (ids: string[]) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, ids: string[]): void => {
       callback(ids)
     }
-    ipcRenderer.on('admin-managed-changed', handler)
+    ipcRenderer.on(IPC_EVENT.adminManagedChanged, handler)
     return () => {
-      ipcRenderer.removeListener('admin-managed-changed', handler)
+      ipcRenderer.removeListener(IPC_EVENT.adminManagedChanged, handler)
     }
   },
 
@@ -219,7 +228,7 @@ const api = {
     successCount: number
     failedCount: number
   }> => {
-    return ipcRenderer.invoke('background-batch-check', accounts, concurrency)
+    return ipcRenderer.invoke(IPC.backgroundBatchCheck, accounts, concurrency)
   },
 
   // 监听后台检查结果（单个账号）
@@ -232,20 +241,20 @@ const api = {
     ): void => {
       callback(data)
     }
-    ipcRenderer.on('background-check-result', handler)
+    ipcRenderer.on(IPC_EVENT.backgroundCheckResult, handler)
     return () => {
-      ipcRenderer.removeListener('background-check-result', handler)
+      ipcRenderer.removeListener(IPC_EVENT.backgroundCheckResult, handler)
     }
   },
 
   // 文件操作 - 导出到文件
   exportToFile: (data: string, filename: string): Promise<boolean> => {
-    return ipcRenderer.invoke('export-to-file', data, filename)
+    return ipcRenderer.invoke(IPC.exportToFile, data, filename)
   },
 
   // 文件操作 - 从文件导入
-  importFromFile: (): Promise<string | null> => {
-    return ipcRenderer.invoke('import-from-file')
+  importFromFile: (): Promise<{ content: string; format: string } | null> => {
+    return ipcRenderer.invoke(IPC.importFromFile)
   },
 
   // 验证凭证并获取账号信息
@@ -274,7 +283,7 @@ const api = {
     }
     error?: string
   }> => {
-    return ipcRenderer.invoke('verify-account-credentials', credentials)
+    return ipcRenderer.invoke(IPC.verifyAccountCredentials, credentials)
   },
 
   // 从 AWS SSO Token (x-amz-sso_authn) 导入账号
@@ -297,7 +306,7 @@ const api = {
     }
     error?: { message: string }
   }> => {
-    return ipcRenderer.invoke('import-from-sso-token', bearerToken, region || 'us-east-1')
+    return ipcRenderer.invoke(IPC.importFromSsoToken, bearerToken, region || 'us-east-1')
   },
 
   // ============ 手动登录 API ============
@@ -313,7 +322,7 @@ const api = {
     interval?: number
     error?: string
   }> => {
-    return ipcRenderer.invoke('start-builder-id-login', region || 'us-east-1')
+    return ipcRenderer.invoke(IPC.startBuilderIdLogin, region || 'us-east-1')
   },
 
   // 轮询 Builder ID 授权状态
@@ -331,12 +340,12 @@ const api = {
     expiresIn?: number
     error?: string
   }> => {
-    return ipcRenderer.invoke('poll-builder-id-auth', region || 'us-east-1')
+    return ipcRenderer.invoke(IPC.pollBuilderIdAuth, region || 'us-east-1')
   },
 
   // 取消 Builder ID 登录
   cancelBuilderIdLogin: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('cancel-builder-id-login')
+    return ipcRenderer.invoke(IPC.cancelBuilderIdLogin)
   },
 
   // 启动 IAM Identity Center SSO 登录 (Authorization Code flow)
@@ -349,7 +358,7 @@ const api = {
     expiresIn?: number
     error?: string
   }> => {
-    return ipcRenderer.invoke('start-iam-sso-login', startUrl, region || 'us-east-1')
+    return ipcRenderer.invoke(IPC.startIamSsoLogin, startUrl, region || 'us-east-1')
   },
 
   // 轮询 IAM SSO 授权状态
@@ -367,12 +376,12 @@ const api = {
     expiresIn?: number
     error?: string
   }> => {
-    return ipcRenderer.invoke('poll-iam-sso-auth', region || 'us-east-1')
+    return ipcRenderer.invoke(IPC.pollIamSsoAuth, region || 'us-east-1')
   },
 
   // 取消 IAM SSO 登录
   cancelIamSsoLogin: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('cancel-iam-sso-login')
+    return ipcRenderer.invoke(IPC.cancelIamSsoLogin)
   },
 
   // 启动 Social Auth 登录 (Google/GitHub)
@@ -384,7 +393,7 @@ const api = {
     state?: string
     error?: string
   }> => {
-    return ipcRenderer.invoke('start-social-login', provider)
+    return ipcRenderer.invoke(IPC.startSocialLogin, provider)
   },
 
   // 交换 Social Auth token
@@ -401,12 +410,12 @@ const api = {
     provider?: string
     error?: string
   }> => {
-    return ipcRenderer.invoke('exchange-social-token', code, state)
+    return ipcRenderer.invoke(IPC.exchangeSocialToken, code, state)
   },
 
   // 取消 Social Auth 登录
   cancelSocialLogin: (): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('cancel-social-login')
+    return ipcRenderer.invoke(IPC.cancelSocialLogin)
   },
 
   // 监听 Social Auth 回调
@@ -419,9 +428,9 @@ const api = {
     ): void => {
       callback(data)
     }
-    ipcRenderer.on('social-auth-callback', handler)
+    ipcRenderer.on(IPC_EVENT.socialAuthCallback, handler)
     return () => {
-      ipcRenderer.removeListener('social-auth-callback', handler)
+      ipcRenderer.removeListener(IPC_EVENT.socialAuthCallback, handler)
     }
   },
 
@@ -430,7 +439,7 @@ const api = {
     enabled: boolean,
     url: string
   ): Promise<{ success: boolean; error?: string; normalizedUrl?: string }> => {
-    return ipcRenderer.invoke('set-proxy', enabled, url)
+    return ipcRenderer.invoke(IPC.setProxy, enabled, url)
   },
 
   // 获取当前账号可用模型（诊断功能使用）
@@ -438,7 +447,7 @@ const api = {
     models: Array<{ id: string; name: string; description: string }>
     error?: string
   }> => {
-    return ipcRenderer.invoke('get-kiro-available-models')
+    return ipcRenderer.invoke(IPC.getKiroAvailableModels)
   },
 
   // ============ 应用日志 ============
@@ -451,31 +460,31 @@ const api = {
   ): Promise<
     Array<{ timestamp: string; level: string; category: string; message: string; data?: unknown }>
   > => {
-    return ipcRenderer.invoke('app-logs-get', count, category)
+    return ipcRenderer.invoke(IPC.appLogsGet, count, category)
   },
 
   // 清除应用运行日志（传 category 时只清该分类）
   appLogsClear: (category?: string): Promise<{ success: boolean }> => {
-    return ipcRenderer.invoke('app-logs-clear', category)
+    return ipcRenderer.invoke(IPC.appLogsClear, category)
   },
 
   // 获取应用运行日志数量（传 category 时只数该分类）
   appLogsCount: (category?: string): Promise<number> => {
-    return ipcRenderer.invoke('app-logs-count', category)
+    return ipcRenderer.invoke(IPC.appLogsCount, category)
   },
 
   // Kiro CLI 当前登录的账号（账号库模式；该账号由 kiro-cli 自己刷新，kiro-rs 不刷新它）
   kiroCliCurrentAccount: (): Promise<{ accountId: string | null }> =>
-    ipcRenderer.invoke('kiro-cli-current-account'),
+    ipcRenderer.invoke(IPC.kiroCliCurrentAccount),
 
   onKiroCliAccountChanged: (
     callback: (data: { accountId: string | null }) => void
   ): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { accountId: string | null }): void =>
       callback(data)
-    ipcRenderer.on('kiro-cli-account-changed', handler)
+    ipcRenderer.on(IPC_EVENT.kiroCliAccountChanged, handler)
     return () => {
-      ipcRenderer.removeListener('kiro-cli-account-changed', handler)
+      ipcRenderer.removeListener(IPC_EVENT.kiroCliAccountChanged, handler)
     }
   },
 
@@ -488,7 +497,7 @@ const api = {
     partition: string
     serviceState?: string
     detail?: string
-  }> => ipcRenderer.invoke('kiro-admin-view', provider),
+  }> => ipcRenderer.invoke(IPC.kiroAdminView, provider),
 
   // kiro-rs 子进程状态变化（启动中 / 运行中 / 重启中 / 失败）
   onAccountDbStatus: (
@@ -498,15 +507,15 @@ const api = {
       _event: Electron.IpcRendererEvent,
       status: { kiroRsState?: string; kiroRsDetail?: string; error?: string }
     ): void => callback(status)
-    ipcRenderer.on('account-db-status', handler)
+    ipcRenderer.on(IPC_EVENT.accountDbStatus, handler)
     return () => {
-      ipcRenderer.removeListener('account-db-status', handler)
+      ipcRenderer.removeListener(IPC_EVENT.accountDbStatus, handler)
     }
   },
 
   onLocalNotificationNavigate: (callback: (page: 'accounts') => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, page: 'accounts'): void => callback(page)
-    ipcRenderer.on('local-notification-navigate', handler)
+    ipcRenderer.on(IPC_EVENT.localNotificationNavigate, handler)
     return () => ipcRenderer.off('local-notification-navigate', handler)
   },
 
@@ -533,7 +542,7 @@ const api = {
     }>
   }> => {
     return ipcRenderer.invoke(
-      'account-get-models',
+      IPC.accountGetModels,
       credential,
       region,
       profileArn,
@@ -568,7 +577,7 @@ const api = {
     disclaimer?: string[]
   }> => {
     return ipcRenderer.invoke(
-      'account-get-subscriptions',
+      IPC.accountGetSubscriptions,
       credential,
       region,
       profileArn,
@@ -589,7 +598,7 @@ const api = {
     accountId?: string
   ): Promise<{ success: boolean; error?: string; url?: string; status?: string }> => {
     return ipcRenderer.invoke(
-      'account-get-subscription-url',
+      IPC.accountGetSubscriptionUrl,
       credential,
       subscriptionType,
       region,
@@ -602,44 +611,44 @@ const api = {
 
   // 在新窗口打开订阅链接
   openSubscriptionWindow: (url: string): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('open-subscription-window', url)
+    return ipcRenderer.invoke(IPC.openSubscriptionWindow, url)
   },
 
   // ============ Usage API 类型设置 ============
 
   // 获取 Usage API 类型
   getUsageApiType: (): Promise<'rest' | 'cbor'> => {
-    return ipcRenderer.invoke('get-usage-api-type')
+    return ipcRenderer.invoke(IPC.getUsageApiType)
   },
 
   // 设置 Usage API 类型
   setUsageApiType: (type: 'rest' | 'cbor'): Promise<{ success: boolean; type: string }> => {
-    return ipcRenderer.invoke('set-usage-api-type', type)
+    return ipcRenderer.invoke(IPC.setUsageApiType, type)
   },
 
   // ============ 自定义 titlebar API ============
   window: {
-    minimize: (): void => ipcRenderer.send('window-minimize'),
-    maximizeToggle: (): void => ipcRenderer.send('window-maximize-toggle'),
-    close: (): void => ipcRenderer.send('window-close'),
-    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window-is-maximized'),
-    getPlatform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('window-get-platform'),
+    minimize: (): void => ipcRenderer.send(IPC_EVENT.windowMinimize),
+    maximizeToggle: (): void => ipcRenderer.send(IPC_EVENT.windowMaximizeToggle),
+    close: (): void => ipcRenderer.send(IPC_EVENT.windowClose),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke(IPC.windowIsMaximized),
+    getPlatform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke(IPC.windowGetPlatform),
     onMaximizeChange: (callback: (isMaximized: boolean) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, isMaximized: boolean): void =>
         callback(isMaximized)
-      ipcRenderer.on('window-maximize-changed', handler)
-      return () => ipcRenderer.removeListener('window-maximize-changed', handler)
+      ipcRenderer.on(IPC_EVENT.windowMaximizeChanged, handler)
+      return () => ipcRenderer.removeListener(IPC_EVENT.windowMaximizeChanged, handler)
     }
   },
 
   // ============ 托盘相关 API ============
 
   // 获取显示主窗口快捷键
-  getShowWindowShortcut: (): Promise<string> => ipcRenderer.invoke('get-show-window-shortcut'),
+  getShowWindowShortcut: (): Promise<string> => ipcRenderer.invoke(IPC.getShowWindowShortcut),
 
   // 设置显示主窗口快捷键
   setShowWindowShortcut: (shortcut: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('set-show-window-shortcut', shortcut),
+    ipcRenderer.invoke(IPC.setShowWindowShortcut, shortcut),
 
   // 获取托盘设置
   getTraySettings: (): Promise<{
@@ -648,7 +657,7 @@ const api = {
     showNotifications: boolean
     minimizeOnStart: boolean
   }> => {
-    return ipcRenderer.invoke('get-tray-settings')
+    return ipcRenderer.invoke(IPC.getTraySettings)
   },
 
   // 保存托盘设置
@@ -658,7 +667,7 @@ const api = {
     showNotifications?: boolean
     minimizeOnStart?: boolean
   }): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('save-tray-settings', settings)
+    return ipcRenderer.invoke(IPC.saveTraySettings, settings)
   },
 
   // 更新托盘当前账户信息
@@ -678,7 +687,7 @@ const api = {
       }
     } | null
   ): void => {
-    ipcRenderer.send('update-tray-account', account)
+    ipcRenderer.send(IPC_EVENT.updateTrayAccount, account)
   },
 
   // 更新托盘账户列表
@@ -690,12 +699,12 @@ const api = {
       status: string
     }[]
   ): void => {
-    ipcRenderer.send('update-tray-account-list', accounts)
+    ipcRenderer.send(IPC_EVENT.updateTrayAccountList, accounts)
   },
 
   // 更新托盘语言
   updateTrayLanguage: (language: 'en' | 'zh'): void => {
-    ipcRenderer.send('update-tray-language', language)
+    ipcRenderer.send(IPC_EVENT.updateTrayLanguage, language)
   },
 
   // 监听托盘刷新账户事件
@@ -703,9 +712,9 @@ const api = {
     const handler = (): void => {
       callback()
     }
-    ipcRenderer.on('tray-refresh-account', handler)
+    ipcRenderer.on(IPC_EVENT.trayRefreshAccount, handler)
     return () => {
-      ipcRenderer.removeListener('tray-refresh-account', handler)
+      ipcRenderer.removeListener(IPC_EVENT.trayRefreshAccount, handler)
     }
   },
 
@@ -714,9 +723,9 @@ const api = {
     const handler = (): void => {
       callback()
     }
-    ipcRenderer.on('tray-switch-account', handler)
+    ipcRenderer.on(IPC_EVENT.traySwitchAccount, handler)
     return () => {
-      ipcRenderer.removeListener('tray-switch-account', handler)
+      ipcRenderer.removeListener(IPC_EVENT.traySwitchAccount, handler)
     }
   },
 
@@ -725,9 +734,9 @@ const api = {
     const handler = (): void => {
       callback()
     }
-    ipcRenderer.on('show-close-confirm-dialog', handler)
+    ipcRenderer.on(IPC_EVENT.showCloseConfirmDialog, handler)
     return () => {
-      ipcRenderer.removeListener('show-close-confirm-dialog', handler)
+      ipcRenderer.removeListener(IPC_EVENT.showCloseConfirmDialog, handler)
     }
   },
 
@@ -736,7 +745,7 @@ const api = {
     action: 'minimize' | 'quit' | 'cancel',
     rememberChoice: boolean
   ): void => {
-    ipcRenderer.send('close-confirm-response', action, rememberChoice)
+    ipcRenderer.send(IPC_EVENT.closeConfirmResponse, action, rememberChoice)
   },
 
   // ============ 一键诊断 ============
@@ -760,7 +769,7 @@ const api = {
       error?: string
     }>
   }> => {
-    return ipcRenderer.invoke('diagnose:run', params)
+    return ipcRenderer.invoke(IPC.diagnoseRun, params)
   },
 
   /**
@@ -801,60 +810,60 @@ const api = {
     }
     error?: string
   }> => {
-    return ipcRenderer.invoke('diagnose:account-liveness', params)
+    return ipcRenderer.invoke(IPC.diagnoseAccountLiveness, params)
   },
 
   kskAutomationList: (): Promise<IpcResult<KskAutomationTaskView[]>> =>
-    ipcRenderer.invoke('ksk-automation-list'),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.list),
 
   kskAutomationCreate: (
     input: KskAutomationTaskInput
   ): Promise<IpcResult<KskAutomationTaskView[]>> =>
-    ipcRenderer.invoke('ksk-automation-create', input),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.create, input),
 
   kskAutomationUpdate: (
     taskId: string,
     input: KskAutomationTaskInput
   ): Promise<IpcResult<KskAutomationTaskView[]>> =>
-    ipcRenderer.invoke('ksk-automation-update', taskId, input),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.update, taskId, input),
 
   kskAutomationSetEnabled: (
     taskId: string,
     enabled: boolean
   ): Promise<IpcResult<KskAutomationTaskView[]>> =>
-    ipcRenderer.invoke('ksk-automation-set-enabled', taskId, enabled),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.setEnabled, taskId, enabled),
 
   kskAutomationDelete: (taskId: string): Promise<IpcResult<KskAutomationTaskView[]>> =>
-    ipcRenderer.invoke('ksk-automation-delete', taskId),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.delete, taskId),
 
   kskAutomationSyncNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
-    ipcRenderer.invoke('ksk-automation-sync-now', taskId),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.syncNow, taskId),
 
   kskAutomationSyncLocalAdminNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
-    ipcRenderer.invoke('ksk-automation-sync-local-admin-now', taskId),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.syncLocalAdminNow, taskId),
 
   /** 立刻对目标分组全量发消息验活，删掉判死的号（同时清掉反代上的对应凭据）。 */
   kskAutomationCleanupNow: (taskId: string): Promise<IpcResult<KskAutomationStatusEvent>> =>
-    ipcRenderer.invoke('ksk-automation-cleanup-now', taskId),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.cleanupNow, taskId),
 
   /** 把单个账号的凭据推送到本机 Admin（复用任务里已保存的 Admin URL / API Key）。 */
   kskAutomationPushAccountToLocalAdmin: (
     candidate: LocalAdminPushCandidate
   ): Promise<IpcResult<LocalAdminPushResult>> =>
-    ipcRenderer.invoke('ksk-automation-push-account-to-local-admin', candidate),
+    ipcRenderer.invoke(KSK_AUTOMATION_CHANNEL.pushAccountToLocalAdmin, candidate),
 
   onKskAutomationStatus: (callback: (event: KskAutomationStatusEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: KskAutomationStatusEvent): void => {
       callback(data)
     }
-    ipcRenderer.on('ksk-automation-status-changed', handler)
-    return () => ipcRenderer.removeListener('ksk-automation-status-changed', handler)
+    ipcRenderer.on(KSK_AUTOMATION_CHANNEL.statusEvent, handler)
+    return () => ipcRenderer.removeListener(KSK_AUTOMATION_CHANNEL.statusEvent, handler)
   },
 
   onKskAutomationAccountsChanged: (callback: () => void): (() => void) => {
     const handler = (): void => callback()
-    ipcRenderer.on('ksk-automation-accounts-changed', handler)
-    return () => ipcRenderer.removeListener('ksk-automation-accounts-changed', handler)
+    ipcRenderer.on(KSK_AUTOMATION_CHANNEL.accountsChangedEvent, handler)
+    return () => ipcRenderer.removeListener(KSK_AUTOMATION_CHANNEL.accountsChangedEvent, handler)
   }
 }
 

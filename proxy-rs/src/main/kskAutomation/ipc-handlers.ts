@@ -30,20 +30,7 @@ import {
 } from './localAdminClient'
 import { recordManagedAccount } from '../adminManaged/gate'
 import type { KskAutomationManager } from './syncManager'
-
-export const KSK_AUTOMATION_CHANNEL = {
-  list: 'ksk-automation-list',
-  create: 'ksk-automation-create',
-  update: 'ksk-automation-update',
-  setEnabled: 'ksk-automation-set-enabled',
-  delete: 'ksk-automation-delete',
-  syncNow: 'ksk-automation-sync-now',
-  syncLocalAdminNow: 'ksk-automation-sync-local-admin-now',
-  cleanupNow: 'ksk-automation-cleanup-now',
-  pushAccountToLocalAdmin: 'ksk-automation-push-account-to-local-admin',
-  statusEvent: 'ksk-automation-status-changed',
-  accountsChangedEvent: 'ksk-automation-accounts-changed'
-} as const
+import { KSK_AUTOMATION_CHANNEL } from '../../shared/kskAutomation'
 
 interface IpcResult<T> {
   success: boolean

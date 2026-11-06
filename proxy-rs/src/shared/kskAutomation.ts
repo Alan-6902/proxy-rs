@@ -281,3 +281,18 @@ export function providerUrlHint(value: string): string | undefined {
     return value.trim() ? '已配置（地址格式待校验）' : undefined
   }
 }
+
+/** KSK 自动化的 IPC 通道（主进程 ipc-handlers 与 preload 两侧共用） */
+export const KSK_AUTOMATION_CHANNEL = {
+  list: 'ksk-automation-list',
+  create: 'ksk-automation-create',
+  update: 'ksk-automation-update',
+  setEnabled: 'ksk-automation-set-enabled',
+  delete: 'ksk-automation-delete',
+  syncNow: 'ksk-automation-sync-now',
+  syncLocalAdminNow: 'ksk-automation-sync-local-admin-now',
+  cleanupNow: 'ksk-automation-cleanup-now',
+  pushAccountToLocalAdmin: 'ksk-automation-push-account-to-local-admin',
+  statusEvent: 'ksk-automation-status-changed',
+  accountsChangedEvent: 'ksk-automation-accounts-changed'
+} as const

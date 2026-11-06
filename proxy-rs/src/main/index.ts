@@ -49,7 +49,6 @@ import { matchRemoteCredentialToLocalAccount } from '../shared/adminManaged'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { writeFile, readFile } from 'fs/promises'
 import { encode, decode } from 'cbor-x'
 import {
   Agent,
@@ -1214,6 +1213,9 @@ let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
 import { IPC, IPC_EVENT } from '../shared/ipcChannels'
+import { registerWindowControlIpcHandlers } from './ipc/windowControls'
+import { registerAppLogIpcHandlers } from './ipc/appLogs'
+import { registerFileTransferIpcHandlers } from './ipc/fileTransfer'
 import type { ParsedSubscription, ParsedUsage } from '../shared/usageLimitsParse'
 import {
   getUsageApiType,
@@ -3179,16 +3181,10 @@ app.whenReady().then(async () => {
     return traySettings
   })
 
-  // ============ 自定义 titlebar IPC ============
-  ipcMain.on(IPC_EVENT.windowMinimize, () => mainWindow?.minimize())
-  ipcMain.on(IPC_EVENT.windowMaximizeToggle, () => {
-    if (!mainWindow) return
-    if (mainWindow.isMaximized()) mainWindow.unmaximize()
-    else mainWindow.maximize()
-  })
-  ipcMain.on(IPC_EVENT.windowClose, () => mainWindow?.close())
-  ipcMain.handle(IPC.windowIsMaximized, () => !!mainWindow?.isMaximized())
-  ipcMain.handle(IPC.windowGetPlatform, () => process.platform)
+  // ============ 自定义 titlebar / 日志 / 文件对话框 IPC ============
+  registerWindowControlIpcHandlers(() => mainWindow)
+  registerAppLogIpcHandlers()
+  registerFileTransferIpcHandlers(() => mainWindow)
 
   // IPC: 获取显示主窗口快捷键
   ipcMain.handle(IPC.getShowWindowShortcut, () => {
@@ -3611,21 +3607,6 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-  })
-
-  // IPC: App 运行日志（系统日志页、kiro-rs 日志页）。category 为空时取全部
-  ipcMain.handle(IPC.appLogsGet, (_event, count?: number, category?: string) => {
-    const limit = typeof count === 'number' && count > 0 ? count : undefined
-    if (category) return proxyLogStore.getLastOfCategory(category, limit)
-    return limit ? proxyLogStore.getLast(limit) : proxyLogStore.getAll()
-  })
-  ipcMain.handle(IPC.appLogsCount, (_event, category?: string) =>
-    category ? proxyLogStore.countOfCategory(category) : proxyLogStore.count()
-  )
-  ipcMain.handle(IPC.appLogsClear, (_event, category?: string) => {
-    if (category) proxyLogStore.clearCategory(category)
-    else proxyLogStore.clear()
-    return { success: true }
   })
 
   // IPC: Kiro CLI 当前登录的账号（账号库模式；该账号由 kiro-cli 自己刷新）
@@ -5537,53 +5518,6 @@ app.whenReady().then(async () => {
       return { success: true, completed, successCount: success, failedCount: failed }
     }
   )
-
-  // IPC: 导出到文件
-  ipcMain.handle(IPC.exportToFile, async (_event, data: string, filename: string) => {
-    try {
-      const result = await dialog.showSaveDialog(mainWindow!, {
-        title: '导出账号数据',
-        defaultPath: filename,
-        filters: [{ name: 'JSON Files', extensions: ['json'] }]
-      })
-
-      if (!result.canceled && result.filePath) {
-        await writeFile(result.filePath, data, 'utf-8')
-        return true
-      }
-      return false
-    } catch (error) {
-      console.error('Failed to export:', error)
-      return false
-    }
-  })
-
-  // IPC: 从文件导入
-  ipcMain.handle(IPC.importFromFile, async () => {
-    try {
-      const result = await dialog.showOpenDialog(mainWindow!, {
-        title: '导入账号数据',
-        filters: [
-          { name: '所有支持的格式', extensions: ['json', 'csv', 'txt'] },
-          { name: 'JSON Files', extensions: ['json'] },
-          { name: 'CSV Files', extensions: ['csv'] },
-          { name: 'TXT Files', extensions: ['txt'] }
-        ],
-        properties: ['openFile']
-      })
-
-      if (!result.canceled && result.filePaths.length > 0) {
-        const filePath = result.filePaths[0]
-        const content = await readFile(filePath, 'utf-8')
-        const ext = filePath.split('.').pop()?.toLowerCase() || 'json'
-        return { content, format: ext }
-      }
-      return null
-    } catch (error) {
-      console.error('Failed to import:', error)
-      return null
-    }
-  })
 
   // IPC: 验证凭证并获取账号信息（用于添加账号）
   ipcMain.handle(

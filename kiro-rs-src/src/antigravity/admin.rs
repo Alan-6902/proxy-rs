@@ -70,10 +70,10 @@ async fn scan_models(State(state): State<AgAdminState>) -> Response {
 }
 
 async fn admin_auth(State(state): State<AgAdminState>, request: Request<Body>, next: Next) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.admin_api_key) => next.run(request).await,
-        _ => (StatusCode::UNAUTHORIZED, Json(AdminErrorResponse::authentication_error())).into_response(),
-    }
+    auth::require_api_key(&state.admin_api_key, request, next, || {
+        (StatusCode::UNAUTHORIZED, Json(AdminErrorResponse::authentication_error())).into_response()
+    })
+    .await
 }
 
 fn internal(e: impl std::fmt::Display) -> Response {

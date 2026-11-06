@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("WebSearch 子请求转发给 kiro-rs: 127.0.0.1:{}", config.port);
     tracing::info!("Antigravity 账号库: {}", args.antigravity_db.display());
     if config.admin_api_key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
-        tracing::info!("Antigravity Admin UI 已启用: /admin/antigravity");
+        tracing::info!("Antigravity Admin UI 已启用: {}", kiro_rs::antigravity::ADMIN_UI_PATH);
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(runtime::shutdown_signal(args.exit_on_stdin_eof))

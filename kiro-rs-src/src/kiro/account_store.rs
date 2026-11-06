@@ -7,7 +7,6 @@
 //! token 轮换）。所有写事务都很短，不在事务里等网络。
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use chrono::{DateTime, TimeZone, Utc};
@@ -16,13 +15,12 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction,
 use sha2::{Digest, Sha256};
 
 use super::model::credentials::KiroCredentials;
+use crate::common::sqlite;
 
 /// 当前代码支持的 schema 版本（= 已知 migration 数量）
 pub const SCHEMA_VERSION: i64 = 1;
 /// 第一条 migration；proxy-rs 迁移器执行同一个文件
 pub const MIGRATION_0001: &str = include_str!("../../migrations/0001_init.sql");
-/// 写事务遇到另一端持锁时的等待上限
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// 提交遇到 BUSY 时的应用层重试次数（busy_timeout 之外再兜一层，见方案 §0.8 写者饥饿）
 const BUSY_RETRIES: usize = 3;
 /// account_changes 保留窗口
@@ -143,18 +141,10 @@ fn is_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
+/// 公共连接参数之外，账号库还依赖外键级联（凭据 / 统计 / 变更日志三张表）
 fn configure(conn: &Connection) -> anyhow::Result<()> {
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        bail!("无法启用 WAL（journal_mode={mode}）");
-    }
-    conn.execute_batch(
-        "PRAGMA synchronous=FULL;
-         PRAGMA fullfsync=ON;
-         PRAGMA checkpoint_fullfsync=ON;
-         PRAGMA foreign_keys=ON;",
-    )?;
+    sqlite::configure(conn)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(())
 }
 
@@ -980,6 +970,8 @@ pub(crate) fn test_store() -> (AccountStore, PathBuf) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn oauth(rt: &str) -> KiroCredentials {

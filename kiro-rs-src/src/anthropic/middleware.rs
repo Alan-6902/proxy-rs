@@ -50,13 +50,10 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => {
-            let error = ErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
-        }
-    }
+    auth::require_api_key(&state.api_key, request, next, || {
+        (StatusCode::UNAUTHORIZED, Json(ErrorResponse::authentication_error())).into_response()
+    })
+    .await
 }
 
 /// 请求访问日志：`[POST] /v1/messages 200 (3318ms)`

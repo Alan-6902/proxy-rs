@@ -48,10 +48,10 @@ pub const ADMIN_UI_PATH: &str = "/admin/qoder";
 const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 
 async fn auth_middleware(State(state): State<QoderState>, request: Request<Body>, next: Next) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => (StatusCode::UNAUTHORIZED, Json(ErrorResponse::authentication_error())).into_response(),
-    }
+    auth::require_api_key(&state.api_key, request, next, || {
+        (StatusCode::UNAUTHORIZED, Json(ErrorResponse::authentication_error())).into_response()
+    })
+    .await
 }
 
 /// `/v1` 业务路由，客户端鉴权与 Kiro 共用同一个 apiKey；
@@ -89,7 +89,7 @@ pub fn create_service_router(
             .nest("/api/admin/service", admin::create_service_info_router(key, provider.clone()))
             .nest("/api/admin/qoder", create_admin_router(key, provider))
             .route("/admin/", get(|| async { axum::response::Redirect::temporary(ADMIN_UI_PATH) }))
-            .nest("/admin", crate::admin_ui::create_qoder_admin_ui_router()),
+            .nest("/admin", crate::admin_ui::create_admin_ui_router_redirecting_to(ADMIN_UI_PATH)),
         None => app,
     }
 }

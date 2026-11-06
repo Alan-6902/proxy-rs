@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     http::{Response, StatusCode, Uri, header},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     routing::get,
 };
 use rust_embed::Embed;
@@ -14,24 +14,18 @@ use rust_embed::Embed;
 #[folder = "admin-ui/dist"]
 struct Asset;
 
-/// 创建 Admin UI 路由
+/// 创建 Admin UI 路由：管理根 `/` 直接出首页（Kiro 主服务）
 pub fn create_admin_ui_router() -> Router {
     Router::new()
         .route("/", get(index_handler))
         .route("/{*file}", get(static_handler))
 }
 
-/// AG 监听的管理根始终进入独立页面，资源路径仍沿用 /admin/assets。
-pub fn create_antigravity_admin_ui_router() -> Router {
+/// 独立进程（Antigravity / Qoder）的 Admin UI 路由：管理根跳到各自页面，
+/// 静态资源路径仍沿用 /admin/assets，与主服务共用同一份前端产物。
+pub fn create_admin_ui_router_redirecting_to(target: &'static str) -> Router {
     Router::new()
-        .route("/", get(|| async { axum::response::Redirect::temporary("/admin/antigravity") }))
-        .route("/{*file}", get(static_handler))
-}
-
-/// Qoder 监听的管理根进入独立页面，资源路径仍沿用 /admin/assets。
-pub fn create_qoder_admin_ui_router() -> Router {
-    Router::new()
-        .route("/", get(|| async { axum::response::Redirect::temporary("/admin/qoder") }))
+        .route("/", get(move || async move { Redirect::temporary(target) }))
         .route("/{*file}", get(static_handler))
 }
 

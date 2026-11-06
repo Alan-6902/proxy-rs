@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use parking_lot::Mutex;
@@ -18,13 +17,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::vault::{SecretMap, SecretVault, Secrets};
+use crate::common::sqlite;
 use crate::kiro::account_store::now_ms;
 
 /// 当前 schema 版本 = 迁移脚本条数；库里的 user_version 落后时按顺序补跑
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 const ENABLED_MODEL_IDS_KEY: &str = "enabled_model_ids";
 const MODEL_OVERRIDES_KEY: &str = "model_overrides";
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// 账号库文件权限：仅属主可读写
 #[cfg(unix)]
 const OWNER_ONLY_MODE: u32 = 0o600;
@@ -205,16 +204,6 @@ pub struct QoderStore {
     pending: Mutex<HashMap<i64, PendingCounts>>,
 }
 
-fn configure(conn: &Connection) -> anyhow::Result<()> {
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        bail!("无法启用 WAL（journal_mode={mode}）");
-    }
-    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;")?;
-    Ok(())
-}
-
 /// 库里是明文 PAT / token：主库文件先建成（或收紧为）仅属主可读写，
 /// SQLite 创建 -wal / -shm 时沿用主库的权限位
 #[cfg(unix)]
@@ -295,7 +284,7 @@ impl QoderStore {
         let existed = path.exists();
         restrict_to_owner(path)?;
         let mut conn = Connection::open(path).with_context(|| format!("打开 {}", path.display()))?;
-        configure(&conn)?;
+        sqlite::configure(&conn)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {
             let empty: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;

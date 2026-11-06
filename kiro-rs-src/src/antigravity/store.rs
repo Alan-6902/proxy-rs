@@ -10,19 +10,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
+use crate::common::sqlite;
 use crate::kiro::account_store::now_ms;
 
 pub const SCHEMA_VERSION: i64 = 3;
 const ENABLED_MODEL_IDS_KEY: &str = "enabled_model_ids";
 const MODEL_ACCOUNTS_KEY: &str = "model_accounts";
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 const MIGRATION_0001: &str = "
 CREATE TABLE accounts (
@@ -187,20 +186,6 @@ pub struct AgStore {
     pending_counts: Mutex<HashMap<i64, PendingCounts>>,
 }
 
-fn configure(conn: &Connection) -> anyhow::Result<()> {
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        bail!("无法启用 WAL（journal_mode={mode}）");
-    }
-    conn.execute_batch(
-        "PRAGMA synchronous=FULL;
-         PRAGMA fullfsync=ON;
-         PRAGMA checkpoint_fullfsync=ON;",
-    )?;
-    Ok(())
-}
-
 const SELECT_COLUMNS: &str = "id, email, name, refresh_token, access_token, expires_at_ms, \
      project_id, tier, disabled, quota_json, quota_updated_ms, last_error, last_used_ms, \
      success_count, failure_count, refresh_failure_count";
@@ -239,7 +224,7 @@ impl AgStore {
         let existed = path.exists();
         let mut conn =
             Connection::open(path).with_context(|| format!("打开 {}", path.display()))?;
-        configure(&conn)?;
+        sqlite::configure(&conn)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         // 按版本逐级迁移，每级一个事务
         let migrations: [(i64, &str); 3] = [(0, MIGRATION_0001), (1, MIGRATION_0002), (2, MIGRATION_0003)];

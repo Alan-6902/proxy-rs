@@ -38,13 +38,8 @@ pub async fn admin_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let api_key = auth::extract_api_key(&request);
-
-    match api_key {
-        Some(key) if auth::constant_time_eq(&key, &state.admin_api_key) => next.run(request).await,
-        _ => {
-            let error = AdminErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
-        }
-    }
+    auth::require_api_key(&state.admin_api_key, request, next, || {
+        (StatusCode::UNAUTHORIZED, Json(AdminErrorResponse::authentication_error())).into_response()
+    })
+    .await
 }

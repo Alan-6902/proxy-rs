@@ -45,13 +45,15 @@ use handlers::{AgState, count_tokens, get_models, post_messages};
 
 /// 账号库默认文件名（与 Kiro 账号库同目录）
 pub const DEFAULT_DB_FILE_NAME: &str = "antigravity.sqlite3";
+/// 独立进程的 Admin 页面路径（前端按此路径渲染 Antigravity 面板）
+pub const ADMIN_UI_PATH: &str = "/admin/antigravity";
 const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 
 async fn auth_middleware(State(state): State<AgState>, request: Request<Body>, next: Next) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => (StatusCode::UNAUTHORIZED, Json(ErrorResponse::authentication_error())).into_response(),
-    }
+    auth::require_api_key(&state.api_key, request, next, || {
+        (StatusCode::UNAUTHORIZED, Json(ErrorResponse::authentication_error())).into_response()
+    })
+    .await
 }
 
 /// 创建 `/v1` 路由，客户端鉴权与 `/v1` 共用同一个 apiKey；
@@ -87,8 +89,8 @@ pub fn create_service_router(
         Some(key) => app
             .nest("/api/admin/service", admin::create_service_info_router(key, provider.clone()))
             .nest("/api/admin/antigravity", create_admin_router(key, provider))
-            .route("/admin/", get(|| async { axum::response::Redirect::temporary("/admin/antigravity") }))
-            .nest("/admin", crate::admin_ui::create_antigravity_admin_ui_router()),
+            .route("/admin/", get(|| async { axum::response::Redirect::temporary(ADMIN_UI_PATH) }))
+            .nest("/admin", crate::admin_ui::create_admin_ui_router_redirecting_to(ADMIN_UI_PATH)),
         None => app,
     }
 }

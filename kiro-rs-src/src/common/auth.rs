@@ -3,8 +3,27 @@
 use axum::{
     body::Body,
     http::{Request, header},
+    middleware::Next,
+    response::Response,
 };
 use subtle::ConstantTimeEq;
+
+/// API Key 门禁：请求携带的 key 与 `expected` 常量时间相等才放行，
+/// 否则返回 `unauthorized()` 构造的 401 响应（各 API 的错误体格式不同，由调用方提供）。
+///
+/// 六处鉴权中间件（Kiro / Qoder / Antigravity 的业务与 Admin 各一）都只是本函数的薄封装，
+/// 比对逻辑只在这里出现一次。
+pub async fn require_api_key(
+    expected: &str,
+    request: Request<Body>,
+    next: Next,
+    unauthorized: impl FnOnce() -> Response,
+) -> Response {
+    match extract_api_key(&request) {
+        Some(key) if constant_time_eq(&key, expected) => next.run(request).await,
+        _ => unauthorized(),
+    }
+}
 
 /// 从请求中提取 API Key
 ///

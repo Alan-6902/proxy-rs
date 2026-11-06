@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Check
+
+# 门禁：每次 push / PR 都跑类型检查、lint、单元测试，两套代码各一个 job。
+# 用 macOS runner 是因为产品只在 macOS 交付，kiro-rs 集成测试也要拉起真实二进制。
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 22
+  PNPM_VERSION: 10
+
+jobs:
+  proxy-rs:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: proxy-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: proxy-rs/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test:unit
+
+  kiro-rs:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: kiro-rs-src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+          cache-dependency-path: kiro-rs-src/admin-ui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kiro-rs-src
+
+      # rust-embed 编译期需要 admin-ui/dist
+      - name: Build admin-ui
+        working-directory: kiro-rs-src/admin-ui
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

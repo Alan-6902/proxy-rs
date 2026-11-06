@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// 立即切端点会把瞬时抖动放大成全端点扫描。
 pub const DEFAULT_ENDPOINT_FALLBACK_AFTER_FAILURES: usize = 2;
 pub const DEFAULT_ANTIGRAVITY_PORT: u16 = 12889;
+pub const DEFAULT_QODER_PORT: u16 = 12890;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -37,6 +38,10 @@ pub struct Config {
     /// Antigravity 独立监听端口，不能与 Kiro 相同
     #[serde(default = "default_antigravity_port")]
     pub antigravity_port: u16,
+
+    /// Qoder 独立监听端口
+    #[serde(default = "default_qoder_port")]
+    pub qoder_port: u16,
 
     #[serde(default = "default_region")]
     pub region: String,
@@ -164,6 +169,10 @@ fn default_antigravity_port() -> u16 {
     DEFAULT_ANTIGRAVITY_PORT
 }
 
+fn default_qoder_port() -> u16 {
+    DEFAULT_QODER_PORT
+}
+
 fn default_region() -> String {
     "us-east-1".to_string()
 }
@@ -211,6 +220,7 @@ impl Default for Config {
             host: default_host(),
             port: default_port(),
             antigravity_port: default_antigravity_port(),
+            qoder_port: default_qoder_port(),
             region: default_region(),
             auth_region: None,
             api_region: None,
@@ -249,6 +259,14 @@ impl Config {
                 "Antigravity 与 Kiro 必须使用不同的监听端口"
             );
         }
+        Ok(())
+    }
+
+    /// qoder-rs 启动前调用：Qoder 端口不能为 0，也不能与 Kiro / Antigravity 端口相同
+    pub fn validate_qoder_port(&self, port: u16) -> anyhow::Result<()> {
+        anyhow::ensure!(port != 0, "Qoder 监听端口不能为 0");
+        anyhow::ensure!(port != self.port, "Qoder 与 Kiro 必须使用不同的监听端口");
+        anyhow::ensure!(port != self.antigravity_port, "Qoder 与 Antigravity 必须使用不同的监听端口");
         Ok(())
     }
 
@@ -316,6 +334,9 @@ mod tests {
         let configured: Config = serde_json::from_str(r#"{"port":12888,"antigravityPort":12901}"#).unwrap();
         assert_eq!(configured.antigravity_port, 12901);
         assert_eq!(serde_json::to_value(configured).unwrap()["antigravityPort"], 12901);
+        assert_eq!(config.qoder_port, DEFAULT_QODER_PORT);
+        let qoder: Config = serde_json::from_str(r#"{"qoderPort":12999}"#).unwrap();
+        assert_eq!(serde_json::to_value(qoder).unwrap()["qoderPort"], 12999);
     }
 
     #[test]
@@ -329,5 +350,9 @@ mod tests {
         assert!(config.validate_listener_ports(true).is_err());
         config.antigravity_port = DEFAULT_ANTIGRAVITY_PORT;
         assert!(config.validate_listener_ports(true).is_ok());
+        assert!(config.validate_qoder_port(DEFAULT_QODER_PORT).is_ok());
+        assert!(config.validate_qoder_port(0).is_err());
+        assert!(config.validate_qoder_port(config.port).is_err());
+        assert!(config.validate_qoder_port(config.antigravity_port).is_err());
     }
 }

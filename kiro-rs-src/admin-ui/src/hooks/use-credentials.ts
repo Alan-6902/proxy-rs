@@ -20,6 +20,11 @@ import {
   setAgAccountDisabled,
   resetAgAccountFailures,
   deleteAgAccount,
+  getQoderAccounts,
+  addQoderAccount,
+  refreshQoderAccount,
+  setQoderAccountDisabled,
+  deleteQoderAccount,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -227,5 +232,51 @@ export function useDeleteAgAccount() {
   return useMutation({
     mutationFn: deleteAgAccount,
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['ag-accounts'] }),
+  })
+}
+
+// === Qoder 账号池 ===
+
+export const QODER_ACCOUNTS_KEY = ['qoder-accounts'] as const
+
+export function useQoderAccounts(enabled: boolean) {
+  return useQuery({
+    queryKey: QODER_ACCOUNTS_KEY,
+    queryFn: getQoderAccounts,
+    enabled,
+    retry: false,
+    refetchInterval: AG_ACCOUNTS_REFETCH_MS,
+  })
+}
+
+export function useAddQoderAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: addQoderAccount,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: QODER_ACCOUNTS_KEY }),
+  })
+}
+
+export function useRefreshQoderAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: refreshQoderAccount,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: QODER_ACCOUNTS_KEY }),
+  })
+}
+
+export function useSetQoderAccountDisabled() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, disabled }: { id: number; disabled: boolean }) => setQoderAccountDisabled(id, disabled),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: QODER_ACCOUNTS_KEY }),
+  })
+}
+
+export function useDeleteQoderAccount() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: deleteQoderAccount,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: QODER_ACCOUNTS_KEY }),
   })
 }

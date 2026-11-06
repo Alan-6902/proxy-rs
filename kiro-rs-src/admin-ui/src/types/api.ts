@@ -199,3 +199,84 @@ export interface AgOAuthStatus {
   email?: string
   error?: string
 }
+
+// === Qoder 账号池 ===
+
+/** 上游 /api/v2/quota/usage 原样返回，字段按需读取 */
+export interface QoderQuotaPart {
+  total?: number
+  used?: number
+  remaining?: number
+  percentage?: number
+  unit?: string
+}
+
+export interface QoderQuota {
+  isQuotaExceeded?: boolean
+  totalUsagePercentage?: number
+  expiresAt?: number
+  userQuota?: QoderQuotaPart
+  addOnQuota?: QoderQuotaPart
+  /** 企业版账号的组织资源包：只有 used / remaining，没有 total */
+  orgResourcePackage?: QoderQuotaPart
+}
+
+export interface QoderAccount {
+  id: number
+  uid: string
+  name: string | null
+  email: string | null
+  patTail: string
+  userType: string | null
+  orgName: string | null
+  disabled: boolean
+  expiresAtMs: number | null
+  quota: QoderQuota | null
+  quotaUpdatedMs: number | null
+  lastError: string | null
+  lastUsedMs: number | null
+  successCount: number
+  failureCount: number
+  /** 反代累计记录的消耗 credits，跨额度周期累加 */
+  consumedTotal: number
+}
+
+export interface QoderAccountsResponse {
+  accounts: QoderAccount[]
+  dbPath: string
+}
+
+/** 管理页给单个模型的配置；不填表示用上游默认 */
+export interface QoderModelOverride {
+  alias?: string
+  contextWindow?: number
+  effort?: string
+}
+
+export interface QoderCatalogModel {
+  /** 上游 key */
+  id: string
+  /** 对外模型名：配了别名为别名，否则同 id */
+  publicId: string
+  displayName: string
+  /** 实际生效的上下文窗口 */
+  contextWindow: number
+  maxOutput: number
+  isReasoning: boolean
+  enabled: boolean
+  /** 上游支持的上下文档位（升序） */
+  contextWindows: number[]
+  defaultContextWindow: number | null
+  /** 上游支持的思考强度，含 none 表示可关闭 */
+  efforts: string[]
+  defaultEffort: string | null
+  /** 上游用量倍率，null 表示未提供；0 是有效倍率 */
+  priceFactor: number | null
+  originalPriceFactor: number | null
+  isFree: boolean
+  override: QoderModelOverride
+}
+
+export interface QoderModelCatalogResponse {
+  models: QoderCatalogModel[]
+}

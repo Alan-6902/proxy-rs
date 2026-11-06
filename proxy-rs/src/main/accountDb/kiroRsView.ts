@@ -11,6 +11,7 @@
 
 import { shell, type WebContents } from 'electron'
 import { ANTIGRAVITY_ADMIN_PARTITION } from '../../shared/antigravity'
+import { QODER_ADMIN_PARTITION } from '../../shared/qoder'
 
 /** 日志存储里 kiro-rs 的分类名；日志页按它过滤 */
 export const KIRO_RS_LOG_CATEGORY = 'kiro-rs'
@@ -65,7 +66,7 @@ export function parseKiroRsLine(line: string, stream: 'stdout' | 'stderr'): Pars
 export function logKiroRsLine(
   line: string,
   stream: 'stdout' | 'stderr',
-  category: 'kiro-rs' | 'antigravity-rs' = KIRO_RS_LOG_CATEGORY
+  category: 'kiro-rs' | 'antigravity-rs' | 'qoder-rs' = KIRO_RS_LOG_CATEGORY
 ): void {
   const { level, message } = parseKiroRsLine(line, stream)
   if (!message) return
@@ -99,6 +100,7 @@ export interface AdminViewDeps {
   /** 当前 Admin 连接信息；kiro-rs 未就绪时为 null */
   resolve: () => { adminUiUrl: string; adminApiKey: string } | null
   resolveAntigravity?: () => { adminUiUrl: string; adminApiKey: string } | null
+  resolveQoder?: () => { adminUiUrl: string; adminApiKey: string } | null
 }
 
 /**
@@ -109,9 +111,11 @@ export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps
     const target =
       params.partition === ANTIGRAVITY_ADMIN_PARTITION
         ? deps.resolveAntigravity?.()
-        : params.partition === KIRO_ADMIN_PARTITION
-          ? deps.resolve()
-          : null
+        : params.partition === QODER_ADMIN_PARTITION
+          ? deps.resolveQoder?.()
+          : params.partition === KIRO_ADMIN_PARTITION
+            ? deps.resolve()
+            : null
     // 仅允许各自管理页面使用其独立会话，且不给 preload / Node 能力
     if (!target || !isAllowedAdminUrl(params.src, target.adminUiUrl)) {
       event.preventDefault()
@@ -125,7 +129,7 @@ export function installAdminWebviewGuards(host: WebContents, deps: AdminViewDeps
 
   host.on('did-attach-webview', (_event, guest) => {
     const resolve = (): { adminUiUrl: string; adminApiKey: string } | null => {
-      for (const target of [deps.resolve(), deps.resolveAntigravity?.()])
+      for (const target of [deps.resolve(), deps.resolveAntigravity?.(), deps.resolveQoder?.()])
         if (target && isAllowedAdminUrl(guest.getURL(), target.adminUiUrl)) return target
       return null
     }

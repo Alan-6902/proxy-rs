@@ -16,6 +16,10 @@ import type {
   AgModelScanResponse,
   AgOAuthStart,
   AgOAuthStatus,
+  QoderAccount,
+  QoderAccountsResponse,
+  QoderModelCatalogResponse,
+  QoderModelOverride,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -215,5 +219,50 @@ export async function resetAgAccountFailures(id: number): Promise<SuccessRespons
 
 export async function deleteAgAccount(id: number): Promise<SuccessResponse> {
   const { data } = await api.delete<SuccessResponse>(`/antigravity/accounts/${id}`)
+  return data
+}
+
+// === Qoder 账号池 ===
+
+export async function getQoderAccounts(): Promise<QoderAccountsResponse> {
+  const { data } = await api.get<QoderAccountsResponse>('/qoder/accounts')
+  return data
+}
+
+/** 粘贴 PAT 添加账号；后端换证并拉取身份与额度 */
+export async function addQoderAccount(pat: string): Promise<QoderAccount> {
+  const { data } = await api.post<QoderAccount>('/qoder/accounts', { pat })
+  return data
+}
+
+export async function refreshQoderAccount(id: number): Promise<QoderAccount> {
+  const { data } = await api.post<QoderAccount>(`/qoder/accounts/${id}/refresh`)
+  return data
+}
+
+export async function setQoderAccountDisabled(id: number, disabled: boolean): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/qoder/accounts/${id}/disabled`, { disabled })
+  return data
+}
+
+export async function deleteQoderAccount(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/qoder/accounts/${id}`)
+  return data
+}
+
+export async function getQoderModelCatalog(): Promise<QoderModelCatalogResponse> {
+  const { data } = await api.get<QoderModelCatalogResponse>('/qoder/models')
+  return data
+}
+
+export async function setQoderModelOverrides(
+  overrides: Record<string, QoderModelOverride>,
+): Promise<QoderModelCatalogResponse> {
+  const { data } = await api.put<QoderModelCatalogResponse>('/qoder/models/overrides', { overrides })
+  return data
+}
+
+export async function setQoderEnabledModels(enabledModelIds: string[]): Promise<QoderModelCatalogResponse> {
+  const { data } = await api.put<QoderModelCatalogResponse>('/qoder/models', { enabledModelIds })
   return data
 }

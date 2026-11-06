@@ -3,6 +3,7 @@ pub mod admin;
 pub mod admin_ui;
 pub mod anthropic;
 pub mod antigravity;
+pub mod qoder;
 pub mod common;
 pub mod http_client;
 pub mod kiro;

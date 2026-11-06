@@ -465,7 +465,7 @@ interface KiroApi {
   onKiroCliAccountChanged: (callback: (data: { accountId: string | null }) => void) => () => void
 
   // 内嵌 kiro-rs Admin 页面
-  kiroAdminView: (provider?: 'kiro' | 'antigravity') => Promise<{
+  kiroAdminView: (provider?: 'kiro' | 'antigravity' | 'qoder') => Promise<{
     enabled: boolean
     url?: string
     partition: string

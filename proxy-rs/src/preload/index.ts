@@ -485,7 +485,7 @@ const api = {
 
   // 内嵌 kiro-rs Admin 页面的地址与 kiro-rs 状态（Admin Key 由主进程注入，不经渲染进程）
   kiroAdminView: (
-    provider?: 'kiro' | 'antigravity'
+    provider?: 'kiro' | 'antigravity' | 'qoder'
   ): Promise<{
     enabled: boolean
     url?: string

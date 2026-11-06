@@ -13,6 +13,7 @@ import {
 } from '../../src/main/accountDb/kiroRsView'
 import { proxyLogStore } from '../../src/main/proxy/logger'
 import { ANTIGRAVITY_ADMIN_PARTITION } from '../../src/shared/antigravity'
+import { QODER_ADMIN_PARTITION } from '../../src/shared/qoder'
 
 const ADMIN_URL = 'http://127.0.0.1:12888/admin'
 
@@ -23,10 +24,7 @@ describe('parseKiroRsLine', () => {
       const line = '[2026-09-10T09:36:01Z] [INFO] 已启动'
       logKiroRsLine(line, 'stdout', 'antigravity-rs')
       logKiroRsLine(line, 'stdout')
-      expect(log.mock.calls).toEqual([
-        ['[antigravity-rs] 已启动'],
-        ['[kiro-rs] 已启动']
-      ])
+      expect(log.mock.calls).toEqual([['[antigravity-rs] 已启动'], ['[kiro-rs] 已启动']])
     } finally {
       log.mockRestore()
     }
@@ -170,6 +168,32 @@ describe('installAdminWebviewGuards', () => {
     prevented = false
     guest.emit('will-navigate', { preventDefault: () => (prevented = true) }, `${ADMIN_URL}#x`)
     expect(prevented).toBe(false)
+  })
+
+  it('Qoder admin view only attaches in its own partition', () => {
+    const host = new EventEmitter()
+    const qoderUrl = 'http://127.0.0.1:12890/admin/qoder'
+    installAdminWebviewGuards(host as never, {
+      resolve,
+      resolveQoder: () => ({ adminUiUrl: qoderUrl, adminApiKey: 'test-qoder-key' })
+    })
+    const attach = (src: string, partition: string): boolean => {
+      let blocked = false
+      host.emit(
+        'will-attach-webview',
+        {
+          preventDefault: () => {
+            blocked = true
+          }
+        },
+        {},
+        { src, partition }
+      )
+      return blocked
+    }
+    expect(attach(qoderUrl, QODER_ADMIN_PARTITION)).toBe(false)
+    expect(attach(qoderUrl, KIRO_ADMIN_PARTITION)).toBe(true)
+    expect(attach(ADMIN_URL, QODER_ADMIN_PARTITION)).toBe(true)
   })
 
   it('uses a separate Antigravity port and partition, including delayed guest navigation', () => {

@@ -1227,6 +1227,7 @@ let lastSavedData: unknown = null
 
 import { getNextWindowZoomLevel, resolveWindowZoomAction } from './windowZoom'
 import { ANTIGRAVITY_ADMIN_PARTITION, ANTIGRAVITY_ADMIN_PATH } from '../shared/antigravity'
+import { QODER_ADMIN_PARTITION, QODER_ADMIN_PATH } from '../shared/qoder'
 import { wrapStoreWithBridge, type RawStore } from './accountDb/bridge'
 import { withoutSecrets, type AccountLike } from './accountDb/projection'
 import {
@@ -1249,6 +1250,9 @@ import {
   isAccountDbMode,
   loadAccountDbConfig,
   antigravityAdminTarget,
+  qoderAdminTarget,
+  startManagedQoder,
+  stopManagedQoder,
   startManagedAntigravity,
   stopManagedAntigravity,
   startAccountDbBackups,
@@ -2970,7 +2974,8 @@ function createWindow(): void {
   })
   installAdminWebviewGuards(mainWindow.webContents, {
     resolve: resolveKiroAdminView,
-    resolveAntigravity: resolveAntigravityAdminView
+    resolveAntigravity: resolveAntigravityAdminView,
+    resolveQoder: resolveQoderAdminView
   })
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -3631,15 +3636,34 @@ app.whenReady().then(async () => {
 
   // IPC: 内嵌 Admin 页面的地址（Key 由主进程在页面里注入，不下发给渲染进程）
   ipcMain.handle('kiro-admin-view', (_event, provider?: unknown) => {
-    const antigravity = provider === 'antigravity'
     const status = accountDbStatus()
-    const view = antigravity ? resolveAntigravityAdminView() : resolveKiroAdminView()
+    const pick =
+      provider === 'antigravity'
+        ? {
+            view: resolveAntigravityAdminView(),
+            partition: ANTIGRAVITY_ADMIN_PARTITION,
+            state: status.antigravityState,
+            detail: status.antigravityDetail
+          }
+        : provider === 'qoder'
+          ? {
+              view: resolveQoderAdminView(),
+              partition: QODER_ADMIN_PARTITION,
+              state: status.qoderState,
+              detail: status.qoderDetail
+            }
+          : {
+              view: resolveKiroAdminView(),
+              partition: KIRO_ADMIN_PARTITION,
+              state: status.kiroRsState,
+              detail: status.kiroRsDetail
+            }
     return {
       enabled: status.enabled,
-      url: view?.adminUiUrl,
-      partition: antigravity ? ANTIGRAVITY_ADMIN_PARTITION : KIRO_ADMIN_PARTITION,
-      serviceState: antigravity ? status.antigravityState : status.kiroRsState,
-      detail: (antigravity ? status.antigravityDetail : status.kiroRsDetail) ?? accountDbStartupError ?? undefined
+      url: pick.view?.adminUiUrl,
+      partition: pick.partition,
+      serviceState: pick.state,
+      detail: pick.detail ?? accountDbStartupError ?? undefined
     }
   })
 
@@ -7022,13 +7046,24 @@ function resolveKiroAdminView(): { adminUiUrl: string; adminApiKey: string } | n
   return { adminUiUrl: adminUiUrlFromApiBase(target.baseUrl), adminApiKey: target.adminApiKey }
 }
 
-function resolveAntigravityAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
-  const target = antigravityAdminTarget()
+/** 独立服务的管理页：同一份前端，按路径区分页面 */
+function independentAdminView(
+  target: { baseUrl: string; adminApiKey: string } | null,
+  path: string
+): { adminUiUrl: string; adminApiKey: string } | null {
   if (!target) return null
   const url = new URL(target.baseUrl)
-  url.pathname = ANTIGRAVITY_ADMIN_PATH
+  url.pathname = path
   url.search = ''
   return { adminUiUrl: url.href, adminApiKey: target.adminApiKey }
+}
+
+function resolveAntigravityAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
+  return independentAdminView(antigravityAdminTarget(), ANTIGRAVITY_ADMIN_PATH)
+}
+
+function resolveQoderAdminView(): { adminUiUrl: string; adminApiKey: string } | null {
+  return independentAdminView(qoderAdminTarget(), QODER_ADMIN_PATH)
 }
 
 /** 账号库模式的后台服务：拉起 kiro-rs 子进程、监听跨端变化推给渲染进程 */
@@ -7056,6 +7091,20 @@ async function startAccountDbServices(): Promise<void> {
   }).catch((error) => {
     console.error('[antigravity-rs] 启动失败：', error instanceof Error ? error.message : error)
   })
+  const qoderStart = startManagedQoder({
+    binary:
+      config.qoderRs?.binary ??
+      (app.isPackaged
+        ? join(process.resourcesPath, 'qoder-rs')
+        : join(app.getAppPath(), '..', 'kiro-rs-src', 'target', 'release', 'qoder-rs')),
+    onLog: (line, stream) => logKiroRsLine(line, stream, 'qoder-rs'),
+    onStateChange: (state, detail) => {
+      console.log(`[qoder-rs] 状态：${state}${detail ? `（${detail}）` : ''}`)
+      sendRendererEvent('account-db-status', accountDbStatus())
+    }
+  }).catch((error) => {
+    console.error('[qoder-rs] 启动失败：', error instanceof Error ? error.message : error)
+  })
   try {
     await startManagedKiroRs({
       binary: resolveKiroRsBinary(config),
@@ -7071,7 +7120,7 @@ async function startAccountDbServices(): Promise<void> {
   } catch (error) {
     console.error('[kiro-rs] 启动失败：', error instanceof Error ? error.message : error)
   }
-  await antigravityStart
+  await Promise.all([antigravityStart, qoderStart])
 }
 
 // 应用退出前注销 URI 协议处理器并保存数据
@@ -7108,10 +7157,12 @@ app.on('will-quit', async (event) => {
     app.exit(0)
   }, EXIT_FORCE_QUIT_MS)
 
-  // 分别停止两个反代进程，等待它们写完统计
-  const stopProxies = Promise.all([stopManagedKiroRs(), stopManagedAntigravity()]).catch(
-    (error) => console.error('[Exit] 停止反代进程失败：', error)
-  )
+  // 分别停止各反代进程，等待它们写完统计
+  const stopProxies = Promise.all([
+    stopManagedKiroRs(),
+    stopManagedAntigravity(),
+    stopManagedQoder()
+  ]).catch((error) => console.error('[Exit] 停止反代进程失败：', error))
 
   if (lastSavedData && store) {
     try {

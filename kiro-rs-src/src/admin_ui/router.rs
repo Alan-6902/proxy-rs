@@ -28,6 +28,13 @@ pub fn create_antigravity_admin_ui_router() -> Router {
         .route("/{*file}", get(static_handler))
 }
 
+/// Qoder 监听的管理根进入独立页面，资源路径仍沿用 /admin/assets。
+pub fn create_qoder_admin_ui_router() -> Router {
+    Router::new()
+        .route("/", get(|| async { axum::response::Redirect::temporary("/admin/qoder") }))
+        .route("/{*file}", get(static_handler))
+}
+
 /// 处理首页请求
 async fn index_handler() -> impl IntoResponse {
     serve_index()

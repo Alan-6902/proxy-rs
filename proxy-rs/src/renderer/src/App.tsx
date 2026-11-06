@@ -305,6 +305,8 @@ function App(): React.JSX.Element {
         return <KiroAdminPage key="kiro" />
       case 'antigravityAdmin':
         return <KiroAdminPage key="antigravity" provider="antigravity" />
+      case 'qoderAdmin':
+        return <KiroAdminPage key="qoder" provider="qoder" />
       case 'kiroLogs':
         return (
           <LogsPage

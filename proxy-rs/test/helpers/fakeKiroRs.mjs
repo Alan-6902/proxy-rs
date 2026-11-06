@@ -11,15 +11,17 @@ const server = http.createServer((req, res) => {
     res.writeHead(401).end('{}')
     return
   }
-  const antigravity = Boolean(argValues['--antigravity-db'])
-  if (req.url !== (antigravity ? '/api/admin/service/info' : '/api/admin/store/info')) {
+  // 独立服务（antigravity-rs / qoder-rs）只实现 /service/info
+  const independent = argValues['--antigravity-db'] ? ['antigravity', argValues['--antigravity-db']]
+    : argValues['--qoder-db'] ? ['qoder', argValues['--qoder-db']] : null
+  if (req.url !== (independent ? '/api/admin/service/info' : '/api/admin/store/info')) {
     res.writeHead(404).end('{}')
     return
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(antigravity ? {
-    service: 'antigravity',
-    databasePath: realpathSync(argValues['--antigravity-db'])
+  res.end(JSON.stringify(independent ? {
+    service: independent[0],
+    databasePath: realpathSync(independent[1])
   } : {
     enabled: true,
     databaseId: process.env.FAKE_DB_ID,

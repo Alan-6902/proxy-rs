@@ -53,6 +53,7 @@ const zh = {
     configSync: '配置同步',
     kiroAdmin: 'Kiro 反代',
     antigravityAdmin: 'Antigravity 反代',
+    qoderAdmin: 'Qoder 反代',
     kiroLogs: '反代日志',
     logs: '系统日志',
     settings: '设置',

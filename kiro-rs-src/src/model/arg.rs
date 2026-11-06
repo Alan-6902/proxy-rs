@@ -62,6 +62,31 @@ pub struct AntigravityArgs {
     pub exit_on_stdin_eof: bool,
 }
 
+/// Anthropic / OpenAI <-> Qoder 国际版反代（不加载 Kiro 凭据池）
+#[derive(Parser, Debug)]
+#[command(name = "qoder-rs", version, about, long_about = None)]
+pub struct QoderArgs {
+    /// 配置文件路径（复用 apiKey、adminApiKey、代理及 qoderPort 配置）
+    #[arg(short, long)]
+    pub config: Option<String>,
+
+    /// Qoder 账号库路径（SQLite，不存在时新建）
+    #[arg(long)]
+    pub qoder_db: std::path::PathBuf,
+
+    /// 监听地址；默认 127.0.0.1，不跟随配置文件的 host
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// 覆盖配置文件中的 qoderPort
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// stdin 关闭即退出，由 App 托管时使用
+    #[arg(long)]
+    pub exit_on_stdin_eof: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +96,10 @@ mod tests {
         assert!(Args::try_parse_from(["kiro-rs", "--antigravity-db", "ag.sqlite3"]).is_err());
         assert!(Args::try_parse_from(["kiro-rs", "--antigravity-port", "12889"]).is_err());
         assert!(AntigravityArgs::try_parse_from(["antigravity-rs"]).is_err());
+        assert!(QoderArgs::try_parse_from(["qoder-rs"]).is_err());
+        assert!(Args::try_parse_from(["kiro-rs", "--qoder-db", "q.sqlite3"]).is_err());
+        let q = QoderArgs::try_parse_from(["qoder-rs", "--qoder-db", "q.sqlite3", "--port", "12890"]).unwrap();
+        assert_eq!((q.qoder_db.to_str(), q.port), (Some("q.sqlite3"), Some(12890)));
         assert!(AntigravityArgs::try_parse_from([
             "antigravity-rs", "--antigravity-db", "ag.sqlite3", "--account-db", "accounts.sqlite3",
         ]).is_err());

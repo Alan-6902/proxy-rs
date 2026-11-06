@@ -35,14 +35,14 @@ afterEach(async () => {
 
 function make(
   port: number,
-  options: { dbId?: string; states?: KiroRsState[]; antigravity?: boolean } = {}
+  options: { dbId?: string; states?: KiroRsState[]; antigravity?: boolean; qoder?: boolean } = {}
 ): KiroRsProcess {
   const proc = new KiroRsProcess({
     binary: process.execPath,
     configPath: 'config.json',
     // 假服务不读写账号；用已存在文件验证路径身份。
-    dbPath: options.antigravity ? FAKE : 'accounts.sqlite3',
-    service: options.antigravity ? 'antigravity-rs' : 'kiro-rs',
+    dbPath: options.antigravity || options.qoder ? FAKE : 'accounts.sqlite3',
+    service: options.antigravity ? 'antigravity-rs' : options.qoder ? 'qoder-rs' : 'kiro-rs',
     host: '127.0.0.1',
     port,
     adminApiKey: 'admin-key',
@@ -77,6 +77,17 @@ describe('KiroRsProcess', () => {
       headers: { 'x-api-key': target.adminApiKey }
     })
     expect(response.ok).toBe(true)
+  })
+
+  it('qoder-rs 用 --qoder-db 启动并按 qoder 身份健康检查', async () => {
+    const kiro = make(await freePort())
+    const qoder = make(await freePort(), { qoder: true })
+    await Promise.all([kiro.start(), qoder.start()])
+    expect(qoder.currentState).toBe('running')
+    await qoder.stop()
+    expect(kiro.currentState).toBe('running')
+    const clash = make(Number(new URL(kiro.target()!.baseUrl).port), { qoder: true })
+    await expect(clash.start()).rejects.toThrow(/qoder-rs/)
   })
 
   it('AG 端口冲突时 Kiro 仍可运行，错误明确标识 antigravity-rs', async () => {

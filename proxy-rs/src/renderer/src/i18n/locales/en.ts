@@ -53,6 +53,7 @@ const en = {
     configSync: 'Config Sync',
     kiroAdmin: 'Kiro Proxy',
     antigravityAdmin: 'Antigravity Proxy',
+    qoderAdmin: 'Qoder Proxy',
     kiroLogs: 'Proxy Logs',
     logs: 'Logs',
     settings: 'Settings',

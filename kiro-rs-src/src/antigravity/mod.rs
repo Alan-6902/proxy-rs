@@ -39,6 +39,7 @@ pub use store::AgStore;
 use crate::anthropic::types::ErrorResponse;
 use crate::anthropic::{access_log_middleware, cors_layer};
 use crate::common::auth;
+use crate::common::websearch_relay::WebSearchRelay;
 use handlers::{AgState, count_tokens, get_models, post_messages};
 
 /// 账号库默认文件名（与 Kiro 账号库同目录）
@@ -52,9 +53,14 @@ async fn auth_middleware(State(state): State<AgState>, request: Request<Body>, n
     }
 }
 
-/// 创建 `/v1` 路由，客户端鉴权与 `/v1` 共用同一个 apiKey
-pub fn create_router(api_key: impl Into<String>, provider: Arc<AntigravityProvider>) -> Router {
-    let state = AgState { api_key: api_key.into(), provider };
+/// 创建 `/v1` 路由，客户端鉴权与 `/v1` 共用同一个 apiKey；
+/// `websearch` 有值时 WebSearch 子请求转给 kiro-rs 真搜
+pub fn create_router(
+    api_key: impl Into<String>,
+    provider: Arc<AntigravityProvider>,
+    websearch: Option<Arc<WebSearchRelay>>,
+) -> Router {
+    let state = AgState { api_key: api_key.into(), provider, websearch };
     let v1 = Router::new()
         .route("/models", get(get_models))
         .route("/messages", post(post_messages))
@@ -73,8 +79,9 @@ pub fn create_service_router(
     api_key: &str,
     admin_key: Option<&str>,
     provider: Arc<AntigravityProvider>,
+    websearch: Option<Arc<WebSearchRelay>>,
 ) -> Router {
-    let app = create_router(api_key, provider.clone());
+    let app = create_router(api_key, provider.clone(), websearch);
     match admin_key.filter(|key| !key.trim().is_empty()) {
         Some(key) => app
             .nest("/api/admin/service", admin::create_service_info_router(key, provider.clone()))
@@ -99,7 +106,10 @@ mod tests {
             None,
             TlsBackend::Rustls,
         ).unwrap());
-        let ag = create_service_router("test-api-key", Some("test-admin-key"), provider.clone());
+        // 假 kiro-rs 接收 WebSearch 子请求；其余请求不经过它
+        let (fake_kiro_url, fake_kiro) = crate::common::websearch_relay::tests::fake_kiro().await;
+        let relay = Arc::new(WebSearchRelay::new(&fake_kiro_url, "test-api-key".into()).unwrap());
+        let ag = create_service_router("test-api-key", Some("test-admin-key"), provider.clone(), Some(relay));
         let kiro = crate::anthropic::create_router_with_provider("test-api-key", None, true);
         let listener_ag = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listener_kiro = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -194,6 +204,17 @@ mod tests {
         let asset_response = client.get(format!("{ag_url}{asset}")).send().await.unwrap();
         assert_eq!(asset_response.status(), StatusCode::OK);
         assert!(asset_response.headers()["content-type"].to_str().unwrap().contains("javascript"));
+        // WebSearch 子请求：鉴权仍由本服务做，通过后原样转给 kiro-rs，SSE 原样回流
+        let search = serde_json::json!({"model":"gemini-4-argon-high","max_tokens":10,"stream":true,
+            "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+            "messages":[{"role":"user","content":"Perform a web search for the query: rust"}]});
+        assert_eq!(client.post(format!("{ag_url}/v1/messages")).json(&search).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let relayed = client.post(format!("{ag_url}/v1/messages")).header("x-api-key", "test-api-key")
+            .json(&search).send().await.unwrap();
+        assert_eq!(relayed.status(), StatusCode::OK);
+        assert!(relayed.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+        assert!(relayed.text().await.unwrap().contains("query=Perform a web search for the query: rust"));
+        fake_kiro.abort();
         shutdown_tx.send(true).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             task_ag.await.unwrap();

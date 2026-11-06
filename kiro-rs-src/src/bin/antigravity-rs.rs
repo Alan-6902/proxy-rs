@@ -4,6 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use kiro_rs::{
     antigravity::{self, AgStore, AntigravityProvider},
+    common::websearch_relay::WebSearchRelay,
     http_client::ProxyConfig,
     model::{arg::AntigravityArgs, config::Config},
     runtime, token,
@@ -47,8 +48,11 @@ async fn main() -> anyhow::Result<()> {
     let provider = Arc::new(AntigravityProvider::new(store, proxy.as_ref(), config.tls_backend)
         .context("创建 Antigravity Provider 失败")?);
     provider.start_background_tasks();
-    let app = antigravity::create_service_router(api_key, config.admin_api_key.as_deref(), provider.clone());
+    // WebSearch 子请求交给本机 kiro-rs（同一份配置里的 host/port/apiKey）真搜
+    let websearch = WebSearchRelay::from_config(&config).map(Arc::new);
+    let app = antigravity::create_service_router(api_key, config.admin_api_key.as_deref(), provider.clone(), websearch);
     tracing::info!("antigravity-rs 已启动，Antigravity API 端点: {}", addr);
+    tracing::info!("WebSearch 子请求转发给 kiro-rs: 127.0.0.1:{}", config.port);
     tracing::info!("Antigravity 账号库: {}", args.antigravity_db.display());
     if config.admin_api_key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
         tracing::info!("Antigravity Admin UI 已启用: /admin/antigravity");

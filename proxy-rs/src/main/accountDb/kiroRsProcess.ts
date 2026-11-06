@@ -13,6 +13,14 @@ import { realpathSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { fetchStoreInfo, type AdminFetch, type KiroRsAdminTarget } from './adminApi'
 
+export type KiroRsService = 'kiro-rs' | 'antigravity-rs' | 'qoder-rs'
+
+/** 独立服务：/service/info 报告的身份与账号库参数名 */
+const INDEPENDENT_SERVICES: Partial<Record<KiroRsService, { identity: string; dbFlag: string }>> = {
+  'antigravity-rs': { identity: 'antigravity', dbFlag: '--antigravity-db' },
+  'qoder-rs': { identity: 'qoder', dbFlag: '--qoder-db' }
+}
+
 export type KiroRsState = 'stopped' | 'starting' | 'running' | 'restarting' | 'failed'
 
 export interface KiroRsProcessOptions {
@@ -23,8 +31,8 @@ export interface KiroRsProcessOptions {
   port: number
   adminApiKey: string
   expectedDatabaseId?: string
-  /** 默认 Kiro；Antigravity 使用独立二进制、数据库参数与健康检查。 */
-  service?: 'kiro-rs' | 'antigravity-rs'
+  /** 默认 Kiro；Antigravity / Qoder 使用独立二进制、数据库参数与健康检查。 */
+  service?: KiroRsService
   /** 健康检查总时长 */
   startTimeoutMs?: number
   /** stop 时 SIGTERM 后等待多久再 SIGKILL */
@@ -109,16 +117,22 @@ export class KiroRsProcess {
   }
 
   private async checkHealth(): Promise<void> {
-    if (this.options.service === 'antigravity-rs') {
+    const independent = this.options.service
+      ? INDEPENDENT_SERVICES[this.options.service]
+      : undefined
+    if (independent) {
       const target = this.adminTarget()
       const response = await (this.options.fetchImpl ?? fetch)(`${target.baseUrl}/service/info`, {
         headers: { 'x-api-key': target.adminApiKey },
         signal: AbortSignal.timeout(target.timeoutMs)
       })
-      if (!response.ok) throw new Error(`antigravity-rs 健康检查失败：HTTP ${response.status}`)
-      const info = await response.json() as { service?: string; databasePath?: string }
-      if (info.service !== 'antigravity' || info.databasePath !== realpathSync(this.options.dbPath)) {
-        throw new Error('antigravity-rs 的服务身份或账号库不是同一个')
+      if (!response.ok) throw new Error(`${this.serviceName} 健康检查失败：HTTP ${response.status}`)
+      const info = (await response.json()) as { service?: string; databasePath?: string }
+      if (
+        info.service !== independent.identity ||
+        info.databasePath !== realpathSync(this.options.dbPath)
+      ) {
+        throw new Error(`${this.serviceName} 的服务身份或账号库不是同一个`)
       }
       return
     }
@@ -132,9 +146,7 @@ export class KiroRsProcess {
   private async launch(): Promise<void> {
     const { host, port } = this.options
     if (!(await checkPortFree(host, port))) {
-      throw new Error(
-        `端口 ${host}:${port} 已被占用，不会再启动第二个 ${this.serviceName}`
-      )
+      throw new Error(`端口 ${host}:${port} 已被占用，不会再启动第二个 ${this.serviceName}`)
     }
     const spawnImpl = this.options.spawnImpl ?? spawn
     const child = spawnImpl(
@@ -142,7 +154,8 @@ export class KiroRsProcess {
       [
         '--config',
         this.options.configPath,
-        this.options.service === 'antigravity-rs' ? '--antigravity-db' : '--account-db',
+        (this.options.service && INDEPENDENT_SERVICES[this.options.service]?.dbFlag) ??
+          '--account-db',
         this.options.dbPath,
         '--host',
         host,

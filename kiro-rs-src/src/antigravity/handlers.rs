@@ -1,4 +1,4 @@
-//! `/ag/v1` 的 Anthropic 兼容端点
+//! `/v1` 的 Anthropic 兼容端点
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use crate::anthropic::stream::SseEvent;
 use crate::anthropic::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
 };
+use crate::common::websearch_relay::WebSearchRelay;
 use crate::token;
 
 const PING_INTERVAL_SECS: u64 = 25;
@@ -44,6 +45,8 @@ const MODEL_CREATED_AT: i64 = 1_770_652_800;
 pub struct AgState {
     pub api_key: String,
     pub provider: Arc<AntigravityProvider>,
+    /// Claude Code 的 WebSearch 子请求转给本机 kiro-rs 真搜；None 时服务端工具照旧被剥掉
+    pub websearch: Option<Arc<WebSearchRelay>>,
 }
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
@@ -87,14 +90,20 @@ pub async fn get_models(State(state): State<AgState>) -> Response {
     Json(ModelsResponse { object: "list".to_string(), data }).into_response()
 }
 
-/// POST /ag/v1/messages/count_tokens
+/// POST /v1/messages/count_tokens
 pub async fn count_tokens(Json(payload): Json<CountTokensRequest>) -> impl IntoResponse {
     let total = token::count_all_tokens(payload.model, payload.system, payload.messages, payload.tools);
     Json(CountTokensResponse { input_tokens: (total as i32).max(1) })
 }
 
-/// POST /ag/v1/messages
+/// POST /v1/messages
 pub async fn post_messages(State(state): State<AgState>, Json(raw): Json<Value>) -> Response {
+    // WebSearch 子请求：上游不执行服务端工具，交给 kiro-rs 真搜；失败则按普通请求继续
+    if let Some(relay) = state.websearch.as_ref().filter(|_| WebSearchRelay::is_web_search_request(&raw))
+        && let Some(response) = relay.forward(&raw).await
+    {
+        return response;
+    }
     let req: MessagesRequest = match serde_json::from_value(raw.clone()) {
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, format!("请求体无效: {e}")),

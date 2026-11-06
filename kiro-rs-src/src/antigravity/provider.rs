@@ -22,8 +22,7 @@ use super::consts::{
     MAX_ACCOUNT_ATTEMPTS, MIN_COOLDOWN_SECS, MODEL_NOT_FOUND_COOLDOWN_SECS, OAUTH_CALLBACK_PATH,
     OAUTH_SESSION_TIMEOUT_SECS, QUOTA_EXHAUSTED_COOLDOWN_SECS, QUOTA_REFRESH_SECS,
     RATE_LIMIT_COOLDOWN_SECS, RETRY_IN_PLACE_MAX_SECS, STICKY_SESSION_MAX,
-    STICKY_SESSION_TTL_SECS, STREAM_GENERATE_PATH, TOKEN_REFRESH_SKEW_MS,
-    VALIDATION_REQUIRED_COOLDOWN_SECS, VERSION_REFRESH_SECS,
+    STICKY_SESSION_TTL_SECS, STREAM_GENERATE_PATH, TOKEN_REFRESH_SKEW_MS, VERSION_REFRESH_SECS,
 };
 use super::converter::{to_aicode_request, upstream_session_id};
 use super::models;
@@ -34,8 +33,14 @@ use crate::model::config::TlsBackend;
 
 const REAUTH_REQUIRED: &str = "refresh token 已失效，请重新登录";
 const BANNED_PREFIX: &str = "上游判定账号违反条款，已自动停用";
-const VALIDATION_REQUIRED_PREFIX: &str = "上游要求人工验证，账号暂停 10 分钟";
+/// 人工验证不会自愈：账号退出选号，等用户在浏览器完成验证后点「刷新」恢复
+const VALIDATION_REQUIRED_PREFIX: &str = "上游要求人工验证，已暂停该账号；在浏览器完成验证后点「刷新」恢复";
 const FORBIDDEN_PREFIX: &str = "上游拒绝访问（403），账号暂停 30 分钟";
+
+/// 需要用户动手才能恢复的错误状态（重新登录 / 完成人工验证），期间不参与选号
+fn needs_manual_action(last_error: Option<&str>) -> bool {
+    last_error.is_some_and(|e| e == REAUTH_REQUIRED || e.starts_with(VALIDATION_REQUIRED_PREFIX))
+}
 const OAUTH_SUCCESS_HTML: &str = "<!doctype html><meta charset=utf-8><title>Antigravity</title>\
 <p style=\"font:16px system-ui;margin:3em\">登录成功，可以关闭此页面。</p>";
 const OAUTH_FAILURE_HTML: &str = "<!doctype html><meta charset=utf-8><title>Antigravity</title>\
@@ -373,7 +378,8 @@ impl AntigravityProvider {
         self.failure_streaks.lock().remove(&(id, model.to_string()));
     }
 
-    /// 403：按原因冷却整个账号，判定封号时直接停用，免得继续打一个已被标记的号
+    /// 403：封号直接停用；要求人工验证的账号退出选号并把验证地址写进错误（不会自愈，冷却没有意义）；
+    /// 其它原因整个账号冷却一段时间
     fn handle_forbidden(&self, account: &AgAccount, detail: &UpstreamError) {
         let reason = client::classify_forbidden(&detail.body);
         let message = match reason {
@@ -381,19 +387,19 @@ impl AntigravityProvider {
                 if let Err(e) = self.store.set_disabled(account.id, true) {
                     tracing::warn!("停用 Antigravity 账号 #{} 失败: {e}", account.id);
                 }
-                BANNED_PREFIX
+                format!("{BANNED_PREFIX}：{detail}")
             }
-            ForbiddenKind::ValidationRequired => {
-                self.cool_down_account(account.id, VALIDATION_REQUIRED_COOLDOWN_SECS);
-                VALIDATION_REQUIRED_PREFIX
-            }
+            ForbiddenKind::ValidationRequired => match client::validation_url(&detail.body) {
+                Some(url) => format!("{VALIDATION_REQUIRED_PREFIX}；验证地址：{url}"),
+                None => format!("{VALIDATION_REQUIRED_PREFIX}：{detail}"),
+            },
             ForbiddenKind::Other => {
                 self.cool_down_account(account.id, FORBIDDEN_COOLDOWN_SECS);
-                FORBIDDEN_PREFIX
+                format!("{FORBIDDEN_PREFIX}：{detail}")
             }
         };
         tracing::warn!("Antigravity 账号 #{}（{}）{message}", account.id, account.email);
-        if let Err(e) = self.store.set_error(account.id, Some(&format!("{message}：{detail}"))) {
+        if let Err(e) = self.store.set_error(account.id, Some(&message)) {
             tracing::warn!("记录 Antigravity 账号 #{} 错误状态失败: {e}", account.id);
         }
     }
@@ -528,7 +534,7 @@ impl AntigravityProvider {
             .map_err(|e| AgError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let enabled: Vec<Arc<AgAccount>> = all
             .iter()
-            .filter(|a| !a.disabled && a.last_error.as_deref() != Some(REAUTH_REQUIRED))
+            .filter(|a| !a.disabled && !needs_manual_action(a.last_error.as_deref()))
             .cloned()
             .collect();
         if enabled.is_empty() {
@@ -1077,15 +1083,18 @@ mod tests {
     fn forbidden_cools_account_or_disables_when_banned() {
         let (_db, p, ids) = provider_with_accounts(&["a@x", "b@x"]);
         let accounts = p.store.list().unwrap();
+        let url = "https://accounts.google.com/signin/continue?sarp=1&continue=x";
         let validation = UpstreamError {
             status: 403,
-            body: r#"{"error":{"details":[{"reason":"VALIDATION_REQUIRED"}]}}"#.into(),
+            body: format!(r#"{{"error":{{"details":[{{"reason":"VALIDATION_REQUIRED","metadata":{{"validationUrl":"{url}"}}}}]}}}}"#),
         };
         p.handle_forbidden(&accounts[0], &validation);
-        // 账号级冷却：任何模型都不再选它
-        assert!(p.is_cooling(ids[0], "m"));
-        assert!(p.is_cooling(ids[0], "other-model"));
-        assert!(!p.store.get(ids[0]).unwrap().unwrap().disabled);
+        // 人工验证不会自愈：不停用、不用冷却，而是退出选号，错误里带上验证地址
+        let a = p.store.get(ids[0]).unwrap().unwrap();
+        assert!(!a.disabled);
+        assert!(a.last_error.as_deref().unwrap().contains(url));
+        assert!(!p.is_cooling(ids[0], "m"));
+        assert!(p.candidates("m", None).unwrap().iter().all(|c| c.id != ids[0]));
 
         let banned = UpstreamError {
             status: 403,
@@ -1094,6 +1103,14 @@ mod tests {
         p.handle_forbidden(&accounts[1], &banned);
         assert!(p.store.get(ids[1]).unwrap().unwrap().disabled);
         assert!(p.candidates("m", None).is_err());
+
+        // 用户验证完点「刷新」会清掉错误，账号回到候选
+        p.store.set_error(ids[0], None).unwrap();
+        assert_eq!(p.candidates("m", None).unwrap()[0].id, ids[0]);
+        // 其它 403 仍按账号级冷却
+        p.handle_forbidden(&accounts[0], &UpstreamError { status: 403, body: "permission denied".into() });
+        assert!(p.is_cooling(ids[0], "m"));
+        assert!(p.is_cooling(ids[0], "other-model"));
     }
 
     #[test]

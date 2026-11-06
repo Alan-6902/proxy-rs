@@ -96,9 +96,7 @@ pub const CAPACITY_COOLDOWN_SECS: &[u64] = &[5, 10, 15];
 pub const FAILURE_COUNT_TTL_SECS: u64 = 60 * 60;
 /// 上游建议的等待不超过这么久时，在原账号等完再试一次（保住前缀缓存，不换号）
 pub const RETRY_IN_PLACE_MAX_SECS: f64 = 3.0;
-/// 403 VALIDATION_REQUIRED（需要人工验证）时整个账号冷却
-pub const VALIDATION_REQUIRED_COOLDOWN_SECS: f64 = 10.0 * 60.0;
-/// 其它 403 时整个账号冷却
+/// 其它 403 时整个账号冷却（VALIDATION_REQUIRED 不冷却：需要用户完成验证，见 provider）
 pub const FORBIDDEN_COOLDOWN_SECS: f64 = 30.0 * 60.0;
 /// 所有端点都 404（该账号没有这个模型）时，只冷却这个账号的这个模型
 pub const MODEL_NOT_FOUND_COOLDOWN_SECS: f64 = 15.0 * 60.0;

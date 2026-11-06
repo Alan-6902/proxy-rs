@@ -17,11 +17,12 @@ const KIRO_RS_RUNNING = 'running'
 export function KiroAdminPage({
   provider = 'kiro'
 }: {
-  provider?: 'kiro' | 'antigravity'
+  provider?: 'kiro' | 'antigravity' | 'qoder'
 }): React.JSX.Element {
   const { t } = useTranslation()
   const isEn = t('common.unknown') === 'Unknown'
-  const serviceName = provider === 'antigravity' ? 'antigravity-rs' : 'kiro-rs'
+  const serviceName =
+    provider === 'antigravity' ? 'antigravity-rs' : provider === 'qoder' ? 'qoder-rs' : 'kiro-rs'
   const [view, setView] = useState<AdminView | null>(null)
   const webviewRef = useRef<HTMLElement & { reload: () => void }>(null)
 
@@ -81,9 +82,13 @@ export function KiroAdminPage({
             ? isEn
               ? 'Antigravity Proxy'
               : 'Antigravity 反代'
-            : isEn
-              ? 'Kiro Proxy'
-              : 'Kiro 反代'}
+            : provider === 'qoder'
+              ? isEn
+                ? 'Qoder Proxy'
+                : 'Qoder 反代'
+              : isEn
+                ? 'Kiro Proxy'
+                : 'Kiro 反代'}
         </span>
         <span className="type-code text-xs text-muted-foreground">{view?.url}</span>
         <div className="ml-auto flex gap-1">

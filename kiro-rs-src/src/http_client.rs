@@ -89,6 +89,29 @@ pub fn build_streaming_client(
     build_with(builder, proxy, tls_backend)
 }
 
+/// 携带长期凭证（PAT / refresh token）的上游专用：
+/// - 只信任编译进二进制的 webpki 根证书，不读系统钥匙串：本机被装上抓包 / MITM 根证书也解不开流量
+/// - 只允许 https：凭证不会走明文
+/// - 不跟随重定向：307/308 会把带凭证的请求体原样重放到别的主机
+fn credential_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_built_in_root_certs(false)
+        .tls_built_in_webpki_certs(true)
+}
+
+/// 凭证上游的普通请求客户端（固定 rustls，见 [`credential_builder`]）
+pub fn build_credential_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> anyhow::Result<Client> {
+    build_with(credential_builder().timeout(Duration::from_secs(timeout_secs)), proxy, TlsBackend::Rustls)
+}
+
+/// 凭证上游的流式客户端：只设读空闲超时（固定 rustls，见 [`credential_builder`]）
+pub fn build_credential_streaming_client(proxy: Option<&ProxyConfig>, idle_secs: u64) -> anyhow::Result<Client> {
+    build_with(credential_builder().read_timeout(Duration::from_secs(idle_secs)), proxy, TlsBackend::Rustls)
+}
+
 fn build_with(
     mut builder: reqwest::ClientBuilder,
     proxy: Option<&ProxyConfig>,
@@ -129,6 +152,26 @@ fn build_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 凭证客户端：明文 http 不发，3xx 不跟随（带凭证的请求体不会被重放到别的主机）
+    #[tokio::test]
+    async fn credential_client_refuses_plain_http_and_redirects() {
+        let client = build_credential_client(None, 5).unwrap();
+        let err = client.post("http://127.0.0.1:9/x").body("pt-secret").send().await.unwrap_err();
+        assert!(err.is_builder() || err.to_string().contains("scheme"), "{err}");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/", axum::routing::post(|| async {
+            (axum::http::StatusCode::TEMPORARY_REDIRECT, [("location", "https://evil.example/steal")])
+        }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // https_only 下无法直连本地 http 服务，改用不限协议但同样策略的构造验证重定向不被跟随
+        let plain = credential_builder().https_only(false).build().unwrap();
+        let resp = plain.post(format!("http://{addr}/")).body("pt-secret").send().await.unwrap();
+        assert_eq!(resp.status(), 307);
+        task.abort();
+    }
 
     #[test]
     fn test_proxy_config_new() {

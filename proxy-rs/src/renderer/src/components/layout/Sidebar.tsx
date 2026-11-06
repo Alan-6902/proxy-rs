@@ -13,7 +13,8 @@ import {
   ListChecks,
   LayoutDashboard,
   Sparkles,
-  Terminal
+  Terminal,
+  Bot
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -30,6 +31,7 @@ export type PageType =
   | 'configSync'
   | 'kiroAdmin'
   | 'antigravityAdmin'
+  | 'qoderAdmin'
   | 'kiroLogs'
   | 'logs'
   | 'settings'
@@ -51,6 +53,7 @@ const menuItemsConfig: { id: PageType; labelKey: string; icon: React.ElementType
   { id: 'configSync', labelKey: 'nav.configSync', icon: Archive },
   { id: 'kiroAdmin', labelKey: 'nav.kiroAdmin', icon: LayoutDashboard },
   { id: 'antigravityAdmin', labelKey: 'nav.antigravityAdmin', icon: Sparkles },
+  { id: 'qoderAdmin', labelKey: 'nav.qoderAdmin', icon: Bot },
   { id: 'kiroLogs', labelKey: 'nav.kiroLogs', icon: Terminal },
   { id: 'logs', labelKey: 'nav.logs', icon: ScrollText },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings },

@@ -689,6 +689,27 @@ pub fn classify_forbidden(body: &str) -> ForbiddenKind {
     }
 }
 
+/// 人工验证地址的字段名：403 的 `details[].metadata` 与 loadCodeAssist 的 `ineligibleTiers[]` 里都见过
+const VALIDATION_URL_KEYS: [&str; 2] = ["validationUrl", "validation_url"];
+
+/// 从错误体里找出需要用户在浏览器打开的验证地址；位置不固定，按字段名递归找
+pub fn validation_url(body: &str) -> Option<String> {
+    fn walk(v: &Value) -> Option<String> {
+        match v {
+            Value::Object(map) => map.iter().find_map(|(key, value)| {
+                if VALIDATION_URL_KEYS.contains(&key.as_str()) {
+                    value.as_str().filter(|s| s.starts_with("https://")).map(str::to_string)
+                } else {
+                    walk(value)
+                }
+            }),
+            Value::Array(items) => items.iter().find_map(walk),
+            _ => None,
+        }
+    }
+    walk(&serde_json::from_str::<Value>(body).ok()?)
+}
+
 /// 从 429 响应里解析上游建议的等待秒数
 pub fn parse_retry_delay_secs(body: &str) -> Option<f64> {
     if let Ok(v) = serde_json::from_str::<Value>(body) {
@@ -809,6 +830,19 @@ mod tests {
         let banned = r#"{"error":{"message":"This account has been disabled for violation of Terms of Service"}}"#;
         assert_eq!(classify_forbidden(banned), ForbiddenKind::Banned);
         assert_eq!(classify_forbidden("permission denied"), ForbiddenKind::Other);
+    }
+
+    #[test]
+    fn finds_validation_url_wherever_upstream_puts_it() {
+        let in_details = r#"{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED",
+            "metadata":{"validationUrl":"https://accounts.google.com/signin/continue?sarp=1"}}]}}"#;
+        assert_eq!(validation_url(in_details).as_deref(), Some("https://accounts.google.com/signin/continue?sarp=1"));
+        let in_tiers = r#"{"ineligibleTiers":[{"tierId":"free-tier","reasonCode":"VALIDATION_REQUIRED",
+            "validation_url":"https://accounts.google.com/x"}]}"#;
+        assert_eq!(validation_url(in_tiers).as_deref(), Some("https://accounts.google.com/x"));
+        assert_eq!(validation_url(r#"{"error":{"details":[{"reason":"VALIDATION_REQUIRED"}]}}"#), None);
+        assert_eq!(validation_url(r#"{"validationUrl":"javascript:alert(1)"}"#), None);
+        assert_eq!(validation_url("not json"), None);
     }
 
     #[test]

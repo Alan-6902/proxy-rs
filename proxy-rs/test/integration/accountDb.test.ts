@@ -362,7 +362,7 @@ describe('AccountDataBridge', () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
       return body.accountUuid === 'ok'
-        ? jsonResponse(200, { credentialId: 9, created: true })
+        ? jsonResponse(200, { credentialId: 9, created: true, replaced: false })
         : jsonResponse(400, { error: { message: 'nope' } })
     }) as unknown as typeof fetch
     const bridge = new AccountDataBridge(db, raw, { fetchImpl })

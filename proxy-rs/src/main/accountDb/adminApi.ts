@@ -1,6 +1,10 @@
 /**
  * 账号库模式下 proxy-rs 调 kiro-rs 的控制接口。数据从库里读，这里只发命令。
+ *
+ * 响应结构在 kiro-rs-src/src/admin/types.rs 用 Rust 定义，这里用 zod 按同样的形状校验：
+ * 两边各改各的时会在第一次调用就报「响应格式不符」，而不是把 undefined 一路带进账号库。
  */
+import { z, type ZodType } from 'zod'
 
 export interface KiroRsAdminTarget {
   /** 形如 http://127.0.0.1:12888/api/admin */
@@ -58,25 +62,77 @@ export async function adminRequest<T>(
   }
 }
 
-export interface StoreInfo {
-  enabled: boolean
-  databaseId?: string | null
-  path?: string | null
+/** 同 adminRequest，但响应必须符合 schema；不符合时抛 KiroRsAdminError 并带上路径与差异 */
+export async function adminRequestValidated<T>(
+  target: KiroRsAdminTarget,
+  path: string,
+  schema: ZodType<T>,
+  init: { method: string; body?: unknown } = { method: 'GET' },
+  fetchImpl: AdminFetch = fetch
+): Promise<T> {
+  const payload = await adminRequest<unknown>(target, path, init, fetchImpl)
+  const parsed = schema.safeParse(payload)
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .join('; ')
+    throw new KiroRsAdminError(`kiro-rs Admin 响应格式不符（${init.method} ${path}）：${issues}`)
+  }
+  return parsed.data
 }
+
+// ---- 响应 schema（与 admin/types.rs 的 *Response 一一对应；serde 把 Option::None 序列化为 null） ----
+
+/** GET /store/info ↔ StoreInfoResponse */
+export const StoreInfoSchema = z.object({
+  enabled: z.boolean(),
+  databaseId: z.string().nullish(),
+  path: z.string().nullish(),
+  externalRefreshCredentialId: z.number().nullish()
+})
+export type StoreInfo = z.infer<typeof StoreInfoSchema>
+
+/** POST /accounts/import ↔ ImportAccountResponse */
+export const ImportAccountSchema = z.object({
+  credentialId: z.number(),
+  created: z.boolean(),
+  replaced: z.boolean()
+})
+
+/** POST /credentials/:id/ensure-fresh ↔ EnsureFreshResponse */
+export const EnsureFreshSchema = z.object({ credentialVersion: z.number() })
+
+/** POST /accounts/adopt ↔ AdoptCredentialResponse */
+export const AdoptCredentialSchema = z.object({
+  /** adopted：已换成外部这份；current：库里已是这份；stale：外部更旧；not_found：不在库中 */
+  outcome: z.enum(['adopted', 'current', 'stale', 'not_found']),
+  credentialId: z.number().nullish(),
+  credentialVersion: z.number().nullish()
+})
+export type AdoptCredentialResult = z.infer<typeof AdoptCredentialSchema>
+
+/** PUT /accounts/external-refresh ↔ SetExternalRefreshResponse */
+export const SetExternalRefreshSchema = z.object({ credentialId: z.number().nullable() })
 
 export function fetchStoreInfo(
   target: KiroRsAdminTarget,
   fetchImpl?: AdminFetch
 ): Promise<StoreInfo> {
-  return adminRequest<StoreInfo>(target, '/store/info', { method: 'GET' }, fetchImpl)
+  return adminRequestValidated(target, '/store/info', StoreInfoSchema, { method: 'GET' }, fetchImpl)
 }
 
 export function importAccount(
   target: KiroRsAdminTarget,
   body: Record<string, unknown>,
   fetchImpl?: AdminFetch
-): Promise<{ credentialId: number; created: boolean }> {
-  return adminRequest(target, '/accounts/import', { method: 'POST', body }, fetchImpl)
+): Promise<z.infer<typeof ImportAccountSchema>> {
+  return adminRequestValidated(
+    target,
+    '/accounts/import',
+    ImportAccountSchema,
+    { method: 'POST', body },
+    fetchImpl
+  )
 }
 
 export async function purgeAccount(
@@ -112,20 +168,14 @@ export function ensureFresh(
   expectedCredentialVersion?: number,
   force = false,
   fetchImpl?: AdminFetch
-): Promise<{ credentialVersion: number }> {
-  return adminRequest(
+): Promise<z.infer<typeof EnsureFreshSchema>> {
+  return adminRequestValidated(
     target,
     `/credentials/${credentialId}/ensure-fresh`,
+    EnsureFreshSchema,
     { method: 'POST', body: { expectedCredentialVersion, force } },
     fetchImpl
   )
-}
-
-export interface AdoptCredentialResult {
-  /** adopted：已换成外部这份；current：库里已是这份；stale：外部更旧；not_found：不在库中 */
-  outcome: 'adopted' | 'current' | 'stale' | 'not_found'
-  credentialId?: number | null
-  credentialVersion?: number | null
 }
 
 /** 让 kiro-rs 收编 kiro-cli 自行刷新得到的凭据（按上游身份认账号） */
@@ -144,7 +194,13 @@ export function adoptCredential(
   },
   fetchImpl?: AdminFetch
 ): Promise<AdoptCredentialResult> {
-  return adminRequest(target, '/accounts/adopt', { method: 'POST', body }, fetchImpl)
+  return adminRequestValidated(
+    target,
+    '/accounts/adopt',
+    AdoptCredentialSchema,
+    { method: 'POST', body },
+    fetchImpl
+  )
 }
 
 /**
@@ -155,10 +211,11 @@ export function setExternalRefreshAccount(
   target: KiroRsAdminTarget,
   accountUuid: string | null,
   fetchImpl?: AdminFetch
-): Promise<{ credentialId: number | null }> {
-  return adminRequest(
+): Promise<z.infer<typeof SetExternalRefreshSchema>> {
+  return adminRequestValidated(
     target,
     '/accounts/external-refresh',
+    SetExternalRefreshSchema,
     { method: 'PUT', body: { accountUuid } },
     fetchImpl
   )

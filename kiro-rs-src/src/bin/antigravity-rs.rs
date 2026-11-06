@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use kiro_rs::{
-    antigravity::{self, AgStore, AntigravityProvider},
+    antigravity::{self, AgStore, AntigravityProvider, OAuthClient},
     common::websearch_relay::WebSearchRelay,
     http_client::ProxyConfig,
     model::{arg::AntigravityArgs, config::Config},
@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(port != 0, "Antigravity 监听端口不能为 0");
     let api_key = config.api_key.as_deref().filter(|key| !key.trim().is_empty())
         .context("配置文件中未设置 apiKey（或为空）")?;
+    let oauth = OAuthClient::from_config(&config)?;
     let proxy = config.proxy_url.as_ref().map(|url| {
         let mut proxy = ProxyConfig::new(url);
         if let (Some(username), Some(password)) = (&config.proxy_username, &config.proxy_password) {
@@ -45,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Antigravity 监听 {addr} 失败"))?;
     let store = Arc::new(AgStore::open_or_create(&args.antigravity_db)
         .context("打开 Antigravity 账号库失败")?);
-    let provider = Arc::new(AntigravityProvider::new(store, proxy.as_ref(), config.tls_backend)
+    let provider = Arc::new(AntigravityProvider::new(store, proxy.as_ref(), config.tls_backend, oauth)
         .context("创建 Antigravity Provider 失败")?);
     provider.start_background_tasks();
     // WebSearch 子请求交给本机 kiro-rs（同一份配置里的 host/port/apiKey）真搜

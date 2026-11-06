@@ -11,10 +11,10 @@ use serde_json::{Value, json};
 use super::consts::{
     AICODE_FETCH_CONFIG_URLS, AICODE_FETCH_LICENSES_URLS, AICODE_FETCH_QUOTA_URLS,
     DEFAULT_USER_TIER, FETCH_MODELS_URLS, HUB_MANIFEST_URL, HUB_MANIFEST_USER_AGENT, IDE_TYPE,
-    LOAD_CODE_ASSIST_URLS, MIN_CLIENT_VERSION, OAUTH_AUTH_URL, OAUTH_CLIENT_ID,
-    OAUTH_CLIENT_SECRET, OAUTH_SCOPES, OAUTH_TOKEN_URL, QUOTA_SUMMARY_URLS, TIER_ID_PRO,
-    TIER_ID_ULTRA, USERINFO_URL,
+    LOAD_CODE_ASSIST_URLS, MIN_CLIENT_VERSION, OAUTH_AUTH_URL, OAUTH_SCOPES, OAUTH_TOKEN_URL,
+    QUOTA_SUMMARY_URLS, TIER_ID_PRO, TIER_ID_ULTRA, USERINFO_URL,
 };
+use crate::model::config::Config;
 
 const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
 const GRANT_REFRESH_TOKEN: &str = "refresh_token";
@@ -198,13 +198,55 @@ pub struct UserInfo {
     pub name: Option<String>,
 }
 
-pub fn auth_url(redirect_uri: &str, state: &str) -> String {
+/// Antigravity 桌面端的 OAuth 客户端（installed-app 类型）。
+///
+/// 不内置在源码里：代码托管平台的密钥扫描会把它当作泄露拦下 push，
+/// 改由配置文件的 `antigravityOauthClientId` / `antigravityOauthClientSecret` 提供。
+#[derive(Clone)]
+pub struct OAuthClient {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl OAuthClient {
+    /// 两项都必须非空，缺任一项 antigravity-rs 都无法登录或刷新 token
+    pub fn from_config(config: &Config) -> anyhow::Result<Self> {
+        let required = |value: Option<&str>, key: &str| {
+            value
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("配置文件中未设置 {key}（Antigravity 桌面端的 OAuth 客户端，见 config.example.json）"))
+        };
+        Ok(Self {
+            client_id: required(config.antigravity_oauth_client_id.as_deref(), "antigravityOauthClientId")?,
+            client_secret: required(config.antigravity_oauth_client_secret.as_deref(), "antigravityOauthClientSecret")?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self { client_id: "test-client-id".into(), client_secret: "test-client-secret".into() }
+    }
+}
+
+/// 日志里不回显 secret
+impl std::fmt::Debug for OAuthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClient")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"***")
+            .finish()
+    }
+}
+
+pub fn auth_url(oauth: &OAuthClient, redirect_uri: &str, state: &str) -> String {
     let params = [
         ("access_type", "offline"),
         ("scope", &OAUTH_SCOPES.join(" ")),
         ("prompt", "consent"),
         ("response_type", "code"),
-        ("client_id", OAUTH_CLIENT_ID),
+        ("client_id", oauth.client_id.as_str()),
         ("redirect_uri", redirect_uri),
         ("include_granted_scopes", "true"),
         ("state", state),
@@ -216,10 +258,15 @@ pub fn auth_url(redirect_uri: &str, state: &str) -> String {
     format!("{OAUTH_AUTH_URL}?{}", query.join("&"))
 }
 
-pub async fn exchange_code(client: &Client, code: &str, redirect_uri: &str) -> anyhow::Result<TokenResponse> {
+pub async fn exchange_code(
+    client: &Client,
+    oauth: &OAuthClient,
+    code: &str,
+    redirect_uri: &str,
+) -> anyhow::Result<TokenResponse> {
     let form = [
-        ("client_id", OAUTH_CLIENT_ID),
-        ("client_secret", OAUTH_CLIENT_SECRET),
+        ("client_id", oauth.client_id.as_str()),
+        ("client_secret", oauth.client_secret.as_str()),
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("grant_type", GRANT_AUTHORIZATION_CODE),
@@ -227,10 +274,14 @@ pub async fn exchange_code(client: &Client, code: &str, redirect_uri: &str) -> a
     post_token_form(client, &form).await
 }
 
-pub async fn refresh_access_token(client: &Client, refresh_token: &str) -> anyhow::Result<TokenResponse> {
+pub async fn refresh_access_token(
+    client: &Client,
+    oauth: &OAuthClient,
+    refresh_token: &str,
+) -> anyhow::Result<TokenResponse> {
     let form = [
-        ("client_id", OAUTH_CLIENT_ID),
-        ("client_secret", OAUTH_CLIENT_SECRET),
+        ("client_id", oauth.client_id.as_str()),
+        ("client_secret", oauth.client_secret.as_str()),
         ("refresh_token", refresh_token),
         ("grant_type", GRANT_REFRESH_TOKEN),
     ];
@@ -873,10 +924,30 @@ mod tests {
 
     #[test]
     fn auth_url_encodes_scopes_and_redirect() {
-        let url = auth_url("http://127.0.0.1:5000/oauth-callback", "st");
+        let url = auth_url(&OAuthClient::for_tests(), "http://127.0.0.1:5000/oauth-callback", "st");
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2Foauth-callback"));
         assert!(url.contains("access_type=offline"));
         assert!(url.contains("state=st"));
+        assert!(url.contains("client_id=test-client-id"));
+    }
+
+    #[test]
+    fn oauth_client_requires_both_config_keys() {
+        let mut config = Config::default();
+        let err = OAuthClient::from_config(&config).unwrap_err().to_string();
+        assert!(err.contains("antigravityOauthClientId"), "{err}");
+
+        config.antigravity_oauth_client_id = Some("id.apps.googleusercontent.com".into());
+        config.antigravity_oauth_client_secret = Some("   ".into());
+        let err = OAuthClient::from_config(&config).unwrap_err().to_string();
+        assert!(err.contains("antigravityOauthClientSecret"), "{err}");
+
+        config.antigravity_oauth_client_secret = Some(" secret ".into());
+        let oauth = OAuthClient::from_config(&config).unwrap();
+        assert_eq!(oauth.client_id, "id.apps.googleusercontent.com");
+        assert_eq!(oauth.client_secret, "secret");
+        let debug = format!("{oauth:?}");
+        assert!(debug.contains("***") && !debug.contains("\"secret\""), "{debug}");
     }
 
     #[test]

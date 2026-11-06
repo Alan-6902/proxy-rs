@@ -33,6 +33,7 @@ use axum::{
 };
 
 pub use admin::create_admin_router;
+pub use client::OAuthClient;
 pub use provider::AntigravityProvider;
 pub use store::AgStore;
 
@@ -105,6 +106,7 @@ mod tests {
             Arc::new(AgStore::open_or_create(&directory.join(DEFAULT_DB_FILE_NAME)).unwrap()),
             None,
             TlsBackend::Rustls,
+            OAuthClient::for_tests(),
         ).unwrap());
         // 假 kiro-rs 接收 WebSearch 子请求；其余请求不经过它
         let (fake_kiro_url, fake_kiro) = crate::common::websearch_relay::tests::fake_kiro().await;

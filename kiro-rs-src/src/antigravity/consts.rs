@@ -1,8 +1,6 @@
 //! Antigravity（Google cloudcode-pa v1internal）协议常量
-
-/// Antigravity 桌面端的 OAuth 客户端（installed-app 类型，公开常量）
-pub const OAUTH_CLIENT_ID: &str = "";
-pub const OAUTH_CLIENT_SECRET: &str = "";
+//!
+//! OAuth 客户端 ID / Secret 不放在这里：由配置文件提供，见 `client::OAuthClient`。
 
 pub const OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";

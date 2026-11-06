@@ -43,6 +43,17 @@ pub struct Config {
     #[serde(default = "default_qoder_port")]
     pub qoder_port: u16,
 
+    /// Antigravity 桌面端的 OAuth Client ID（installed-app 类型）。
+    /// 不内置在源码里，antigravity-rs 启动时必须提供
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antigravity_oauth_client_id: Option<String>,
+
+    /// Antigravity 桌面端的 OAuth Client Secret，与 `antigravity_oauth_client_id` 配对
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antigravity_oauth_client_secret: Option<String>,
+
     #[serde(default = "default_region")]
     pub region: String,
 
@@ -221,6 +232,8 @@ impl Default for Config {
             port: default_port(),
             antigravity_port: default_antigravity_port(),
             qoder_port: default_qoder_port(),
+            antigravity_oauth_client_id: None,
+            antigravity_oauth_client_secret: None,
             region: default_region(),
             auth_region: None,
             api_region: None,

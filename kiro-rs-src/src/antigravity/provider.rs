@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::client::{self, ForbiddenKind, RateLimitKind, UpstreamError};
+use super::client::{self, ForbiddenKind, OAuthClient, RateLimitKind, UpstreamError};
 use super::consts::{
     ACCOUNT_SWITCH_DELAY_MS, ACCOUNT_SWITCH_JITTER_MS, AICODE_GENERATE_BASE_URLS, API_TIMEOUT_SECS,
     CAPACITY_COOLDOWN_SECS, COUNTS_FLUSH_SECS, DEFAULT_COOLDOWN_SECS, ENDPOINT_SWITCH_DELAY_MS,
@@ -119,6 +119,8 @@ pub struct AntigravityProvider {
     store: Arc<AgStore>,
     api_client: Client,
     generate_client: Client,
+    /// 登录与刷新 token 用的 OAuth 客户端，来自配置文件
+    oauth: OAuthClient,
     /// (账号, 模型) → 冷却到期时刻；额度按模型计，一个模型限流不影响同号的其它模型
     cooldowns: Mutex<HashMap<(i64, String), Instant>>,
     /// 账号 → 冷却到期时刻；403 这类账号级问题，所有模型一起停
@@ -145,11 +147,17 @@ fn ladder_secs(ladder: &[u64], step: usize) -> f64 {
 }
 
 impl AntigravityProvider {
-    pub fn new(store: Arc<AgStore>, proxy: Option<&ProxyConfig>, tls_backend: TlsBackend) -> anyhow::Result<Self> {
+    pub fn new(
+        store: Arc<AgStore>,
+        proxy: Option<&ProxyConfig>,
+        tls_backend: TlsBackend,
+        oauth: OAuthClient,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             store,
             api_client: build_client(proxy, API_TIMEOUT_SECS, tls_backend)?,
             generate_client: build_streaming_client(proxy, GENERATE_READ_IDLE_SECS, tls_backend)?,
+            oauth,
             cooldowns: Mutex::new(HashMap::new()),
             account_cooldowns: Mutex::new(HashMap::new()),
             failure_streaks: Mutex::new(HashMap::new()),
@@ -481,7 +489,7 @@ impl AntigravityProvider {
                 return Ok(token);
             }
         }
-        match client::refresh_access_token(&self.api_client, &current.refresh_token).await {
+        match client::refresh_access_token(&self.api_client, &self.oauth, &current.refresh_token).await {
             Ok(t) => {
                 let expires_at = now_ms() + t.expires_in * 1000;
                 self.store
@@ -817,7 +825,7 @@ impl AntigravityProvider {
         let redirect_uri = format!("http://127.0.0.1:{port}{OAUTH_CALLBACK_PATH}");
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let state = uuid::Uuid::new_v4().simple().to_string();
-        let auth_url = client::auth_url(&redirect_uri, &state);
+        let auth_url = client::auth_url(&self.oauth, &redirect_uri, &state);
         self.set_oauth_status(
             &session_id,
             OAuthSessionView { status: OAuthStatus::Pending, email: None, error: None },
@@ -881,7 +889,7 @@ impl AntigravityProvider {
             anyhow::bail!("Google 拒绝授权: {err}");
         }
         let code = params.get("code").filter(|c| !c.is_empty()).ok_or_else(|| anyhow::anyhow!("回调缺少授权码"))?;
-        let tokens = client::exchange_code(&self.api_client, code, redirect_uri).await?;
+        let tokens = client::exchange_code(&self.api_client, &self.oauth, code, redirect_uri).await?;
         let refresh_token = tokens
             .refresh_token
             .clone()
@@ -948,7 +956,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let provider = AntigravityProvider::new(store, None, TlsBackend::Rustls).unwrap();
+        let provider = AntigravityProvider::new(store, None, TlsBackend::Rustls, OAuthClient::for_tests()).unwrap();
         (TempDb(dir), provider, ids)
     }
 

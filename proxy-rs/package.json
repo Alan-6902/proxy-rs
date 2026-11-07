@@ -4,6 +4,9 @@
   "description": "Proxy RS - Local multi-account management desktop application",
   "main": "./out/main/index.js",
   "author": "Proxy RS",
+  "engines": {
+    "node": "22.x"
+  },
   "license": "AGPL-3.0",
   "scripts": {
     "format": "prettier --write .",

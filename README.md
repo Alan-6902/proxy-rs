@@ -12,6 +12,8 @@
 
 ## 开发
 
+Node 固定用 22（见 `.nvmrc`；Node 26 下 Electron 的安装脚本会静默跳过二进制下载）。
+
 ```bash
 # 桌面端
 cd proxy-rs && npm ci

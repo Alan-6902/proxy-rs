@@ -7,7 +7,25 @@
  * better-sqlite3 与 cbor-extract 都带 Node-API 预编译包，Electron 可直接加载，不需要重建。
  */
 import { spawnSync } from 'node:child_process'
-import electron from 'electron'
+import { createRequire } from 'node:module'
+
+// 本仓库按 Node 22 验证。Node 26 下 electron 的 postinstall（install.js）会直接退出而不解压二进制，
+// 之后 require('electron') 抛 "Electron failed to install correctly"。这里把原因说清楚，省得排查。
+const SUPPORTED_NODE_MAJOR = 22
+const nodeMajor = Number(process.versions.node.split('.')[0])
+let electron
+try {
+  electron = createRequire(import.meta.url)('electron')
+} catch (error) {
+  console.error('[postinstall] 无法加载 electron：', error instanceof Error ? error.message : error)
+  if (nodeMajor !== SUPPORTED_NODE_MAJOR) {
+    console.error(
+      `[postinstall] 当前 Node ${process.versions.node}；electron 的安装脚本在 Node ${SUPPORTED_NODE_MAJOR} 之外可能静默跳过二进制下载。` +
+        `请切到 Node ${SUPPORTED_NODE_MAJOR}（见 .nvmrc）后执行：node node_modules/electron/install.js`
+    )
+  }
+  process.exit(1)
+}
 
 const probe = `
   const Database = require('better-sqlite3')

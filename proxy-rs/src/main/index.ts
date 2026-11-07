@@ -3077,23 +3077,33 @@ function unregisterProtocol(): void {
   console.log(`[Protocol] Unregistered ${PROTOCOL_PREFIX}:// protocol`)
 }
 
-// 处理协议 URL (用于 OAuth 回调)
+/**
+ * 处理 OAuth 回调 URL：内置无痕浏览器拦下的社交登录回调（kiro://…/authenticate-success），
+ * 以及系统交给本应用协议（proxy-rs://auth/…）的回调。两种都交给渲染层的社交登录流程收尾。
+ */
 function handleProtocolUrl(url: string): void {
-  if (!url.startsWith(`${PROTOCOL_PREFIX}://`)) return
+  if (!isAppCallbackUrl(url)) return
 
   try {
     const urlObj = new URL(url)
-    const pathname = urlObj.pathname.replace(/^\/+/, '')
+    if (!url.includes('authenticate-success') && !url.includes('auth')) return
 
-    // 处理 auth 回调
-    if (pathname === 'auth/callback' || urlObj.host === 'auth') {
-      const code = urlObj.searchParams.get('code')
-      const state = urlObj.searchParams.get('state')
-
-      if (code && state && mainWindow) {
-        mainWindow.webContents.send(IPC_EVENT.authCallback, { code, state })
+    const error = urlObj.searchParams.get('error')
+    if (error) {
+      console.log('[Login] Auth callback error:', error)
+      if (mainWindow) {
+        mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { error })
         mainWindow.focus()
       }
+      return
+    }
+
+    const code = urlObj.searchParams.get('code')
+    const state = urlObj.searchParams.get('state')
+    if (code && state && mainWindow) {
+      console.log('[Login] Auth callback received, code:', code.substring(0, 20) + '...')
+      mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { code, state })
+      mainWindow.focus()
     }
   } catch (error) {
     console.error('Failed to parse protocol URL:', error)
@@ -6775,45 +6785,6 @@ app.whenReady().then(async () => {
       }
     }
   })
-
-  // 更新协议处理函数以支持 Social Auth 回调
-  const originalHandleProtocolUrl = handleProtocolUrl
-  // @ts-ignore - 重新定义协议处理
-  handleProtocolUrl = (url: string): void => {
-    if (!isAppCallbackUrl(url)) return
-
-    try {
-      const urlObj = new URL(url)
-
-      // 处理 Social Auth 回调
-      if (url.includes('authenticate-success') || url.includes('auth')) {
-        const code = urlObj.searchParams.get('code')
-        const state = urlObj.searchParams.get('state')
-        const error = urlObj.searchParams.get('error')
-
-        if (error) {
-          console.log('[Login] Auth callback error:', error)
-          if (mainWindow) {
-            mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { error })
-            mainWindow.focus()
-          }
-          return
-        }
-
-        if (code && state && mainWindow) {
-          console.log('[Login] Auth callback received, code:', code.substring(0, 20) + '...')
-          mainWindow.webContents.send(IPC_EVENT.socialAuthCallback, { code, state })
-          mainWindow.focus()
-        }
-        return
-      }
-
-      // 调用原始处理函数处理其他协议
-      originalHandleProtocolUrl(url)
-    } catch (error) {
-      console.error('Failed to parse protocol URL:', error)
-    }
-  }
 
   createWindow()
 

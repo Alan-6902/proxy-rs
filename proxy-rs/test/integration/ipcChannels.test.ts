@@ -30,12 +30,6 @@ function keys(source: string, pattern: RegExp): Set<string> {
   return new Set(Array.from(source.matchAll(pattern), (m) => m[1]))
 }
 
-/** 主进程发出但目前没有任何监听者的事件；新增条目前先确认确实无人需要 */
-const MAIN_ONLY_EVENTS = new Set<keyof typeof IPC_EVENT>([
-  // proxy-rs://auth/callback 协议回调：handleProtocolUrl 会发，但社交登录实际走 socialAuthCallback
-  'authCallback'
-])
-
 describe('IPC 通道两侧对账', () => {
   it('每个请求通道在 preload 有 invoke、在 main 有 handle', () => {
     const handled = keys(mainSource, /ipcMain\.handle\(\s*IPC\.(\w+)/g)
@@ -56,7 +50,7 @@ describe('IPC 通道两侧对账', () => {
     ).toEqual([])
   })
 
-  it('每个事件通道两侧都有收发（显式登记的单侧事件除外）', () => {
+  it('每个事件通道两侧都有收发', () => {
     const sentByMain = keys(
       mainSource,
       /(?:webContents\.send|sendRendererEvent|ipcMain\.on)\(\s*IPC_EVENT\.(\w+)/g
@@ -71,9 +65,7 @@ describe('IPC 通道两侧对账', () => {
       'preload 用了但 main 没有'
     ).toEqual([])
     expect(
-      [...sentByMain].filter(
-        (k) => !usedByPreload.has(k) && !MAIN_ONLY_EVENTS.has(k as keyof typeof IPC_EVENT)
-      ),
+      [...sentByMain].filter((k) => !usedByPreload.has(k)),
       'main 发了但 preload 没监听'
     ).toEqual([])
     expect(

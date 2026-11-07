@@ -61,7 +61,6 @@ export const IPC_EVENT = {
   accountDbChanged: 'account-db-changed',
   accountDbStatus: 'account-db-status',
   adminManagedChanged: 'admin-managed-changed',
-  authCallback: 'auth-callback',
   backgroundCheckResult: 'background-check-result',
   backgroundRefreshResult: 'background-refresh-result',
   closeConfirmResponse: 'close-confirm-response',

@@ -5,6 +5,7 @@ import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useEscapeClose } from '@/hooks/useEscapeClose'
 import type { Account, AccountTag } from '@/types/account'
+import { toRgba } from './_helpers'
 import { X, Plus, Edit2, Trash2, Tag, Check, Palette } from 'lucide-react'
 
 interface TagManageDialogProps {
@@ -46,16 +47,6 @@ function toArgb(rgb: string, alpha: number): string {
   const hex = rgb.startsWith('#') ? rgb.slice(1) : rgb
   const alphaHex = Math.round(alpha).toString(16).padStart(2, '0')
   return `#${alphaHex}${hex}`
-}
-
-// 转换为 CSS rgba
-function toRgba(argbColor: string): string {
-  const { alpha, rgb } = parseArgb(argbColor)
-  const hex = rgb.startsWith('#') ? rgb.slice(1) : rgb
-  const r = parseInt(hex.slice(0, 2), 16)
-  const g = parseInt(hex.slice(2, 4), 16)
-  const b = parseInt(hex.slice(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, ${alpha / 255})`
 }
 
 export function TagManageDialog({ isOpen, onClose }: TagManageDialogProps): React.ReactNode {

@@ -3,6 +3,7 @@ use kiro_rs::{admin, admin_ui, anthropic, http_client, kiro, model, runtime, tok
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::routing::get;
 use clap::Parser;
 use kiro::account_store::{self, AccountStore};
 use kiro::endpoint::{AmazonQEndpoint, IdeEndpoint, KiroEndpoint};
@@ -316,6 +317,8 @@ async fn main() {
             tracing::info!("Admin UI 已启用: /admin");
             anthropic_app
                 .nest("/api/admin", admin_app)
+                // nest 不匹配带尾斜杠的 /admin/，与 AG / Qoder 服务一样显式跳回 /admin
+                .route("/admin/", get(|| async { axum::response::Redirect::temporary("/admin") }))
                 .nest("/admin", admin_ui_app)
         }
     } else {

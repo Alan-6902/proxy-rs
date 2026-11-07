@@ -20,10 +20,13 @@ function legacyPath(dir: string): string {
   return path.join(dir, LEGACY_JSON_NAME)
 }
 
-/** safeStorage 是否真正可用（部分 Linux 环境无密钥环时返回 false） */
-export function isSecureBackupAvailable(): boolean {
+/**
+ * safeStorage 是否真正可用（部分 Linux 环境无密钥环时返回 false）。
+ * 同步版 isEncryptionAvailable / encryptString / decryptString 自 Electron 45 弃用、46 移除，这里统一用异步版。
+ */
+export async function isSecureBackupAvailable(): Promise<boolean> {
   try {
-    return safeStorage.isEncryptionAvailable()
+    return await safeStorage.isAsyncEncryptionAvailable()
   } catch {
     return false
   }
@@ -32,8 +35,8 @@ export function isSecureBackupAvailable(): boolean {
 /** 写备份：优先加密；不可用则退回明文 JSON 以保证容灾不丢 */
 export async function writeSecureBackup(dir: string, data: unknown): Promise<void> {
   const json = JSON.stringify(data)
-  if (isSecureBackupAvailable()) {
-    const enc = safeStorage.encryptString(json)
+  if (await isSecureBackupAvailable()) {
+    const enc = await safeStorage.encryptStringAsync(json)
     await fs.writeFile(encPath(dir), enc)
     // 清理旧的明文备份，避免明文长期残留
     try {
@@ -50,10 +53,11 @@ export async function writeSecureBackup(dir: string, data: unknown): Promise<voi
 /** 读备份：优先解密 .enc，失败再读旧明文 .json。返回 null 表示无可用备份 */
 export async function readSecureBackup(dir: string): Promise<unknown | null> {
   // 1) 加密备份
-  if (isSecureBackupAvailable()) {
+  if (await isSecureBackupAvailable()) {
     try {
       const buf = await fs.readFile(encPath(dir))
-      const json = safeStorage.decryptString(buf)
+      // 同步版 encryptString 写出的旧备份，异步版同样能解
+      const { result: json } = await safeStorage.decryptStringAsync(buf)
       return JSON.parse(json)
     } catch {
       /* .enc 不存在或解密失败 → 尝试明文 */

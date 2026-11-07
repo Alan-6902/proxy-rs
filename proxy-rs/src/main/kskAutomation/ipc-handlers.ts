@@ -10,7 +10,7 @@ import type { LocalAdminPushCandidate, LocalAdminPushResult } from '../../shared
 import {
   createKskAutomationTask,
   deleteKskAutomationTask,
-  isKskAutomationStoreAvailable,
+  probeKskAutomationStoreAvailability,
   loadKskAutomationStore,
   loadKskAutomationTask,
   normalizeKskAutomationConfig,
@@ -203,7 +203,7 @@ export function registerKskAutomationIpcHandlers(deps: KskAutomationIpcDeps): vo
     KSK_AUTOMATION_CHANNEL.create,
     async (_event, input: KskAutomationTaskInput): Promise<IpcResult<KskAutomationTaskView[]>> => {
       try {
-        if (!isKskAutomationStoreAvailable()) throw new Error('系统加密存储不可用')
+        if (!(await probeKskAutomationStoreAvailability())) throw new Error('系统加密存储不可用')
         const task: PersistedKskAutomationTask = {
           id: randomUUID(),
           name: input.name.trim(),

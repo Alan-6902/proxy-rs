@@ -91,6 +91,10 @@ export class LocalNotificationService {
           /* notification clicks must not affect app flow */
         }
       })
+      // Electron 42 起 macOS 走 UNNotification：应用未签名时不弹窗而是触发 failed，记下来便于排查
+      notification.on('failed', (_event, error) => {
+        console.warn(`[Notify] 系统通知发送失败（${kind}）：${error}`)
+      })
       notification.show()
       this.lastSentAt.set(dedupKey, now)
       this.recentNoticeTimes.push(now)

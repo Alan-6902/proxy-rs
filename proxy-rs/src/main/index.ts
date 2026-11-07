@@ -2597,7 +2597,7 @@ async function writeBackupNow(): Promise<void> {
     const { writeSecureBackup, isSecureBackupAvailable } = await import('./secureBackup')
     await writeSecureBackup(path.dirname(store.path), data)
     console.log(
-      `[Backup] Data backup created (${isSecureBackupAvailable() ? 'encrypted' : 'plaintext-fallback'})`
+      `[Backup] Data backup created (${(await isSecureBackupAvailable()) ? 'encrypted' : 'plaintext-fallback'})`
     )
   } catch (error) {
     console.error('[Backup] Failed to create backup:', error)

@@ -5,25 +5,33 @@
  * 原来的 `electron-builder install-app-deps` 会按 Electron ABI 从源码重建原生模块，
  * 在 Python 3.12+（无 distutils）下直接失败，且会先清掉已有的构建产物。
  * better-sqlite3 与 cbor-extract 都带 Node-API 预编译包，Electron 可直接加载，不需要重建。
+ *
+ * Electron 42 起不再在 postinstall 里下载二进制，而是首次运行时按需下载；
+ * 这里先显式跑一次 install-electron（已安装则秒退），再用它加载 better-sqlite3 探测。
  */
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 
-// 本仓库按 Node 22 验证。Node 26 下 electron 的 postinstall（install.js）会直接退出而不解压二进制，
-// 之后 require('electron') 抛 "Electron failed to install correctly"。这里把原因说清楚，省得排查。
-const SUPPORTED_NODE_MAJOR = 22
-const nodeMajor = Number(process.versions.node.split('.')[0])
+const require = createRequire(import.meta.url)
+
+const installed = spawnSync(process.execPath, [require.resolve('electron/install.js')], {
+  stdio: 'inherit'
+})
+if (installed.status !== 0) {
+  console.error(
+    '[postinstall] 下载 Electron 二进制失败（见上方输出）；可稍后手动执行：npx install-electron'
+  )
+  process.exit(1)
+}
+
 let electron
 try {
-  electron = createRequire(import.meta.url)('electron')
+  electron = require('electron')
 } catch (error) {
   console.error('[postinstall] 无法加载 electron：', error instanceof Error ? error.message : error)
-  if (nodeMajor !== SUPPORTED_NODE_MAJOR) {
-    console.error(
-      `[postinstall] 当前 Node ${process.versions.node}；electron 的安装脚本在 Node ${SUPPORTED_NODE_MAJOR} 之外可能静默跳过二进制下载。` +
-        `请切到 Node ${SUPPORTED_NODE_MAJOR}（见 .nvmrc）后执行：node node_modules/electron/install.js`
-    )
-  }
+  console.error(
+    `[postinstall] 当前 Node ${process.versions.node}；本仓库按 Node 22（见 .nvmrc）验证，换到该版本后重试：npx install-electron`
+  )
   process.exit(1)
 }
 

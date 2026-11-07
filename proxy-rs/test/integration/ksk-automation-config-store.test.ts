@@ -10,9 +10,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/proxy-rs-config-test' },
   safeStorage: {
-    isEncryptionAvailable: () => true,
-    decryptString: mocks.decryptString,
-    encryptString: mocks.encryptString
+    isAsyncEncryptionAvailable: async () => true,
+    decryptStringAsync: async (buf: Buffer) => ({ result: mocks.decryptString(buf) }),
+    encryptStringAsync: async (value: string) => mocks.encryptString(value)
   }
 }))
 

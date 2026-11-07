@@ -12,7 +12,7 @@
 
 ## 开发
 
-Node 固定用 22（见 `.nvmrc`；Node 26 下 Electron 的安装脚本会静默跳过二进制下载）。
+Node 固定用 22（见 `.nvmrc`）。Electron 45 起二进制在 `npm ci` 的 postinstall 里按需下载（`npx install-electron`），运行要求 macOS 13+。
 
 ```bash
 # 桌面端

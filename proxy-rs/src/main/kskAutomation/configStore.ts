@@ -204,19 +204,33 @@ export function normalizeKskAutomationStorePayload(
   }
 }
 
-export function isKskAutomationStoreAvailable(): boolean {
+/**
+ * safeStorage 可用性。同步版 isEncryptionAvailable / encryptString / decryptString 自 Electron 45 弃用、46 移除，
+ * 只能异步探测；视图构造函数是同步的，所以把最近一次探测结果缓存起来——
+ * 所有读写路径（load / save）每次都先 probe 再用，视图里读到的总是本次请求刚探测过的值。
+ */
+let encryptionAvailable = false
+
+export async function probeKskAutomationStoreAvailability(): Promise<boolean> {
   try {
-    return safeStorage.isEncryptionAvailable()
+    encryptionAvailable = await safeStorage.isAsyncEncryptionAvailable()
   } catch {
-    return false
+    encryptionAvailable = false
   }
+  return encryptionAvailable
+}
+
+/** 最近一次 probeKskAutomationStoreAvailability 的结果 */
+export function isKskAutomationStoreAvailable(): boolean {
+  return encryptionAvailable
 }
 
 export async function loadKskAutomationStore(): Promise<PersistedKskAutomationStore> {
-  if (!isKskAutomationStoreAvailable()) return emptyStore()
+  if (!(await probeKskAutomationStoreAvailability())) return emptyStore()
   try {
     const encrypted = await fs.readFile(storePath())
-    return normalizeKskAutomationStorePayload(JSON.parse(safeStorage.decryptString(encrypted)))
+    const { result: json } = await safeStorage.decryptStringAsync(encrypted)
+    return normalizeKskAutomationStorePayload(JSON.parse(json))
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyStore()
     throw new Error('自动任务配置无法解密或已损坏，已拒绝用空配置覆盖原文件')
@@ -230,10 +244,10 @@ export async function loadKskAutomationTask(
 }
 
 async function saveStore(store: PersistedKskAutomationStore): Promise<void> {
-  if (!isKskAutomationStoreAvailable()) {
+  if (!(await probeKskAutomationStoreAvailability())) {
     throw new Error('系统加密存储不可用，拒绝明文保存 Provider URL、SMTP 密码或 Admin API Key')
   }
-  const encrypted = safeStorage.encryptString(JSON.stringify(store))
+  const encrypted = await safeStorage.encryptStringAsync(JSON.stringify(store))
   await fs.writeFile(storePath(), encrypted, { mode: 0o600 })
 }
 
